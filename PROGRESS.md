@@ -154,9 +154,20 @@ Phase 2's precomputed version rather than something to throw away.
   `FieldCache` already counts samples across launches.
 - `mistytunec` renders on the **CPU only**. The GPU path there needs device
   allocation and a copy back, which arrives with the EXR bake.
-- `tests/golden/` **does not exist yet**. It is due in the same week as the
-  kernel port, and the determinism tripwires (same inputs twice, differing worker
-  counts) live in it.
+- `tests/golden/` **exists and is green**, built against the CPU reference. Three
+  fixed scenes at 128×72 (midday, sunset, horizon) compared with a tolerance of
+  2/255, plus the three determinism tripwires. It needs no GPU and no AE, so it
+  runs everywhere the unit tests do.
+
+  Verified to go red as well as green: a one-degree change in sun elevation
+  trips it (max 5), and so does rendering one fewer sample (max 8). That second
+  case is why the comparison is on the **maximum** per-channel difference and not
+  the mean — its mean was 0.031, which any mean-based threshold would have waved
+  through.
+
+  When the real kernel lands, the same scenes gain a GPU-versus-CPU comparison;
+  that is the cross-platform-divergence half the tier exists for and it cannot be
+  written until there is a second path to compare against.
 - Output is **PPM**, not EXR — dependency-free and byte-comparable, but it throws
   away exactly the HDR the renderer exists to produce.
 

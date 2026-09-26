@@ -169,6 +169,18 @@ add_subdirectory(src/engine)
 # and PLAN.md's "One kernel source". No-ops into a stub when CUDA is absent.
 add_subdirectory(src/kernel)
 
+# The headless renderer: golden images, profiling, EXR bakes.
+#
+# BUILT IN THE SAME WEEK AS THE KERNEL, per PLAN.md, and not as a later
+# convenience. A GPU path tracer that can only run inside After Effects cannot be
+# golden-imaged, profiled or bisected -- so the CLI is the test harness first and
+# the EXR bake feature second.
+#
+# BEFORE add_subdirectory(tests), and that ordering is load-bearing:
+# tests/golden/ renders through this target, and CMake needs the target to exist
+# before a test can name it.
+add_subdirectory(src/cli)
+
 enable_testing()
 add_subdirectory(tests)
 
@@ -177,11 +189,3 @@ if(AE_SDK_FOUND)
 else()
     message(STATUS "Skipping plugin target (no AE SDK).")
 endif()
-
-# The headless renderer: golden images, profiling, EXR bakes.
-#
-# BUILT IN THE SAME WEEK AS THE KERNEL, per PLAN.md, and not as a later
-# convenience. A GPU path tracer that can only run inside After Effects cannot be
-# golden-imaged, profiled or bisected -- so the CLI is the test harness first and
-# the EXR bake feature second.
-add_subdirectory(src/cli)

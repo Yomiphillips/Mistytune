@@ -22,6 +22,11 @@ dist/
 # permitted. Download separately and point AE_SDK_ROOT at it.
 sdk/
 
+# NotchLC writes this into whatever the working directory happens to be when its
+# codec component loads -- so it reappears after being deleted, and it is always
+# empty. Nothing to do with this project.
+NotchLC-log.txt
+
 # IDE
 .vs/
 .vscode/

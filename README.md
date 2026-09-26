@@ -50,6 +50,37 @@ and either set `AE_SDK_ROOT`, pass `-DAE_SDK_ROOT=<path>`, or unpack it into
 .\build.ps1 -Install     # ...and copy the .aex into AE's plug-ins folder
 ```
 
+## Tests
+
+Three tiers, and the point of the split is that the first two need neither After
+Effects nor a GPU.
+
+```
+ctest -C Release --output-on-failure      # both automated tiers, ~2 seconds
+```
+
+1. **`tests/unit/`** — the engine: the parameter model, the field fingerprint's
+   coverage, the cache policy, contour extraction. Milliseconds.
+2. **`tests/golden/`** — fixed scenes rendered through `mistytunec` and compared
+   with tolerance, plus the determinism tripwires: the same inputs twice, and the
+   same inputs at one thread versus eight, must be **byte**-identical. A third
+   test asserts that two different seeds *differ*, which is what stops
+   "deterministic" from being satisfied by "always the same wrong answer".
+3. **In-host checks** — scripted but judged by eye: all three bit depths, both
+   resolutions, a camera move that must not re-solve, an MFR soak, and a
+   48-frame animation watched for denoiser shimmer.
+
+If a golden test fails, **look at the image before blessing it**. When the change
+was intended:
+
+```
+cmake --build build --config Release --target golden-bless
+```
+
+That target is deliberately separate and never automatic — a suite that
+regenerated its own references on failure would agree with every change ever
+made, including the wrong ones.
+
 ```bash
 ./build.sh --test        # macOS; v1 is Windows-only, so this is untested ground
 ```

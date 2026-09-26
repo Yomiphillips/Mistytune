@@ -24,12 +24,12 @@
 
 namespace plugin::kernel {
 
-void renderCpu(const RenderRequest& req) {
+void renderCpu(const RenderRequest& req, int threads) {
     if (!req.dest.data || req.dest.widthPx <= 0 || req.dest.heightPx <= 0) return;
 
     const int height = req.dest.heightPx;
 
-    // ROWS ACROSS THREADS, and the thread count is bounded on purpose.
+    // ROWS ACROSS THREADS, and the default count is bounded on purpose.
     //
     // UNDER MULTI-FRAME RENDERING AE IS ALREADY RUNNING SEVERAL FRAMES AT ONCE in
     // this process. Spawning hardware_concurrency() threads per frame on top of
@@ -40,9 +40,12 @@ void renderCpu(const RenderRequest& req) {
     // Four is a compromise that helps a single still frame without swamping an
     // MFR export. The real answer is AE's own threading suite, which is Phase 2
     // work alongside the abort and progress callbacks.
-    unsigned int want = std::thread::hardware_concurrency();
-    if (want == 0) want = 1;
-    const int threads = static_cast<int>(std::min(want, 4u));
+    if (threads <= 0) {
+        unsigned int want = std::thread::hardware_concurrency();
+        if (want == 0) want = 1;
+        threads = static_cast<int>(std::min(want, 4u));
+    }
+    if (threads > height) threads = height > 0 ? height : 1;
 
     const auto renderRows = [&req](int y0, int y1) {
         for (int y = y0; y < y1; ++y) {

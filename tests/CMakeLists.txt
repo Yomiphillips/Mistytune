@@ -35,3 +35,9 @@ add_executable(plugin_tests
 target_link_libraries(plugin_tests PRIVATE plugin_engine)
 
 add_test(NAME unit COMMAND plugin_tests)
+
+# Tier 2: golden images through mistytunec. The top-level CMakeLists adds
+# src/cli/ before this directory so the target exists; golden/CMakeLists.txt
+# still guards on it, so a build configured without the CLI degrades to skipping
+# these rather than failing to configure.
+add_subdirectory(golden)

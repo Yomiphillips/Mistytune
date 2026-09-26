@@ -53,7 +53,22 @@ bool renderCuda(const RenderRequest& req);
 // image taken on the CPU be a meaningful check on the GPU. It is a correctness
 // reference and a fallback; at comp resolution a real path trace on a CPU is
 // minutes per frame, and it is not a shipping renderer.
-void renderCpu(const RenderRequest& req);
+//
+// THREADS IS AN ARGUMENT AND NOT PART OF RenderRequest, and that placement is the
+// point rather than a detail.
+//
+// How the work is divided is an execution decision; what the image contains is a
+// scene decision. Putting the thread count in QualityParams would make it a
+// parameter -- keyframable, landing in the field or view hash, and reasonably
+// read by the next person as something that changes the picture.
+//
+// It must not change the picture, and tests/golden/ asserts exactly that: the
+// same scene rendered at one thread and at eight must come out byte-identical.
+// That is the tripwire for multi-frame rendering, where After Effects picks the
+// worker count and we do not get a say.
+//
+// 0 means "choose one", which is what the effect passes.
+void renderCpu(const RenderRequest& req, int threads = 0);
 
 // The last CUDA error, cleared by reading it. Empty when there was none.
 const char* lastCudaError();

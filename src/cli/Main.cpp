@@ -56,11 +56,16 @@ void printUsage() {
         "  --agx            enable the AgX tonemap (default off)\n"
         "  --seed <n>       field seed (default 0x5eed1ce5)\n"
         "  --cpu            force the CPU path even when CUDA is available\n"
+        "  --threads <n>    CPU worker threads (0 = choose). Must not change the image.\n"
         "  --device         print what the renderer would use, and exit\n"
         "  --fingerprint    print the field and view hashes, and exit\n"
         "\n"
+        "  --compare <ref>  render, then compare against <ref> instead of writing.\n"
+        "                   Exits 0 if within tolerance, 1 if not.\n"
+        "  --tolerance <n>  max allowed per-channel difference, 0-255 (default 2)\n"
+        "\n"
         "Determinism: the same arguments must produce a byte-identical file, on\n"
-        "either path. That is what tests/golden/ checks.\n");
+        "either path and at any thread count. That is what tests/golden/ checks.\n");
 }
 
 // PPM RATHER THAN EXR, FOR NOW, AND IT IS A DELIBERATE STOPGAP.
@@ -102,6 +107,82 @@ bool writePpm(const char* path, const std::vector<float>& argb, int width, int h
 
 bool argIs(const char* a, const char* want) { return std::strcmp(a, want) == 0; }
 
+// Reads a PPM this program wrote. DELIBERATELY NOT A GENERAL PPM READER -- it
+// accepts only the exact header this file emits, because a golden reference that
+// silently parsed as a different size would compare against the wrong pixels and
+// report a pass.
+bool readPpm(const char* path, std::vector<unsigned char>& rgb, int& width, int& height) {
+    FILE* f = std::fopen(path, "rb");
+    if (!f) return false;
+
+    char magic[3] = { 0 };
+    int maxval = 0;
+    if (std::fscanf(f, "%2s %d %d %d", magic, &width, &height, &maxval) != 4 ||
+        std::strcmp(magic, "P6") != 0 || maxval != 255 || width <= 0 || height <= 0) {
+        std::fclose(f);
+        return false;
+    }
+    // Exactly one whitespace character separates the header from the data.
+    std::fgetc(f);
+
+    rgb.resize(static_cast<size_t>(width) * height * 3);
+    const size_t got = std::fread(rgb.data(), 1, rgb.size(), f);
+    std::fclose(f);
+    return got == rgb.size();
+}
+
+// ---------------------------------------------------------------------------
+// COMPARISON IS BY MAXIMUM PER-CHANNEL DIFFERENCE, NOT BY AVERAGE.
+//
+// An average hides exactly the failures worth catching. A kernel change that
+// wrecks one percent of the pixels -- a broken branch, a bad intersection along
+// one edge, a single NaN -- moves the mean by almost nothing and moves the
+// maximum to 255. A mean-based threshold loose enough to absorb legitimate
+// cross-compiler rounding is far too loose to notice that.
+//
+// The mean is printed anyway, because when the maximum does trip it is the
+// number that says whether the whole image moved or one pixel did.
+// ---------------------------------------------------------------------------
+int comparePpm(const char* refPath, const std::vector<float>& argb,
+               int width, int height, int tolerance) {
+    std::vector<unsigned char> ref;
+    int rw = 0, rh = 0;
+    if (!readPpm(refPath, ref, rw, rh)) {
+        std::fprintf(stderr, "could not read reference %s\n", refPath);
+        return 1;
+    }
+    if (rw != width || rh != height) {
+        std::fprintf(stderr, "size mismatch: reference is %dx%d, render is %dx%d\n",
+                     rw, rh, width, height);
+        return 1;
+    }
+
+    int maxDiff = 0;
+    double sumDiff = 0.0;
+    int worstX = 0, worstY = 0;
+
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            for (int c = 0; c < 3; ++c) {
+                float v = argb[(static_cast<size_t>(y) * width + x) * 4 + 1 + c];
+                v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+                const int got = static_cast<int>(v * 255.0f + 0.5f);
+                const int want = ref[(static_cast<size_t>(y) * width + x) * 3 + c];
+                const int d = got > want ? got - want : want - got;
+                if (d > maxDiff) { maxDiff = d; worstX = x; worstY = y; }
+                sumDiff += d;
+            }
+        }
+    }
+
+    const double mean = sumDiff / (static_cast<double>(width) * height * 3);
+    std::printf("compare %s: max %d (at %d,%d), mean %.4f, tolerance %d -- %s\n",
+                refPath, maxDiff, worstX, worstY, mean, tolerance,
+                maxDiff <= tolerance ? "PASS" : "FAIL");
+
+    return maxDiff <= tolerance ? 0 : 1;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -115,10 +196,13 @@ int main(int argc, char** argv) {
     req.view.heightPx = 360;
     req.quality.samplesPerPixel = 16;
 
-    const char* outPath = nullptr;
-    bool forceCpu       = false;
-    bool printDevice    = false;
-    bool printHashes    = false;
+    const char* outPath  = nullptr;
+    const char* comparePath = nullptr;
+    bool forceCpu        = false;
+    bool printDevice     = false;
+    bool printHashes     = false;
+    int  threads         = 0;      // 0 = let the renderer choose
+    int  tolerance       = 2;
 
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
@@ -136,6 +220,9 @@ int main(int argc, char** argv) {
         else if (argIs(a, "--agx"))                  req.view.agxTonemap = true;
         else if (argIs(a, "--seed") && hasNext)      req.field.seed = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 0));
         else if (argIs(a, "--cpu"))                  forceCpu = true;
+        else if (argIs(a, "--threads") && hasNext)   threads = std::atoi(argv[++i]);
+        else if (argIs(a, "--compare") && hasNext)   comparePath = argv[++i];
+        else if (argIs(a, "--tolerance") && hasNext) tolerance = std::atoi(argv[++i]);
         else if (argIs(a, "--device"))               printDevice = true;
         else if (argIs(a, "--fingerprint"))          printHashes = true;
         else {
@@ -169,8 +256,8 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    if (!outPath) {
-        std::fprintf(stderr, "no output path given (-o)\n\n");
+    if (!outPath && !comparePath) {
+        std::fprintf(stderr, "nothing to do: give -o <out.ppm> or --compare <ref.ppm>\n\n");
         printUsage();
         return 2;
     }
@@ -211,7 +298,11 @@ int main(int argc, char** argv) {
                     "      lands with the EXR bake. Rendering on the CPU reference.\n");
     }
 
-    kernel::renderCpu(req);
+    kernel::renderCpu(req, threads);
+
+    if (comparePath) {
+        return comparePpm(comparePath, pixels, req.view.widthPx, req.view.heightPx, tolerance);
+    }
 
     if (!writePpm(outPath, pixels, req.view.widthPx, req.view.heightPx)) {
         std::fprintf(stderr, "could not write %s\n", outPath);
