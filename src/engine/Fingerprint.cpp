@@ -33,7 +33,7 @@ static_assert(sizeof(FieldParams) == 172,
 // cannot quietly fold camera state into the field. If someone moves a member
 // from ViewParams into FieldParams the assert above fires and this one is the
 // comment that explains why that might have been deliberate.
-static_assert(sizeof(ViewParams) == 92,
+static_assert(sizeof(ViewParams) == 100,
               "ViewParams changed -- check nothing camera-side leaked into the "
               "field hash; see the note in Fingerprint.h");
 

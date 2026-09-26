@@ -134,8 +134,14 @@ namespace ae {
                                                                                          \
     /* ---------------- Quality ---------------- */                                       \
     TOPIC   (QualityGroup,      300, "Quality")                                           \
+    /* DEFAULT 1, NOT 64. The Phase 1 sky is analytic and a sample only jitters the     \
+     * ray inside the pixel, so 64 of them cost 64x the render time and change nothing  \
+     * outside the horizon row -- measured at most 2/255 everywhere else. On the CPU    \
+     * path, the only one that exists until CUDA is built, 64 made a full-HD frame take \
+     * 3m43s and After Effects cancelled it before it ever finished. The VALID RANGE is \
+     * left wide open for the Phase 2 transport that will need it; see CloudParams.h. */\
     FLOAT   (Samples,           301, "Samples",                                           \
-             1.0, 65536.0,  1.0, 512.0,     64.0,    0)                                   \
+             1.0, 65536.0,  1.0, 512.0,      1.0,    0)                                   \
     FLOAT   (MaxBounces,        302, "Max Bounces",                                        \
              1.0, 1024.0,   1.0, 64.0,      32.0,    0)                                   \
     CHECK   (Denoise,           303, "Denoise", true)                                      \

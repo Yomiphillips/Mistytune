@@ -27,6 +27,8 @@ const char* deviceDescription() {
 
 bool renderCuda(const RenderRequest&) { return false; }
 
+bool renderCudaToHost(const RenderRequest&, int, int) { return false; }
+
 const char* lastCudaError() { return ""; }
 
 } // namespace plugin::kernel

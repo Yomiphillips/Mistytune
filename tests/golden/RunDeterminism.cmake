@@ -20,12 +20,30 @@ set(SCENE -w 96 -h 54 -s 16 --sun-el 20)
 
 function(render OUTFILE)
     execute_process(
-        COMMAND "${MISTYTUNEC}" ${SCENE} ${ARGN} -o "${OUTFILE}"
+        # --cpu: these tripwires are about the CPU worker pool and the seed, and
+        # mistytunec now uses the GPU by default. Without this, --threads would be
+        # silently ignored and determinism.threadCount would compare two identical
+        # GPU renders -- a test that cannot fail.
+        COMMAND "${MISTYTUNEC}" ${SCENE} --cpu ${ARGN} -o "${OUTFILE}"
         RESULT_VARIABLE _rc
         OUTPUT_VARIABLE _out
         ERROR_VARIABLE  _err)
     if(NOT _rc EQUAL 0)
         message(FATAL_ERROR "mistytunec failed (${_rc}):\n${_out}\n${_err}")
+    endif()
+endfunction()
+
+# THE GPU TWIN OF render(). --require-gpu rather than a silent fallback: a GPU test
+# that rendered on the CPU would compare two CPU images and pass while checking
+# nothing at all.
+function(gpu_render OUTFILE)
+    execute_process(
+        COMMAND "${MISTYTUNEC}" ${SCENE} --require-gpu ${ARGN} -o "${OUTFILE}"
+        RESULT_VARIABLE _rc
+        OUTPUT_VARIABLE _out
+        ERROR_VARIABLE  _err)
+    if(NOT _rc EQUAL 0)
+        message(FATAL_ERROR "mistytunec --require-gpu failed (${_rc}):\n${_out}\n${_err}")
     endif()
 endfunction()
 
@@ -48,6 +66,40 @@ if(MODE STREQUAL "repeat")
             "  different workers, so this reaches a user as flicker.")
     endif()
     message(STATUS "repeatable: identical")
+
+elseif(MODE STREQUAL "gpubands")
+    # BANDED VERSUS WHOLE-FRAME, ON THE GPU.
+    #
+    # The effect never renders a frame in one launch: it goes in bands of rows so it
+    # can check After Effects' abort between them and so no single launch approaches
+    # the Windows display-driver timeout. A band is a WINDOW into the frame -- the
+    # device buffer holds only those rows, and view.originY is moved down by the band
+    # start so every ray still knows which row of the full picture it is.
+    #
+    # GET THAT WRONG AND EVERY BAND RENDERS THE TOP OF THE FRAME, which a whole-frame
+    # render cannot show because it has exactly one band. This is the only test that
+    # exercises it.
+    #
+    # 37 ROWS IS DELIBERATELY AWKWARD: not a divisor of 54 and not a multiple of the
+    # kernel's 16-row block, so the last band is short and the block grid does not
+    # line up with the band edges. A band size that divided evenly would pass while
+    # hiding an off-by-one at the boundary.
+    gpu_render("${OUT_DIR}/gpu_whole.ppm")
+    gpu_render("${OUT_DIR}/gpu_banded.ppm" --gpu-band-rows 37)
+
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E compare_files
+                "${OUT_DIR}/gpu_whole.ppm" "${OUT_DIR}/gpu_banded.ppm"
+        RESULT_VARIABLE _same)
+    if(NOT _same EQUAL 0)
+        message(FATAL_ERROR
+            "GPU BANDING CHANGES THE IMAGE: one launch and banded launches disagree.\n"
+            "  The band is a window, not a crop. renderCudaToHost() must offset\n"
+            "  view.originY by the band's first row, or each band renders the top of\n"
+            "  the frame into a different part of the output.\n"
+            "  Reaches a user as horizontal stripes of repeated sky.")
+    endif()
+    message(STATUS "gpu bands: identical to a single launch")
 
 elseif(MODE STREQUAL "threads")
     # ONE WORKER VERSUS EIGHT. After Effects picks the worker count under

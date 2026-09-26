@@ -238,8 +238,28 @@ struct ViewParams {
     Real verticalFovDegrees = 39.6f;   // 50 mm on full frame
     Real observerAltitude   = 2.0f;    // m above the ground plane
 
+    // THE FULL FRAME, WHICH IS NOT NECESSARILY THE BUFFER BEING WRITTEN.
+    //
+    // These two are the camera's denominator -- the size of the whole picture the
+    // lens sees. The destination Surface can be a WINDOW into that picture: After
+    // Effects routinely asks for a rect larger or smaller than the layer and hands
+    // back a buffer of a third size again (measured: a 1920x1080 layer requested as
+    // 2304x1296 with the output world still 1920x1080).
+    //
+    // CONFLATING THE TWO IS A FRAMING BUG, NOT A CROP. Using the request size here
+    // while writing a smaller buffer scales every ray by the ratio, so the effective
+    // field of view changes and the image slides off centre -- which reads as a
+    // broken camera rather than as a units mistake.
     int32_t widthPx  = 1920;
     int32_t heightPx = 1080;
+
+    // Where the destination buffer's pixel (0,0) sits within that full frame.
+    //
+    // ZERO FOR A FULL-FRAME RENDER, which is why the CLI and the golden tests never
+    // set it. AE sets it through in_data->output_origin_x/y, and ignoring it renders
+    // the wrong part of the picture into the right buffer.
+    int32_t originX = 0;
+    int32_t originY = 0;
 
     // Real exposure, in stops. The render is linear float and the tonemap is a
     // separate switch defaulting OFF, so this is the only thing between the
@@ -258,7 +278,26 @@ struct ViewParams {
 // image, but it changes the TRANSPORT and not the FIELD, so the cached medium
 // still stands.
 struct QualityParams {
-    int32_t samplesPerPixel = 64;
+    // ONE, AND THAT IS A PHASE 1 VALUE WITH A DATE ON IT.
+    //
+    // A sample here buys ONE thing today: a jittered ray within the pixel. The
+    // Phase 1 sky is analytic -- skyRadiance() is a deterministic function of a
+    // direction, with no stochastic transport anywhere in it -- so there is no
+    // noise for a second sample to converge.
+    //
+    // MEASURED, at 960x540 against a 64-sample reference: away from the horizon
+    // line, ONE sample differs by at most 2/255, and the whole-frame mean
+    // difference is 0.12/255. The horizon row itself differs by up to 224 -- and
+    // raising the count does not fix it, because that speckle is the 24-step
+    // quadratic march at grazing angles and not sampling noise. So 64 cost 64x the
+    // render time to improve a single row of pixels that stayed wrong anyway.
+    //
+    // WHAT MUST HAPPEN WHEN PHASE 2 LANDS. Null-collision tracking and multiple
+    // scattering are genuinely stochastic, and at one sample they are pure noise.
+    // This number goes back up with the transport that needs it -- it is not a
+    // judgement that path tracing is cheap, it is a statement that THIS renderer
+    // does not path trace yet.
+    int32_t samplesPerPixel = 1;
     int32_t maxBounces      = 32;
 
     // ONE LAUNCH PER BATCH, sized so no single launch approaches the Windows

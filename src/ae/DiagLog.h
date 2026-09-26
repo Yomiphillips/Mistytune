@@ -32,6 +32,7 @@
 
 #include "PluginIdentity.h"
 
+#include <chrono>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -61,6 +62,18 @@ inline const char* diagPath() {
         return (dir / PLUGIN_LOG_NAME).string();
     }();
     return path.c_str();
+}
+
+// A monotonic clock in seconds, for the one measurement the log could not make:
+// how long a render actually took.
+//
+// steady_clock RATHER THAN system_clock, because the only use is a difference and a
+// wall clock that steps for an NTP correction or a DST change would report a
+// negative render time.
+inline double diagSeconds() {
+    using clock = std::chrono::steady_clock;
+    static const clock::time_point start = clock::now();
+    return std::chrono::duration<double>(clock::now() - start).count();
 }
 
 inline void diagLog(const char* fmt, ...) {

@@ -124,6 +124,51 @@ inline kernel::Surface toSurface(PF_EffectWorld* world, PF_PixelFormat format) {
 }
 
 // ---------------------------------------------------------------------------
+// The output transfer curve
+// ---------------------------------------------------------------------------
+
+// ===========================================================================
+// AE'S INTEGER WORLDS ARE DISPLAY-REFERRED. ITS FLOAT WORLD IS LINEAR.
+//
+// This is the single most important host convention for anything that RENDERS
+// light rather than filtering someone else's pixels, and getting it wrong does not
+// look like a colour-management mistake -- it looks like the renderer is broken.
+//
+//   PF_PixelFormat_ARGB128 (32 bpc float)   linear. Write radiance straight in.
+//   PF_PixelFormat_ARGB64  (16 bpc, 0..32768)
+//   PF_PixelFormat_ARGB32  (8 bpc, 0..255)  the project working space, which is
+//                                           display-encoded -- sRGB by default.
+//
+// WHAT IT LOOKS LIKE WHEN YOU SKIP IT. Multiplying linear radiance by 255 and
+// storing it applies no curve at all, so everything below mid-grey collapses
+// towards black and only values above 1.0 survive. Measured on the Phase 1 sky: the
+// ground landed at 18/255 where it should be 74, and the zenith at 106 where it
+// should be 169. The one thing still clearly visible was the sun disc, which is
+// brighter than 1.0 and clips to white.
+//
+// The symptom is therefore "the effect renders black with a bit of sun in it", and
+// nothing about that points at a missing transfer curve.
+//
+// SRGB RATHER THAN THE PROJECT'S ACTUAL WORKING SPACE, and that is a stopgap with a
+// date on it. AE can be told to work in Rec.709, Rec.2020 or a linear space, and the
+// honest answer reads the project's colour settings and uses them. sRGB is the
+// default working space and therefore right far more often than linear is, which is
+// what makes it worth doing now rather than at the same time as the real thing.
+// ===========================================================================
+
+// The sRGB opto-electronic transfer function (IEC 61966-2-1).
+//
+// THE LINEAR SEGMENT NEAR ZERO IS NOT OPTIONAL. A pure 1/2.4 power curve has an
+// infinite slope at the origin, which turns sensor and sampling noise in the
+// darkest values into visible speckle -- and a path tracer's darkest values are
+// exactly where its noise lives.
+inline float encodeSrgb(float linear) {
+    if (linear <= 0.0f)        return 0.0f;
+    if (linear <= 0.0031308f)  return linear * 12.92f;
+    return 1.055f * std::pow(linear, 1.0f / 2.4f) - 0.055f;
+}
+
+// ---------------------------------------------------------------------------
 // The camera
 // ---------------------------------------------------------------------------
 
@@ -152,11 +197,25 @@ inline void fillCameraFromComp(PF_InData* in_data, cloud::ViewParams& view) {
     // A DEFAULT THAT LOOKS AT THE SKY rather than the identity, which looks along
     // -Z at the horizon and would make the Phase 1 sky a flat band.
     //
-    // Pitched up 20 degrees: enough to see the zenith gradient, low enough to keep
-    // the horizon in frame so that both halves of the placeholder are visible at
-    // once. Column-major would transpose this; it is row-major, as the kernel reads
-    // it.
-    const float pitch = -20.0f * 0.01745329252f;
+    // THE SIGN IS POSITIVE, AND IT WAS NOT. R_x(theta) applied to the camera's
+    // forward (0,0,-1) gives world y = sin(theta), so a NEGATIVE angle pitches the
+    // camera DOWN. The old value of -20 degrees put the centre ray 20 degrees BELOW
+    // the horizon and, at a 39.6 degree vertical field of view, the whole frame ran
+    // from -39.8 to -0.2 degrees: every pixel was ground, and the horizon sat just
+    // off the top edge. Rendered without a transfer curve that ground came out at
+    // 18/255, so the effect appeared to produce a black frame.
+    //
+    // THE MAGNITUDE IS 12 AND NOT 20 because 20 does not satisfy what this comment
+    // has always claimed. With half the field of view at 19.8 degrees, a 20 degree
+    // pitch puts the horizon exactly on the bottom edge -- "both halves visible at
+    // once" fails by two tenths of a degree, in the direction of an all-sky gradient
+    // with no horizon in it. 12 degrees puts the horizon about 80% down the frame,
+    // which is what the intent below actually describes.
+    //
+    // Enough pitch to see the zenith gradient, low enough to keep the horizon in
+    // frame so that both halves of the placeholder are visible at once. Column-major
+    // would transpose this; it is row-major, as the kernel reads it.
+    const float pitch = 12.0f * 0.01745329252f;
     const float c = std::cos(pitch);
     const float s = std::sin(pitch);
 

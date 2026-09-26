@@ -95,8 +95,17 @@ MT_DEVICE Vec3 primaryRayDirection(const cloud::ViewParams& view,
     if (w <= 0.0f || h <= 0.0f) return vec3(0.0f, 1.0f, 0.0f);
 
     // Normalised device coordinates, -1..1, with the aspect ratio on X.
-    const float ndcX = ((static_cast<float>(px) + 0.5f + jitterX) / w) * 2.0f - 1.0f;
-    const float ndcY = ((static_cast<float>(py) + 0.5f + jitterY) / h) * 2.0f - 1.0f;
+    //
+    // THE BUFFER'S ORIGIN IS ADDED BEFORE DIVIDING BY THE FRAME. px and py index the
+    // destination buffer, which may be a window into a larger frame -- so the pixel
+    // has to be moved into frame coordinates first. Dividing the buffer coordinate by
+    // the frame size instead renders the wrong part of the picture at the wrong
+    // scale, and looks like a broken field of view rather than a missing offset.
+    const float fx = static_cast<float>(px + view.originX) + 0.5f + jitterX;
+    const float fy = static_cast<float>(py + view.originY) + 0.5f + jitterY;
+
+    const float ndcX = (fx / w) * 2.0f - 1.0f;
+    const float ndcY = (fy / h) * 2.0f - 1.0f;
 
     const float tanHalfFov = tanf(radians(view.verticalFovDegrees) * 0.5f);
     const float aspect     = w / h;

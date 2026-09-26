@@ -27,6 +27,7 @@
 #include "FieldCache.h"
 #include "Fingerprint.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -54,8 +55,14 @@ void printUsage() {
         "  --turbidity <t>  Linke turbidity (default 2.2)\n"
         "  --ev <stops>     exposure (default 0)\n"
         "  --agx            enable the AgX tonemap (default off)\n"
+        "  --pitch <deg>    camera pitch, + is up (default 0, looking at the horizon;\n"
+        "                   the effect's own default camera is +12)\n"
         "  --seed <n>       field seed (default 0x5eed1ce5)\n"
-        "  --cpu            force the CPU path even when CUDA is available\n"
+        "  --cpu            force the CPU path even when CUDA is available. The GPU\n"
+        "                   is used by default when a device is present.\n"
+        "  --require-gpu    fail instead of falling back if the GPU cannot render\n"
+        "  --gpu-band-rows <n>  render the GPU frame in bands of n rows (0 = one\n"
+        "                   launch). Must not change the image.\n"
         "  --threads <n>    CPU worker threads (0 = choose). Must not change the image.\n"
         "  --device         print what the renderer would use, and exit\n"
         "  --fingerprint    print the field and view hashes, and exit\n"
@@ -199,10 +206,38 @@ int main(int argc, char** argv) {
     const char* outPath  = nullptr;
     const char* comparePath = nullptr;
     bool forceCpu        = false;
+    // FAILS INSTEAD OF FALLING BACK. The friendly fallback below is right for a
+    // person at a terminal and WRONG for a test: a GPU test that silently rendered
+    // on the CPU would report green while checking nothing, which is the exact
+    // failure tests/golden/CMakeLists.txt refuses to tolerate for missing
+    // references. tests/golden/ passes this on every GPU comparison.
+    bool requireGpu      = false;
+    // 0 = one launch for the whole frame. Any other value renders in bands of
+    // that many rows, which is what the EFFECT does -- see smartRenderHost in
+    // src/ae/Mistytune.cpp, where the band is both the abort granularity and the
+    // mitigation for the Windows display-driver timeout.
+    //
+    // IT EXISTS SO THE BANDING CAN BE TESTED. A band is a WINDOW into the frame:
+    // the device buffer holds only those rows while view.originY moves down to
+    // keep every ray's true position. That is easy to get wrong and impossible to
+    // see in a whole-frame render, so determinism.gpuBands renders the same scene
+    // banded and unbanded and demands the two be byte-identical.
+    int  gpuBandRows     = 0;
     bool printDevice     = false;
     bool printHashes     = false;
     int  threads         = 0;      // 0 = let the renderer choose
     int  tolerance       = 2;
+
+    // THE CAMERA, WHICH THIS TOOL COULD NOT SET AND SHOULD HAVE BEEN ABLE TO.
+    //
+    // The effect's default camera is pitched, and nothing here could reproduce that
+    // -- so every headless render and every golden image was taken through an
+    // IDENTITY camera looking straight at the horizon, and the framing the host
+    // actually uses was never rendered once. An inverted pitch that put every pixel
+    // below the horizon was therefore invisible from here.
+    //
+    // ZERO IS THE DEFAULT AND MEANS IDENTITY, so the golden images are unchanged.
+    float pitchDegrees = 0.0f;
 
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
@@ -218,8 +253,11 @@ int main(int argc, char** argv) {
         else if (argIs(a, "--turbidity") && hasNext) req.field.atmosphere.turbidity    = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--ev") && hasNext)        req.view.exposureEV = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--agx"))                  req.view.agxTonemap = true;
+        else if (argIs(a, "--pitch") && hasNext)     pitchDegrees = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--seed") && hasNext)      req.field.seed = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 0));
         else if (argIs(a, "--cpu"))                  forceCpu = true;
+        else if (argIs(a, "--require-gpu"))          requireGpu = true;
+        else if (argIs(a, "--gpu-band-rows") && hasNext) gpuBandRows = std::atoi(argv[++i]);
         else if (argIs(a, "--threads") && hasNext)   threads = std::atoi(argv[++i]);
         else if (argIs(a, "--compare") && hasNext)   comparePath = argv[++i];
         else if (argIs(a, "--tolerance") && hasNext) tolerance = std::atoi(argv[++i]);
@@ -262,6 +300,23 @@ int main(int argc, char** argv) {
         return 2;
     }
 
+    // THE SAME ROW-MAJOR CAMERA-TO-WORLD THE EFFECT BUILDS, and deliberately the
+    // same arithmetic rather than a second version of it: R_x(pitch), so a positive
+    // angle sends the camera's forward (0,0,-1) to world y = +sin(pitch) and pitches
+    // it UP. See fillCameraFromComp in src/ae/AEBridge.h.
+    if (pitchDegrees != 0.0f) {
+        const float rad = pitchDegrees * 0.01745329252f;
+        const float cc  = std::cos(rad);
+        const float ss  = std::sin(rad);
+        const float m[16] = {
+            1.0f, 0.0f, 0.0f, 0.0f,
+            0.0f, cc,   -ss,  0.0f,
+            0.0f, ss,   cc,   0.0f,
+            0.0f, 0.0f, 0.0f, 1.0f
+        };
+        for (int i = 0; i < 16; ++i) req.view.cameraToWorld[i] = m[i];
+    }
+
     // TIGHTLY PACKED, UNLIKE AE'S WORLDS. AE pads rows and the kernel is told the
     // pitch separately for exactly that reason; here there is no padding, so pitch
     // equals width. Writing it out rather than leaving it zero is what keeps the two
@@ -288,19 +343,52 @@ int main(int argc, char** argv) {
     // ever ran it would be the ones that could not run the other one -- and a
     // reference nobody compares against is not a reference.
     //
-    // A CUDA pointer cannot be written by the CPU loop, so this CLI's GPU path needs
-    // device memory and a copy back; that arrives with the bake feature. Today
-    // --cpu is the only path here, and saying so is better than pretending.
+    // THE GPU PATH HERE OWNS ITS DEVICE MEMORY, unlike the one in the effect: there
+    // is no host to hand this program a GPU buffer, so renderCudaToHost() allocates,
+    // launches and copies back. That is what makes a GPU-versus-CPU comparison
+    // possible at all outside After Effects -- and it is the half of tests/golden/
+    // that could not be written while the kernel could only run inside a host.
+    //
+    // A FAILED GPU RENDER FALLS BACK RATHER THAN EXITING, and says so. The point of
+    // this program is to produce a comparable image; refusing to produce one because
+    // the fast path broke would take the diagnostic away at the moment it is needed.
     // ---------------------------------------------------------------------
-    const bool useGpu = !forceCpu && kernel::cudaAvailable();
-    if (useGpu) {
-        std::printf("note: the GPU path needs device allocation and a copy back, which\n"
-                    "      lands with the EXR bake. Rendering on the CPU reference.\n");
+    bool renderedOnGpu = false;
+
+    if (!forceCpu && kernel::cudaAvailable()) {
+        if (gpuBandRows <= 0) {
+            renderedOnGpu = kernel::renderCudaToHost(req);
+        } else {
+            renderedOnGpu = true;
+            for (int y = 0; y < req.view.heightPx; y += gpuBandRows) {
+                int y1 = y + gpuBandRows;
+                if (y1 > req.view.heightPx) y1 = req.view.heightPx;
+                if (!kernel::renderCudaToHost(req, y, y1)) { renderedOnGpu = false; break; }
+            }
+        }
+        if (!renderedOnGpu) {
+            const char* why = kernel::lastCudaError();
+            std::fprintf(stderr, "GPU render failed (%s)%s\n",
+                         why && why[0] ? why : "no detail",
+                         requireGpu ? "" : " -- falling back to the CPU.");
+            if (requireGpu) return 3;
+        }
     }
 
-    kernel::renderCpu(req, threads);
+    if (requireGpu && !renderedOnGpu) {
+        std::fprintf(stderr, "--require-gpu was given but no CUDA device is usable\n");
+        return 3;
+    }
+
+    if (!renderedOnGpu) {
+        kernel::renderCpu(req, threads);
+    }
 
     if (comparePath) {
+        // WHICH PATH PRODUCED THE PIXELS, PRINTED BESIDE THE VERDICT. A golden
+        // comparison that does not say what it compared is a number without a claim.
+        std::printf("rendered on the %s path\n",
+                    renderedOnGpu ? "GPU (CUDA)" : "CPU reference");
         return comparePpm(comparePath, pixels, req.view.widthPx, req.view.heightPx, tolerance);
     }
 
@@ -311,5 +399,6 @@ int main(int argc, char** argv) {
 
     std::printf("wrote %s (%dx%d, %d spp)\n",
                 outPath, req.view.widthPx, req.view.heightPx, req.quality.samplesPerPixel);
+    std::printf("  path: %s\n", renderedOnGpu ? "GPU (CUDA)" : "CPU reference");
     return 0;
 }

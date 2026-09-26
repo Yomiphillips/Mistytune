@@ -44,22 +44,26 @@ namespace ae {
 // outflags2 mismatch" on someone else's.
 // ---------------------------------------------------------------------------
 
-// NOTE WHAT IS ABSENT: PF_OutFlag_PIX_INDEPENDENT.
+// PF_OutFlag_PIX_INDEPENDENT IS SET, AND THIS FILE USED TO ARGUE IT SHOULD NOT BE.
 //
-// It promises that an output pixel depends only on the input pixel at the same
-// coordinate, which permits AE to hand back an output buffer smaller than the
-// input and to tile the render however it likes. Every pixel of a path trace
-// depends on the whole field, so the promise would be false -- and a false promise
-// here shows up as an exception from whichever renderer drove the render, naming
-// that renderer rather than this effect.
+// The SDK's wording: "Set this flag if the output at a given pixel is not dependent
+// on the values of THE PIXELS AROUND IT." It is a claim about the INPUT IMAGE.
+//
+// The old argument here was that "every pixel of a path trace depends on the whole
+// field", which conflates the SCENE with the input image. Mistytune is a generator
+// and does not read its input at all. See cmake/EffectFlags.cmake for the full
+// reasoning, including when Phase 4's pareidolia makes this false again and the
+// dynamic-flags mechanism for withdrawing it.
 constexpr PF_OutFlags kOutFlags =
+    PF_OutFlag_PIX_INDEPENDENT |
     PF_OutFlag_DEEP_COLOR_AWARE;
 
 constexpr PF_OutFlags2 kOutFlags2 =
     // Required before AEGP_GetEffectCameraMatrix returns anything, and what makes
     // AE re-render when the comp camera moves. Set in Phase 1 before the camera is
     // used, because out_flags2 is cached against the binary and adding it later
-    // costs a version bump and a stale-cache hunt. See cmake/EffectFlags.cmake.
+    // costs a version bump and a stale-cache hunt. See cmake/EffectFlags.cmake --
+    // which also records that removing it does NOT persuade AE to GPU-render.
     PF_OutFlag2_I_USE_3D_CAMERA |
     PF_OutFlag2_SUPPORTS_SMART_RENDER |
     // 32 bpc float. LEGAL ONLY ALONGSIDE SUPPORTS_SMART_RENDER, and the format the

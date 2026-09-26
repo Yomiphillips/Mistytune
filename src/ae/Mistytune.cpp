@@ -29,7 +29,9 @@
 #include "Fingerprint.h"
 #include "KernelApi.h"
 
+#include <algorithm>
 #include <cstring>
+#include <thread>
 #include <new>
 #include <vector>
 
@@ -37,6 +39,27 @@ using namespace plugin;
 using namespace plugin::ae;
 
 namespace {
+
+// ---------------------------------------------------------------------------
+// Naming AE's GPU framework
+// ---------------------------------------------------------------------------
+
+// ONE SPELLING, USED BY BOTH DEVICE SETUP AND PRE-RENDER.
+//
+// PF_GPU_Framework_NONE is the value that matters most and is the easiest to skip
+// over: it does not mean "unknown framework", it means AE HAS ALREADY DECIDED THIS
+// RENDER IS A CPU RENDER. An effect that only logs the framework at device setup
+// never sees it, because device setup is only called for a real device.
+inline const char* frameworkName(PF_GPU_Framework what) {
+    switch (what) {
+        case PF_GPU_Framework_CUDA:    return "CUDA";
+        case PF_GPU_Framework_OPENCL:  return "OpenCL";
+        case PF_GPU_Framework_METAL:   return "Metal";
+        case PF_GPU_Framework_DIRECTX: return "DirectX";
+        case PF_GPU_Framework_NONE:    return "NONE (AE is not GPU-rendering this frame)";
+        default:                       return "unrecognised";
+    }
+}
 
 // ---------------------------------------------------------------------------
 // What pre-render hands to render
@@ -108,14 +131,7 @@ PF_Err gpuDeviceSetup(PF_InData* in_data, PF_OutData* out_data,
     // log names the GPU device AE handed us. A render that silently fell back to the
     // CPU and was merely slow is the failure this catches -- and it is a failure
     // that is otherwise invisible, because the picture is identical.
-    const char* framework = "unknown";
-    switch (extra->input->what_gpu) {
-        case PF_GPU_Framework_CUDA:    framework = "CUDA";    break;
-        case PF_GPU_Framework_OPENCL:  framework = "OpenCL";  break;
-        case PF_GPU_Framework_METAL:   framework = "Metal";   break;
-        case PF_GPU_Framework_DIRECTX: framework = "DirectX"; break;
-        default: break;
-    }
+    const char* framework = frameworkName(extra->input->what_gpu);
 
     diagLog("GPU_DEVICE_SETUP: device_index=%d framework=%s",
             static_cast<int>(extra->input->device_index), framework);
@@ -169,7 +185,35 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
     // on the GPU. THIS flag says this particular render MAY. Omit it and AE takes
     // the CPU path on every frame and never says why -- which presents as "the GPU
     // support does not work" rather than as a missing flag.
-    extra->output->flags |= PF_RenderOutputFlag_GPU_RENDER_POSSIBLE;
+    //
+    // ONLY OFFERED WHEN THERE IS ACTUALLY A GPU PATH TO TAKE, and that condition is
+    // the point rather than a tidiness.
+    //
+    // This binary can be built with the CUDA kernel stubbed out (cmake/Cuda.cmake
+    // selects CudaStub.cpp when no toolkit is present), and then claiming the flag
+    // makes AE hand a 32-bpc-float project to PF_Cmd_SMART_RENDER_GPU, which has
+    // nothing to render with and can only return an error. WHETHER AE FALLS BACK TO
+    // THE CPU AFTER THAT ERROR IS AN ASSUMPTION AND NOT A MEASUREMENT -- and if it
+    // does not, the frame simply fails, which is indistinguishable from an effect
+    // that renders nothing. Not making the claim costs this build nothing, because
+    // there is no GPU path in it to lose.
+    // WHAT AE INTENDS, LOGGED BEFORE WE SAY WHAT WE CAN DO.
+    //
+    // This is the line that separates "the effect declined the GPU" from "AE never
+    // offered it". PF_RenderOutputFlag_GPU_RENDER_POSSIBLE is our half of the
+    // handshake and it is NOT sufficient on its own: if what_gpu is None here, AE
+    // has already chosen a CPU render for this frame and nothing the effect sets
+    // will change it. Without this line the two cases produce identical logs.
+    diagLog("PRE_RENDER: AE offers what_gpu=%s device_index=%d bitdepth=%d",
+            frameworkName(extra->input->what_gpu),
+            static_cast<int>(extra->input->device_index),
+            static_cast<int>(extra->input->bitdepth));
+
+    if (kernel::cudaAvailable()) {
+        extra->output->flags |= PF_RenderOutputFlag_GPU_RENDER_POSSIBLE;
+    } else {
+        diagLog("  no GPU path in this build -- not offering GPU_RENDER_POSSIBLE.");
+    }
 
     // new rather than malloc, because PreRenderData holds C++ members with
     // constructors. nothrow because throwing into AE is never allowed and a
@@ -192,17 +236,42 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
     data->view.exposureEV = static_cast<float>(values.v[kMistytuneExposureEV]);
     data->view.agxTonemap = values.v[kMistytuneAgxTonemap] > 0.5;
 
-    // THE OUTPUT SIZE COMES FROM THE REQUEST, NOT FROM THE COMP.
+    // THE CAMERA'S FRAME IS THE LAYER, NOT THE REQUESTED RECT.
     //
-    // At reduced resolution the buffer is smaller, and a renderer that used the comp
-    // size here would write past the end of it. The camera's field of view is
-    // deliberately NOT scaled to match: a smaller buffer of the same view is exactly
-    // what a proxy render is, and scaling the FOV would zoom the image instead.
+    // in_data->width/height are the layer's size at the current downsample, which is
+    // the whole picture the lens sees. THE REQUESTED RECT IS NOT THAT: AE asks for
+    // whatever area it needs and the buffer it hands back is a third size again --
+    // measured on a plain 1920x1080 comp, the request was [-192,-108 2304x1296] while
+    // the output world was 1920x1080.
+    //
+    // Storing the REQUEST size here was a framing bug: every ray got divided by a
+    // denominator 20% too large, so the field of view silently widened and the image
+    // slid off centre. The buffer's own offset within the frame is read at render
+    // time, where AE fills it in -- see smartRender.
+    //
+    // THE FIELD OF VIEW IS STILL NOT SCALED BY THE DOWNSAMPLE, and that part was
+    // always right: a smaller buffer of the same view is exactly what a proxy render
+    // is, and scaling the FOV would zoom the image instead.
+    data->view.widthPx  = in_data->width;
+    data->view.heightPx = in_data->height;
+
     const PF_LRect& req = extra->input->output_request.rect;
-    data->view.widthPx  = req.right - req.left;
-    data->view.heightPx = req.bottom - req.top;
 
     fillCameraFromComp(in_data, data->view);
+
+    // THE RENDER PATH HAD NO INSTRUMENTATION AT ALL, and that is what made "nothing
+    // renders" un-diagnosable: the log proved the effect LOADED and said nothing
+    // about whether AE ever asked it for a pixel. These lines are the difference
+    // between a guess and a measurement -- see DiagLog.h on why that is the rule.
+    diagLog("PRE_RENDER: frame=%dx%d request=[%d,%d %dx%d] downsample=%d/%d,%d/%d samples=%d",
+            data->view.widthPx, data->view.heightPx,
+            static_cast<int>(req.left), static_cast<int>(req.top),
+            static_cast<int>(req.right - req.left), static_cast<int>(req.bottom - req.top),
+            static_cast<int>(in_data->downsample_x.num),
+            static_cast<int>(in_data->downsample_x.den),
+            static_cast<int>(in_data->downsample_y.num),
+            static_cast<int>(in_data->downsample_y.den),
+            static_cast<int>(data->quality.samplesPerPixel));
 
     sim::Fingerprint fp;
     fp.add(data->field);
@@ -225,6 +294,16 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
 
     UnionLRect(&inResult.result_rect,     &extra->output->result_rect);
     UnionLRect(&inResult.max_result_rect, &extra->output->max_result_rect);
+
+    // AN EMPTY RESULT RECT MEANS AE SKIPS SMART_RENDER ENTIRELY and reports nothing.
+    // It is the one failure that looks exactly like a broken kernel, so it is named
+    // here rather than left to be inferred from the absence of a later line.
+    const PF_LRect& rr = extra->output->result_rect;
+    diagLog("  result_rect=[%d,%d %dx%d]%s",
+            static_cast<int>(rr.left), static_cast<int>(rr.top),
+            static_cast<int>(rr.right - rr.left), static_cast<int>(rr.bottom - rr.top),
+            (rr.right <= rr.left || rr.bottom <= rr.top)
+                ? "  <-- EMPTY: AE will not call SMART_RENDER" : "");
     return err;
 }
 
@@ -268,6 +347,13 @@ PF_Err smartRenderGpu(PF_InData* in_data, PF_OutData* out_data,
     req.dest    = toSurface(output, format);
     req.dest.data = destMem;
 
+    // READ AT RENDER, NOT AT PRE-RENDER. AE fills output_origin_x/y in for the call
+    // that hands over the buffer; it is the offset of this buffer's pixel (0,0)
+    // within the frame, and without it the renderer draws the wrong part of the
+    // picture. See the frame/window note in CloudParams.h.
+    req.view.originX = in_data->output_origin_x;
+    req.view.originY = in_data->output_origin_y;
+
     // ONE LAUNCH, ALL THE SAMPLES -- FOR NOW, AND THIS IS THE ONE PLACE PHASE 1
     // KNOWINGLY LEAVES A KNOWN HAZARD IN.
     //
@@ -300,21 +386,42 @@ PF_Err smartRenderGpu(PF_InData* in_data, PF_OutData* out_data,
 // Smart render: the CPU path
 // ---------------------------------------------------------------------------
 
-// WHY THIS IS NOT JUST "THE SLOW ONE".
+// RENDERS INTO HOST MEMORY. IT MAY STILL USE THE GPU TO DO IT.
 //
-// AE takes it at 8 and 16 bpc regardless of what the GPU can do, and on any machine
-// whose GPU is unavailable. So it is not an optional path -- it is the one most
-// users will hit first, and PLAN.md's Phase 1 exit criterion names all three bit
-// depths explicitly.
+// The name is "host" and not "CPU" on purpose, and the distinction is the whole
+// point of this function now. After Effects calls PF_Cmd_SMART_RENDER -- the
+// non-GPU command -- and hands out an ordinary CPU world; what fills that world is
+// a separate question, and on a machine with CUDA the answer is the GPU.
+//
+// WHY THAT IS NECESSARY RATHER THAN CLEVER. Measured on AE 2026 with a 32 bpc float
+// project, Mercury GPU Acceleration set to CUDA, and a card AE itself hands this
+// effect at GPU_DEVICE_SETUP: pre-render reports what_gpu=NONE, so
+// PF_Cmd_SMART_RENDER_GPU is NEVER CALLED. Dropping I_USE_3D_CAMERA did not change
+// it; adding PIX_INDEPENDENT did not change it. AE settles what_gpu before asking
+// the effect anything, so no flag the effect sets can reach that decision.
+//
+// Owning the device memory and copying back is what most GPU-using AE plugins do
+// anyway, and it costs one device-to-host copy per frame -- nothing against a path
+// trace, and it buys a measured 100x at 1920x1080 and 64 samples.
+//
+// AE ALSO TAKES THIS PATH at 8 and 16 bpc regardless of any of the above, and on any
+// machine whose GPU is unavailable. So it is not an optional path -- it is the one
+// every user hits, and PLAN.md's Phase 1 exit criterion names all three bit depths
+// explicitly.
 //
 // THE RENDERER'S OUTPUT IS HDR, so the integer formats are reached through a float
 // staging buffer rather than by rendering into them. Quantising to 8 bits is the LAST
 // thing that should happen to a radiance value, not the first: rendering directly
 // into an integer buffer would clamp the sun to white before the tonemap ever saw it.
-PF_Err smartRenderCpu(PF_InData* in_data, PF_OutData* out_data,
-                      PF_PixelFormat format, PF_EffectWorld* output,
-                      const PreRenderData& data) {
-    (void)in_data; (void)out_data;
+PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
+                       PF_PixelFormat format, PF_EffectWorld* output,
+                       const PreRenderData& data) {
+    (void)out_data;
+
+    diagLog("SMART_RENDER_HOST: format=%d output=%dx%d rowbytes=%d samples=%d",
+            static_cast<int>(format), static_cast<int>(output->width),
+            static_cast<int>(output->height), static_cast<int>(output->rowbytes),
+            static_cast<int>(data.quality.samplesPerPixel));
 
     const size_t bpp = bytesPerPixel(format);
     if (bpp == 0) {
@@ -331,30 +438,149 @@ PF_Err smartRenderCpu(PF_InData* in_data, PF_OutData* out_data,
     req.view    = data.view;
     req.quality = data.quality;
 
+    // See the note on the GPU path: the buffer's offset within the frame is only
+    // known at render time.
+    req.view.originX = in_data->output_origin_x;
+    req.view.originY = in_data->output_origin_y;
+
+    diagLog("  frame=%dx%d origin=%d,%d", req.view.widthPx, req.view.heightPx,
+            req.view.originX, req.view.originY);
+
     req.firstSample        = 0;
     req.sampleCount        = data.quality.samplesPerPixel;
     req.samplesAlreadyDone = 0;
     req.accumulator        = nullptr;
 
-    if (format == PF_PixelFormat_ARGB128) {
-        // Straight into AE's buffer: it is already the format the renderer works in.
+    // 32 bpc renders straight into AE's buffer, because it is already the format the
+    // renderer works in. 8 and 16 bpc go through a float staging buffer and convert
+    // below. EITHER WAY THE DRIVER BELOW IS THE SAME, which is the point of deciding
+    // the destination here rather than writing the loop twice.
+    std::vector<float> staging;
+    const bool direct = (format == PF_PixelFormat_ARGB128);
+
+    if (direct) {
         req.dest = toSurface(output, format);
-        kernel::renderCpu(req);
-        return PF_Err_NONE;
+    } else {
+        const size_t pixels =
+            static_cast<size_t>(output->width) * static_cast<size_t>(output->height);
+        staging.assign(pixels * 4, 0.0f);
+
+        req.dest.data     = staging.data();
+        req.dest.widthPx  = output->width;
+        req.dest.heightPx = output->height;
+        req.dest.pitchPx  = output->width;      // tightly packed, unlike AE's worlds
+        req.dest.order    = kernel::ChannelOrder::ARGB;
     }
 
-    // 8 or 16 bpc: render to float, then convert.
-    std::vector<float> staging;
-    const size_t pixels = static_cast<size_t>(output->width) * static_cast<size_t>(output->height);
-    staging.assign(pixels * 4, 0.0f);
+    // =======================================================================
+    // RENDERED IN BANDS OF ROWS, AND THE REASON IS THE ONE FAILURE THAT LOOKS
+    // EXACTLY LIKE A BROKEN PLUGIN.
+    //
+    // One 1920x1080 frame at the default 64 samples is MINUTES on this path
+    // (measured: 3m43s). A single blocking call of that length gives After Effects
+    // no progress to draw and no opportunity to cancel, so the host sits frozen and
+    // never paints a frame -- which presents as "the effect renders nothing", not as
+    // "the effect is slow". The user's only recourse is to kill AE.
+    //
+    // THE SPLIT IS BY ROW AND NOT BY SAMPLE, deliberately. Every pixel still gets its
+    // whole sample budget inside ONE renderCpu call, so the per-sample sum is grouped
+    // exactly as it was before and the image is bit-for-bit what the golden tests
+    // assert. Chunking by SAMPLE instead would regroup that sum, and floating-point
+    // addition is not associative -- it would trade a determinism guarantee for
+    // nothing, since rows give all the granularity needed.
+    //
+    // THE BAND SIZE IS A PIXEL-SAMPLE BUDGET, not a time target. A band sized by
+    // measuring the clock would vary run to run, and anything that varies run to run
+    // has no business anywhere near a renderer that promises byte-identical output.
+    // 256k pixel-samples is a few tenths of a second on the machine this was measured
+    // on, which is responsive enough to cancel and fine-grained enough for a progress
+    // bar that visibly moves.
+    // =======================================================================
+    // WHICH ENGINE FILLS THE BUFFER. Asked once, here, rather than per band.
+    const bool useGpu = kernel::cudaAvailable();
 
-    req.dest.data     = staging.data();
-    req.dest.widthPx  = output->width;
-    req.dest.heightPx = output->height;
-    req.dest.pitchPx  = output->width;          // tightly packed, unlike AE's worlds
-    req.dest.order    = kernel::ChannelOrder::ARGB;
+    // THE BAND BUDGET IS PER ENGINE, because the two are three orders of magnitude
+    // apart and one number cannot serve both.
+    //
+    //   CPU  256K pixel-samples is a few tenths of a second (measured ~1.7 us each).
+    //   GPU   32M pixel-samples is about the same wall time (measured ~5 ns each),
+    //         and staying near a quarter second is what keeps every launch clear of
+    //         the Windows display-driver timeout, which kills the whole context
+    //         rather than just the launch.
+    const long long kBandBudget = useGpu ? (32 * 1024 * 1024) : (256 * 1024);
+    const long long perRow =
+        static_cast<long long>(output->width) * data.quality.samplesPerPixel;
 
-    kernel::renderCpu(req);
+    int rowsPerBand = perRow > 0 ? static_cast<int>(kBandBudget / perRow) : output->height;
+
+    // A FLOOR, BECAUSE THE BAND IS ALSO THE UNIT OF PARALLELISM.
+    //
+    // renderCpu divides ITS ROW RANGE across workers and clamps the worker count to
+    // the number of rows, so a two-row band runs on two threads no matter how many
+    // the machine has. At the default 64 samples the budget alone gives exactly that
+    // -- measured 0.373 s/row inside AE against 0.207 s/row headless, a 1.8x loss
+    // for a finer abort check nobody asked for.
+    //
+    // THE FLOOR TRACKS THE POOL rather than being a constant, because the pool is
+    // now the machine's full width and a fixed 8 would starve a 16-thread box the
+    // same way a fixed 2 starved a 4-thread one. Two rows per worker: enough that
+    // every worker gets a band, without making the abort check rarer than it needs
+    // to be.
+    unsigned int hw = std::thread::hardware_concurrency();
+    if (hw == 0) hw = 1;
+    //
+    // ON THE GPU THE FLOOR IS THE BLOCK HEIGHT INSTEAD. kBlockY is 16, so a band
+    // shorter than that wastes most of the threads in every block it launches --
+    // the same starvation as the CPU case, one level down.
+    const int kMinRowsPerBand = useGpu ? 16 : static_cast<int>(hw) * 2;
+    if (rowsPerBand < kMinRowsPerBand) rowsPerBand = kMinRowsPerBand;
+    if (rowsPerBand > output->height)  rowsPerBand = output->height;
+
+    const double t0 = diagSeconds();
+
+    for (A_long y = 0; y < output->height; y += rowsPerBand) {
+        const A_long y1 = std::min<A_long>(y + rowsPerBand, output->height);
+
+        bool ok = true;
+        if (useGpu) {
+            ok = kernel::renderCudaToHost(req, static_cast<int>(y), static_cast<int>(y1));
+            if (!ok) {
+                // FALLS BACK FOR THE REST OF THE FRAME RATHER THAN FAILING IT.
+                // A driver reset or an out-of-memory partway down a frame should
+                // cost a slow frame, not a black one -- and the bands already
+                // written stay valid, because both engines write the identical
+                // pixels. The log names it so the slowness is not a mystery.
+                const char* why = kernel::lastCudaError();
+                diagLog("  GPU band at row %d failed (%s) -- CPU for the rest of this frame.",
+                        static_cast<int>(y), why && why[0] ? why : "no detail");
+            }
+        }
+        if (!ok || !useGpu) {
+            kernel::renderCpu(req, 0, static_cast<int>(y), static_cast<int>(y1));
+        }
+
+        // ABORT BEFORE PROGRESS. PF_ABORT is what lets the user cancel and what lets
+        // AE discard a frame whose inputs already changed; a render that ignores it
+        // keeps burning minutes on a picture nobody is waiting for any more.
+        //
+        // The error is RETURNED, not swallowed: PF_Interrupt_CANCEL is how the host
+        // is told the buffer is incomplete, and converting a partly-filled staging
+        // buffer below would hand AE a half-rendered frame to cache.
+        if (PF_Err abortErr = PF_ABORT(in_data)) {
+            diagLog("  aborted at row %d of %d after %.2f s",
+                    static_cast<int>(y1), static_cast<int>(output->height),
+                    diagSeconds() - t0);
+            return abortErr;
+        }
+        if (PF_Err progErr = PF_PROGRESS(in_data, y1, output->height)) return progErr;
+    }
+
+    // THE NUMBER THAT SETTLES "IT RENDERS NOTHING" VERSUS "IT IS STILL RENDERING".
+    diagLog("  rendered %dx%d on the %s in %.2f s (%d rows per band)",
+            static_cast<int>(output->width), static_cast<int>(output->height),
+            useGpu ? "GPU" : "CPU", diagSeconds() - t0, rowsPerBand);
+
+    if (direct) return PF_Err_NONE;
 
     // AE'S 16-BIT CHANNELS RUN 0..32768, NOT 0..65535. Using 65535 makes 16 bpc
     // renders come out roughly half as bright -- subtle enough to survive a casual
@@ -382,6 +608,19 @@ PF_Err smartRenderCpu(PF_InData* in_data, PF_OutData* out_data,
             r = r < 0.0f ? 0.0f : (r > 1.0f ? 1.0f : r);
             g = g < 0.0f ? 0.0f : (g > 1.0f ? 1.0f : g);
             b = b < 0.0f ? 0.0f : (b > 1.0f ? 1.0f : b);
+
+            // ENCODED, BECAUSE THESE TWO FORMATS ARE DISPLAY-REFERRED. See the long
+            // note on encodeSrgb in AEBridge.h -- skipping this is what made the
+            // render read as black with a sun in it.
+            //
+            // COLOUR ONLY. ALPHA NEVER GETS A TRANSFER CURVE: it is coverage, not
+            // light, and encoding it makes every soft edge composite too opaque.
+            // The sky is opaque so it makes no difference to THIS picture, which is
+            // exactly why it would survive review and break the first thing that
+            // has a real alpha.
+            r = encodeSrgb(r);
+            g = encodeSrgb(g);
+            b = encodeSrgb(b);
 
             // BUFFERS ARE PREMULTIPLIED. At alpha 1 -- which an opaque sky always has
             // -- premultiplied and straight are the same numbers, so this is correct
@@ -420,9 +659,14 @@ PF_Err smartRender(PF_InData* in_data, PF_OutData* out_data,
                    PF_SmartRenderExtra* extra, bool isGpu) {
     PF_Err err = PF_Err_NONE, err2 = PF_Err_NONE;
 
+    diagLog("SMART_RENDER: AE chose the %s path.", isGpu ? "GPU" : "CPU");
+
     const PreRenderData* data =
         reinterpret_cast<const PreRenderData*>(extra->input->pre_render_data);
-    if (!data) return PF_Err_INTERNAL_STRUCT_DAMAGED;
+    if (!data) {
+        diagLog("  pre_render_data is NULL -- refusing.");
+        return PF_Err_INTERNAL_STRUCT_DAMAGED;
+    }
 
     PF_EffectWorld* input  = nullptr;
     PF_EffectWorld* output = nullptr;
@@ -434,6 +678,7 @@ PF_Err smartRender(PF_InData* in_data, PF_OutData* out_data,
     if (err) return err;
 
     err = extra->cb->checkout_output(in_data->effect_ref, &output);
+    if (err || !output) diagLog("  checkout_output failed: err=%d", static_cast<int>(err));
 
     if (!err && output) {
         PF_PixelFormat format = PF_PixelFormat_INVALID;
@@ -443,7 +688,7 @@ PF_Err smartRender(PF_InData* in_data, PF_OutData* out_data,
             if (isGpu) {
                 err = smartRenderGpu(in_data, out_data, format, output, extra, *data);
             } else {
-                err = smartRenderCpu(in_data, out_data, format, output, *data);
+                err = smartRenderHost(in_data, out_data, format, output, *data);
             }
         }
     }
@@ -591,6 +836,13 @@ PF_Err EffectMain(
             case PF_Cmd_SMART_RENDER_GPU:
                 err = smartRender(in_data, out_data,
                                   reinterpret_cast<PF_SmartRenderExtra*>(extra), true);
+                break;
+            case PF_Cmd_RENDER:
+                // THE NON-SMART PATH, WHICH THIS EFFECT DOES NOT IMPLEMENT. AE should
+                // never send it while PF_OutFlag2_SUPPORTS_SMART_RENDER is set, and if
+                // it ever does the symptom is an output buffer nobody wrote to -- so
+                // it is named here rather than swallowed by `default`.
+                diagLog("PF_Cmd_RENDER: the non-smart path, which is NOT implemented.");
                 break;
             default:
                 break;

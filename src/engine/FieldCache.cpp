@@ -24,6 +24,12 @@ uint64_t viewHash(const ViewParams& v, const QualityParams& q) {
     fp.add(v.widthPx);
     fp.add(v.heightPx);
 
+    // THE WINDOW'S ORIGIN IS PART OF THE VIEW. Two renders of the same frame through
+    // different windows contain different pixels, so an accumulation cannot be
+    // carried from one to the other -- which is exactly what this hash decides.
+    fp.add(v.originX);
+    fp.add(v.originY);
+
     // EXPOSURE AND TONEMAP ARE IN HERE RATHER THAN APPLIED AFTERWARDS, which is
     // worth a word because it looks like a missed optimisation.
     //

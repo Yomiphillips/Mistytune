@@ -44,5 +44,5 @@
 // and the renderer is a placeholder analytic sky proving the plumbing. Nothing
 // has been handed to anyone, so the parameter layout is still free to change.
 #define PLUGIN_MAJOR 0
-#define PLUGIN_MINOR 1
-#define PLUGIN_BUILD 1
+#define PLUGIN_MINOR 3
+#define PLUGIN_BUILD 4

@@ -32,7 +32,33 @@
 # ray. Setting it would let AE hand back an output buffer smaller than the input
 # and tile the render however it liked, and every pixel of a path trace depends on
 # the whole field. It is also what made the predecessor's 3D crash possible.
-math(EXPR MT_EFFECT_OUT_FLAGS "33554432")
+# PF_OutFlag_PIX_INDEPENDENT (1 << 10) = 1024
+#   -- ADDED after reading the SDK's own wording instead of paraphrasing it:
+#      "Set this flag if the output at a given pixel is not dependent on the values
+#      of THE PIXELS AROUND IT." It is a statement about the INPUT IMAGE.
+#
+#      This file previously argued the flag would be a lie because "every pixel of
+#      a path trace depends on the whole field". That conflates the SCENE with the
+#      INPUT IMAGE. Mistytune is a generator: it does not read its input at all, so
+#      no output pixel depends on any input pixel, neighbouring or otherwise. The
+#      same note also attributed "AE may hand back an output buffer smaller than the
+#      input" to this flag, which is PF_OutFlag_I_SHRINK_BUFFER.
+#
+#      The SDK's own GPU sample (SDK_Invert_ProcAmp) sets it, and it is one of only
+#      two registration differences left between that sample and this effect -- the
+#      other being SUPPORTS_DIRECTX_RENDERING, which cannot honestly be set without
+#      a DirectX kernel behind it.
+#
+#      WHEN THIS STOPS BEING TRUE: Phase 4's pareidolia reads the input layer and
+#      traces contours through it, at which point an output pixel DOES depend on its
+#      neighbours and the flag becomes a lie. It is overridable at
+#      PF_Cmd_QUERY_DYNAMIC_FLAGS, which is the documented way to withdraw it --
+#      and doing so requires PF_OutFlag2_SUPPORTS_QUERY_DYNAMIC_FLAGS, which this
+#      effect does not set yet. That is the Phase 4 task, not a reason to keep
+#      declaring something false today.
+#
+# PF_OutFlag_DEEP_COLOR_AWARE (1 << 25) = 33554432
+math(EXPR MT_EFFECT_OUT_FLAGS "1024 | 33554432")
 
 # PF_OutFlag2_I_USE_3D_CAMERA              (1 << 1)  = 2
 #   -- required before AEGP_GetEffectCameraMatrix will return anything, and the
@@ -74,6 +100,21 @@ math(EXPR MT_EFFECT_OUT_FLAGS "33554432")
 #      cause (the real cause was a frozen AE-5.0-era copy call walking float
 #      pixels at the wrong stride). Read that history before blaming it here:
 #      docs/HOST-NOTES.md has the short version.
+# MEASURED: I_USE_3D_CAMERA DOES NOT DISQUALIFY AN EFFECT FROM AE'S GPU PIPELINE.
+#
+# Tested directly on AE 2026, 32 bpc float project, Mercury GPU Acceleration set to
+# CUDA, a working CUDA build, and a registration with bit 1 REMOVED
+# (out_flags2 167777280 instead of 167777282, version bumped so AE could not serve
+# a cached registration). Pre-render still reported:
+#
+#     PRE_RENDER: AE offers what_gpu=NONE device_index=-1 bitdepth=32
+#
+# identically to the run with the flag present. So the flag is not the gate, and
+# the reason AE declines to GPU-render this effect is still unknown. Recorded here
+# because a plausible, cheap-to-test hypothesis that turns out to be WRONG is worth
+# exactly as much as one that is right -- and this one will otherwise be re-tested
+# by the next person who reads the pre-render log.
+#
 math(EXPR MT_EFFECT_OUT_FLAGS2 "2 | 1024 | 4096 | 33554432 | 134217728")
 
 # AE's packed version field: major<<19 | minor<<15 | bug<<11 | stage<<9 | build.

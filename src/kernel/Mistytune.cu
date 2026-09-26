@@ -171,6 +171,75 @@ bool renderCuda(const RenderRequest& req) {
     return true;
 }
 
+bool renderCudaToHost(const RenderRequest& req, int rowBegin, int rowEnd) {
+    if (!cudaAvailable()) return false;
+    if (!req.dest.data || req.dest.widthPx <= 0 || req.dest.heightPx <= 0) return false;
+
+    if (rowBegin < 0) rowBegin = 0;
+    if (rowEnd <= 0 || rowEnd > req.dest.heightPx) rowEnd = req.dest.heightPx;
+    if (rowBegin >= rowEnd) return true;   // nothing asked for is not a failure
+
+    const int bandRows = rowEnd - rowBegin;
+
+    // THE DEVICE BUFFER IS THE SAME SHAPE AS THE HOST ONE, PADDING INCLUDED.
+    //
+    // Allocating width*4 floats per row instead would be smaller and would force a
+    // row-by-row copy to put it back into a padded destination. Matching the pitch
+    // makes the copy one linear block, and -- more to the point -- means the kernel
+    // sees the IDENTICAL Surface layout on both paths, so a pitch bug cannot hide
+    // on one of them.
+    const int pitchPx = req.dest.pitchPx > 0 ? req.dest.pitchPx : req.dest.widthPx;
+    const size_t rowBytes = static_cast<size_t>(pitchPx) * 4u * sizeof(float);
+    const size_t bytes    = rowBytes * static_cast<size_t>(bandRows);
+
+    void* devMem = nullptr;
+    cudaError_t err = cudaMalloc(&devMem, bytes);
+    if (err != cudaSuccess) {
+        setError("cudaMalloc", err);
+        return false;
+    }
+
+    RenderRequest devReq = req;
+    devReq.dest.data     = devMem;
+    devReq.dest.pitchPx  = pitchPx;
+    devReq.dest.heightPx = bandRows;
+
+    // THE WINDOW MOVES, THE CAMERA DOES NOT. The band buffer's row 0 is frame row
+    // (originY + rowBegin), and primaryRayDirection adds originY before dividing by
+    // the frame height -- so every ray keeps its true position in the picture while
+    // the kernel indexes a buffer that starts at zero. Without this each band would
+    // render the TOP of the frame into a different part of the output.
+    devReq.view.originY = req.view.originY + rowBegin;
+
+    // THE ACCUMULATOR IS NOT CARRIED ACROSS. It would have to live in device memory
+    // and persist between calls, which is the progressive-accumulation design and
+    // not this function's job. Callers that want accumulation own the device buffer
+    // themselves and use renderCuda().
+    devReq.accumulator        = nullptr;
+    devReq.accumulatorPitchPx = 0;
+
+    const bool launched = renderCuda(devReq);
+    if (!launched) {
+        // renderCuda has already filled in the error; do not overwrite it with a
+        // less specific one from the cleanup path.
+        cudaFree(devMem);
+        return false;
+    }
+
+    // Back into the band's own slice of the host buffer, at the host pitch.
+    char* hostBand = static_cast<char*>(req.dest.data)
+                   + static_cast<size_t>(rowBegin) * rowBytes;
+
+    err = cudaMemcpy(hostBand, devMem, bytes, cudaMemcpyDeviceToHost);
+    cudaFree(devMem);
+
+    if (err != cudaSuccess) {
+        setError("cudaMemcpy device->host", err);
+        return false;
+    }
+    return true;
+}
+
 const char* lastCudaError() {
     // CLEARED BY READING, so a stale message from three frames ago cannot be
     // reported as the cause of a fresh failure.

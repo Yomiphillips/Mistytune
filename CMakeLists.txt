@@ -59,7 +59,23 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 if(MSVC)
     # Conformance mode from commit one, so Windows-only non-conforming code
     # fails now rather than at macOS port time.
-    add_compile_options(/permissive- /W4 /utf-8)
+    #
+    # SCOPED PER LANGUAGE, AND IT HAS TO BE. add_compile_options() applies to EVERY
+    # enabled language, and once CUDA is one of them these land on nvcc's own command
+    # line rather than the host compiler's. nvcc does not recognise a bare MSVC
+    # switch and treats it as another INPUT FILE, so the whole build dies on:
+    #
+    #     nvcc fatal : A single input file is required for a non-link phase
+    #                  when an outputfile is specified
+    #
+    # which names neither the flag nor the language and reads like a broken source
+    # file. Host flags reach nvcc's host compiler only through -Xcompiler.
+    #
+    # SHELL: keeps the repeated -Xcompiler tokens; without it CMake de-duplicates
+    # them and the switches they carry get attached to the wrong one.
+    add_compile_options(
+        "$<$<COMPILE_LANGUAGE:CXX>:/permissive-;/W4;/utf-8>"
+        "$<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xcompiler /permissive- -Xcompiler /W4 -Xcompiler /utf-8>")
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
 else()
     # The clang-side equivalent of /W4. Same reasoning in reverse: keep the

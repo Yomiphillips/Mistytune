@@ -73,12 +73,39 @@ set(GOLDEN_TOLERANCE 2 CACHE STRING "Max per-channel difference for golden compa
 # Collects the bless commands as it goes, so the scene list is written once.
 set_property(GLOBAL PROPERTY MT_GOLDEN_BLESS "")
 
+# --cpu IS PASSED EXPLICITLY, AND IT HAS TO BE.
+#
+# mistytunec renders on the GPU BY DEFAULT when a device is present. The CPU path
+# is the correctness reference -- it is what these references were blessed from and
+# what the determinism tripwires are about -- so leaving the flag off would silently
+# change what this suite checks the moment someone builds on a machine with a card.
+# The GPU gets its own comparisons below, against the same references.
 function(add_golden_scene NAME)
     if(EXISTS "${GOLDEN_DIR}/${NAME}.ppm")
         add_test(NAME golden.${NAME}
-                 COMMAND mistytunec ${ARGN}
+                 COMMAND mistytunec ${ARGN} --cpu
                          --compare "${GOLDEN_DIR}/${NAME}.ppm"
                          --tolerance ${GOLDEN_TOLERANCE})
+
+        # THE CROSS-PATH COMPARISON, which could not be written until the kernel
+        # could run outside After Effects. Same scene, same reference, GPU instead
+        # of CPU -- so a divergence is a divergence in the compiler or the flags,
+        # never in somebody's second attempt at the maths.
+        #
+        # --require-gpu because a fallback to the CPU here would turn this into a
+        # duplicate of the test above and report green while checking nothing.
+        #
+        # MEASURED at the time of writing: all three scenes compare max 0 against
+        # CPU-blessed references -- byte-identical, not merely within tolerance.
+        # The tolerance is kept anyway: it is there for the transcendental library
+        # differences that a future toolkit or card may introduce, and those are
+        # exactly what this test exists to keep inside a bound.
+        if(PLUGIN_CUDA_FOUND)
+            add_test(NAME golden.gpu.${NAME}
+                     COMMAND mistytunec ${ARGN} --require-gpu
+                             --compare "${GOLDEN_DIR}/${NAME}.ppm"
+                             --tolerance ${GOLDEN_TOLERANCE})
+        endif()
     else()
         # A MISSING REFERENCE IS A FAILING TEST, NOT A SKIPPED ONE. A suite that
         # quietly passes because its references were never generated is worse
@@ -92,7 +119,9 @@ function(add_golden_scene NAME)
     endif()
 
     get_property(_bless GLOBAL PROPERTY MT_GOLDEN_BLESS)
-    list(APPEND _bless "COMMAND" "$<TARGET_FILE:mistytunec>" ${ARGN}
+    # BLESSED FROM THE CPU PATH, for the same reason the comparison runs there: the
+    # reference must not depend on whether the machine that blessed it had a GPU.
+    list(APPEND _bless "COMMAND" "$<TARGET_FILE:mistytunec>" ${ARGN} "--cpu"
                        "-o" "${GOLDEN_DIR}/${NAME}.ppm")
     set_property(GLOBAL PROPERTY MT_GOLDEN_BLESS "${_bless}")
 endfunction()
@@ -135,6 +164,18 @@ add_test(NAME determinism.threadCount
                  -DOUT_DIR=${GOLDEN_OUT}
                  -DMODE=threads
                  -P "${CMAKE_CURRENT_SOURCE_DIR}/RunDeterminism.cmake")
+
+# GPU BANDING MUST NOT CHANGE THE IMAGE. See the mode in RunDeterminism.cmake --
+# this is the only test that exercises the band-as-window offset the effect relies
+# on for every frame it renders.
+if(PLUGIN_CUDA_FOUND)
+    add_test(NAME determinism.gpuBands
+             COMMAND ${CMAKE_COMMAND}
+                     -DMISTYTUNEC=$<TARGET_FILE:mistytunec>
+                     -DOUT_DIR=${GOLDEN_OUT}
+                     -DMODE=gpubands
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/RunDeterminism.cmake")
+endif()
 
 # A different seed MUST give a different image. Without this, a renderer that
 # ignored the seed entirely would pass both tests above with full marks -- the
