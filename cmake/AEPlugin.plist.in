@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Info.plist for an After Effects EFFECT plug-in bundle.
+
+  Substituted by CMake at generate time -- see add_ae_effect() in
+  cmake/AESDK.cmake, which points MACOSX_BUNDLE_INFO_PLIST here.
+
+  The two values that actually matter to After Effects are CFBundlePackageType
+  and CFBundleSignature. AE scans the plug-ins folders and reads them to decide
+  what a bundle IS; get either wrong and the bundle is skipped at scan time
+  with no error, no log line, and no entry in the Effects panel. `eFKT` is an
+  effect; AEGP (general) plug-ins use a different pair.
+
+  No PiPL resource here on purpose. Pre-2022 hosts required one (.r -> Rez ->
+  .rsrc in Contents/Resources); this template targets AE 2023+, where effects
+  self-register via PluginDataEntryFunction2 / PF_REGISTER_EFFECT_EXT2. Same
+  decision as the Windows side, which needs no PiPLtool step for the same
+  reason. If you ever have to support pre-2022 hosts, the PiPL step comes back
+  on BOTH platforms.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>English</string>
+	<key>CFBundleExecutable</key>
+	<string>${MACOSX_BUNDLE_EXECUTABLE_NAME}</string>
+	<key>CFBundleIdentifier</key>
+	<string>${MACOSX_BUNDLE_GUI_IDENTIFIER}</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>${MACOSX_BUNDLE_BUNDLE_NAME}</string>
+	<key>CFBundlePackageType</key>
+	<string>eFKT</string>
+	<key>CFBundleSignature</key>
+	<string>FXTC</string>
+	<key>CFBundleShortVersionString</key>
+	<string>${MACOSX_BUNDLE_SHORT_VERSION_STRING}</string>
+	<key>CFBundleVersion</key>
+	<string>${MACOSX_BUNDLE_BUNDLE_VERSION}</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>${MACOSX_BUNDLE_COPYRIGHT}</string>
+</dict>
+</plist>

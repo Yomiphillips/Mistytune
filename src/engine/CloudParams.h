@@ -1,0 +1,278 @@
+#pragma once
+
+// THE PARAMETER MODEL, and the only definition of it.
+//
+// Host-free by design, like everything in src/engine/. The AE effect fills these
+// structs from checked-out parameters; src/cli/ fills them from a scene file;
+// proto/ mirrors them as shader uniforms under the same names. One definition is
+// what makes a golden image comparable between the CLI and the host, and what
+// makes the Phase 0 -> Phase 2 port a transcription rather than a redesign.
+//
+// ---------------------------------------------------------------------------
+// THE SPLIT IS LOAD-BEARING, and it is not about tidiness.
+//
+// FieldParams is everything that decides WHAT IS IN THE SKY. ViewParams is
+// everything that decides WHERE IT IS SEEN FROM. The field cache is keyed on a
+// hash of the first and ignores the second, which is what makes a camera move
+// cheap: PLAN.md is blunt that camera-only changes triggering a field rebuild is
+// the difference between a plugin people use and one they abandon.
+//
+// So: a value goes in FieldParams if changing it changes the medium, and in
+// ViewParams if it only changes the ray that looks at the medium. When in doubt
+// it goes in FieldParams -- a redundant rebuild is a slow frame, while a missed
+// rebuild is a wrong image the user cannot explain.
+// ---------------------------------------------------------------------------
+//
+// UNITS ARE SI AND METRIC THROUGHOUT -- metres, seconds, kelvin, degrees for
+// angles. Not comp pixels: the whole point of a physical model is that the
+// numbers mean something, and cloud base at 1200 m is a fact about the sky while
+// cloud base at 340 px is a fact about a comp.
+
+#include "Types.h"
+
+#include <cstdint>
+
+namespace plugin::cloud {
+
+// Everything is float rather than Scalar (double). These structs cross to the
+// GPU verbatim as a kernel argument block, and the kernel is float -- so
+// declaring them double here would mean a conversion pass whose only effect is
+// to hide which precision the render actually ran at.
+using Real = float;
+
+// ---------------------------------------------------------------------------
+// Physics
+// ---------------------------------------------------------------------------
+
+// HOW FAR FROM EARTH THE USER MAY GO.
+//
+// The Physics tab is the proof that the model is a model rather than a noise
+// stack, so it has to be real. It is also the fastest way to make a realism
+// buyer distrust the plugin, which is why Earth is the default and the alien
+// skies live in a clearly labelled demo group -- PLAN.md settles this.
+enum class PhysicsClamp : int32_t {
+    Earth     = 0,   // constants pinned; the sliders are readouts
+    EarthLike = 1,   // +/- a plausible fraction of each Earth value
+    Unbound   = 2    // anything the maths survives. Here be alien skies
+};
+
+// The planet and its air.
+//
+// GRAVITY AND SCALE HEIGHT ARE NOT INDEPENDENT in reality -- scale height is
+// RT/(Mg) -- but they are separate parameters here on purpose: a user who halves
+// gravity to see taller convection should not silently also get a different
+// atmospheric thickness they did not ask for. Under the Earth clamp both are
+// pinned to the real values, so the coupling only matters where the user has
+// explicitly said they want it not to.
+struct PhysicsParams {
+    PhysicsClamp clamp = PhysicsClamp::Earth;
+
+    Real gravity          = 9.80665f;   // m/s^2
+    Real scaleHeight      = 8500.0f;    // m -- density e-folding height
+    Real surfacePressure  = 101325.0f;  // Pa
+    Real surfaceTemp      = 288.15f;    // K
+    Real lapseRate        = 0.0065f;    // K/m, environmental
+    Real planetRadius     = 6371000.0f; // m -- sets horizon curvature
+
+    // Relative humidity at the surface, 0..1. Drives condensation level, which
+    // is where a flat-based cloud's base goes -- and the flat base is one of the
+    // things that reads as "photographed" rather than "generated".
+    Real surfaceHumidity  = 0.7f;
+};
+
+// ---------------------------------------------------------------------------
+// Atmosphere and light
+// ---------------------------------------------------------------------------
+
+// The precomputed-atmosphere inputs: Rayleigh and Mie coefficients, the sun, and
+// the ground under it.
+//
+// SUN ANGULAR RADIUS IS A PARAMETER AND NOT A CONSTANT because it is what makes
+// a shadow edge soft, and the softness of a cloud's shadow edge is a large part
+// of how big the cloud reads as being. 0.266 deg is the Sun from Earth.
+struct AtmosphereParams {
+    Real sunAzimuth       = 135.0f;   // degrees, clockwise from +Z
+    Real sunElevation     = 12.0f;    // degrees above the horizon
+    Real sunAngularRadius = 0.266f;   // degrees
+    Real sunIntensity     = 1.0f;     // multiplier on the physical irradiance
+
+    // Aerosol load. Rayleigh is fixed by the air itself; Mie is what haze,
+    // dust and humidity add, and it is the knob that turns a hard blue sky into
+    // a milky one.
+    Real turbidity        = 2.2f;     // Linke, 1 = pristine
+    Real mieAnisotropy    = 0.76f;    // Henyey-Greenstein g for the aerosol
+
+    Real groundAlbedo     = 0.1f;     // 0.1 land, 0.06 ocean, 0.8 snow
+
+    // Whether cloud shadows are cast into the atmospheric medium itself, which
+    // is what produces crepuscular rays and what makes a cloud deck sit IN the
+    // air rather than in front of it.
+    bool cloudShadowsInMedium = true;
+};
+
+// ---------------------------------------------------------------------------
+// The ice / fallstreak generator -- the first one, per PLAN.md
+// ---------------------------------------------------------------------------
+
+// Crystal habit. NOT cosmetic: habit sets fall speed, and fall speed against the
+// shear profile IS the streak shape. It also selects the phase function, which
+// is what produces 22 deg and 46 deg halos, sundogs and pillars -- the thing a
+// spherical-droplet model cannot reach at all.
+enum class IceHabit : int32_t {
+    Plate      = 0,   // slow, horizontally oriented: pillars and 22 deg
+    Column     = 1,   // faster, randomly oriented
+    Bullet     = 2,   // rosettes; broad forward lobe
+    Dendrite   = 3,   // slowest, most diffuse
+    Aggregate  = 4    // mixed habit, no preferred orientation
+};
+
+// One height-indexed shear sample. The curve is THE hero control of the ice
+// generator -- it is the streak shape, not a modifier on it.
+//
+// PHASE 2 SHIPS A FIXED SET OF THESE AS SLIDERS, smoothly interpolated, because
+// the AE SDK ships no curve control and no sample of one. The real curve editor
+// is an arbitrary-data parameter with custom UI, sized honestly as its own
+// Phase 4 task. The data shape does not change when the editor arrives, so
+// nothing downstream has to.
+constexpr int kShearKnots = 6;
+
+struct ShearProfile {
+    // Wind speed at each knot, m/s, knot 0 at the generating level and knot
+    // kShearKnots-1 at the bottom of the fall streak.
+    Real speed[kShearKnots]   = { 34.0f, 30.0f, 25.0f, 19.0f, 13.0f, 8.0f };
+    // Wind direction at each knot, degrees. A TURNING wind is what makes a
+    // fallstreak hook rather than trail, which is the difference between
+    // cirrus fibratus and cirrus uncinus.
+    Real bearing[kShearKnots] = { 270.0f, 268.0f, 264.0f, 258.0f, 250.0f, 240.0f };
+};
+
+struct IceParams {
+    bool enabled = true;
+
+    // WHERE THE CRYSTALS ARE MADE. Generating cells are discrete: crystals are
+    // born in them and then fall, which is why detail is ADVECTED along the flow
+    // and re-seeded at the cells rather than sampled from a noise field. Noise
+    // sampled per-point gives streaks that shimmer instead of flowing, and that
+    // is the single most common tell of a procedural cloud.
+    Real cellAltitude   = 9000.0f;  // m, the generating level
+    Real cellDensity    = 0.35f;    // cells per km^2, 0..1 normalised
+    Real cellSize       = 900.0f;   // m, horizontal extent of one cell
+    Real cellStrength   = 1.0f;     // crystals produced per cell
+
+    IceHabit habit      = IceHabit::Column;
+    // Fall speed multiplier ON TOP of the habit's own. The habit sets the
+    // physical speed; this is the artist's override, and it stays in real units
+    // so the number still means something.
+    Real fallSpeedScale = 1.0f;
+
+    ShearProfile shear;
+
+    // How fast a crystal shrinks as it falls into drier air below. This is what
+    // gives a fallstreak an END -- without it every streak reaches the ground
+    // and the sky looks combed.
+    Real sublimationRate = 0.55f;    // fraction of mass lost per km fallen
+    Real streakLength    = 2600.0f;  // m, the fall distance before it is gone
+
+    // Optical depth scale for the whole layer. Ice is optically thin and near
+    // single-scatter, which is exactly why it is the cheapest generator to
+    // render and the right one to prove the approach on.
+    Real opticalDepth    = 0.45f;
+
+    // Advected detail: how much fine structure rides along the flow, and how
+    // fine. Amplitude 0 gives smooth ribbons; 1 gives the fibrous look the
+    // species name refers to.
+    Real detailAmount    = 0.7f;
+    Real detailScale     = 140.0f;   // m, smallest feature
+    int32_t detailOctaves = 4;
+};
+
+// ---------------------------------------------------------------------------
+// What is in the sky
+// ---------------------------------------------------------------------------
+
+// EVERYTHING HERE IS HASHED INTO THE FIELD FINGERPRINT. Adding a member without
+// hashing it is a change the cache cannot see: the user edits it, the field is
+// not rebuilt, and the old sky stays on screen. Fingerprint.cpp static_asserts
+// this struct's size as the tripwire for exactly that -- adding a field breaks
+// the build until someone hashes it.
+struct FieldParams {
+    PhysicsParams   physics;
+    AtmosphereParams atmosphere;
+    IceParams       ice;
+
+    // The frame being rendered, in seconds. IN THE FIELD, not the view: the
+    // cells advect, so a new time is genuinely a new medium.
+    Real timeSeconds = 0.0f;
+
+    // The one seed the whole render derives from. Per PLAN.md, randomness comes
+    // from (frame, sample index, pixel) and this -- never a clock, a thread id,
+    // or a counter shared between launches, because motion blur renders one
+    // frame several times and MFR renders frames on different workers.
+    uint32_t seed = 0x5eed1ce5u;
+};
+
+// ---------------------------------------------------------------------------
+// Where it is seen from
+// ---------------------------------------------------------------------------
+
+// NOTHING HERE IS HASHED INTO THE FIELD FINGERPRINT. That is the whole point:
+// change any of it and the cached field is still valid, so the renderer restarts
+// accumulation without rebuilding the medium.
+struct ViewParams {
+    // Camera-to-world, row-major. AEGP_GetEffectCameraMatrix returns
+    // camera-to-world and it must be INVERTED for a view matrix -- see
+    // docs/HOST-NOTES.md, which also records that a comp with no camera returns
+    // a zero plane size and needs a default rather than a failure.
+    Real cameraToWorld[16] = {
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1
+    };
+
+    // True when the matrix above came from a real comp camera. Kept because
+    // "no camera, defaulting" is correct and "the call failed" is a guess, and
+    // the diagnostic log should be able to tell them apart.
+    bool cameraFromComp = false;
+
+    Real verticalFovDegrees = 39.6f;   // 50 mm on full frame
+    Real observerAltitude   = 2.0f;    // m above the ground plane
+
+    int32_t widthPx  = 1920;
+    int32_t heightPx = 1080;
+
+    // Real exposure, in stops. The render is linear float and the tonemap is a
+    // separate switch defaulting OFF, so this is the only thing between the
+    // physical radiance and the pixel.
+    Real exposureEV = 0.0f;
+    bool agxTonemap = false;
+};
+
+// ---------------------------------------------------------------------------
+// How hard to render it
+// ---------------------------------------------------------------------------
+
+// ALSO NOT HASHED. Sample count and bounce depth change how converged the image
+// is, not what is in it, so raising them continues an accumulation rather than
+// restarting one. Bounce depth is the exception worth naming: it changes the
+// image, but it changes the TRANSPORT and not the FIELD, so the cached medium
+// still stands.
+struct QualityParams {
+    int32_t samplesPerPixel = 64;
+    int32_t maxBounces      = 32;
+
+    // ONE LAUNCH PER BATCH, sized so no single launch approaches the Windows
+    // display-driver timeout -- about two seconds, which is exactly where a
+    // 2-second frame sits. Progressive accumulation is therefore a TDR
+    // mitigation before it is a quality feature; PLAN.md says so at length.
+    int32_t samplesPerLaunch = 4;
+
+    // Null-collision tracking needs an upper bound on density to bound its
+    // majorant. Too low and the estimator is biased; too high and it is just
+    // slow. Measured from the field when it is built, overridable for tests.
+    Real densityMajorant = 0.0f;   // 0 = derive from the field
+
+    bool denoise = true;
+};
+
+} // namespace plugin::cloud

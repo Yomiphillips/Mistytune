@@ -1,0 +1,22 @@
+PLACEHOLDER LICENCE -- REPLACE THIS FILE BEFORE YOU DISTRIBUTE ANYTHING.
+
+Copyright (c) 2026 Acme. All rights reserved.
+
+This file ships inside the release ZIP, and package-mac.sh fails without it, so
+it exists from day one rather than being remembered at release time.
+
+Decide what you are granting before you publish a build. The usual questions for
+a plugin:
+
+  * Is it free, paid, or free for personal use only?
+  * May it be used for commercial and client work? (If you want people to use
+    it, yes -- and say so explicitly, because silence reads as "no".)
+  * Who owns the output? Say plainly that the user does. A licence that is
+    silent about renders makes people nervous about using it on real work.
+  * May it be redistributed, bundled into template packs, or resold?
+  * Reverse engineering, warranty, limitation of liability.
+
+If you want an off-the-shelf permissive licence instead, MIT is two paragraphs
+and covers source you are happy for anyone to reuse. A plugin you distribute as
+a binary but do not want copied around usually needs a written end-user licence
+rather than an open-source one.

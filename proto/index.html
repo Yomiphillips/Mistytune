@@ -1,0 +1,1685 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mistytune Phase 0 — ice / fallstreak prototype</title>
+<style>
+  :root {
+    --bg: #101216;
+    --panel: #181b21;
+    --line: #2a2f38;
+    --text: #d8dce3;
+    --dim: #8a93a1;
+    --accent: #7fb3d5;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+               font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #wrap { display: flex; height: 100%; }
+  #view { flex: 1; position: relative; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+  canvas:active { cursor: grabbing; }
+  #hud { position: absolute; left: 10px; top: 10px; padding: 6px 10px;
+         background: rgba(0,0,0,.55); border-radius: 4px; font-variant-numeric: tabular-nums;
+         color: var(--dim); pointer-events: none; }
+  #hud b { color: var(--text); font-weight: 600; }
+  #panel { width: 330px; overflow-y: auto; background: var(--panel);
+           border-left: 1px solid var(--line); padding: 14px 16px 60px; }
+  h1 { font-size: 14px; margin: 0 0 2px; letter-spacing: .01em; }
+  .sub { color: var(--dim); font-size: 11.5px; margin: 0 0 14px; }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .09em; color: var(--accent);
+       margin: 18px 0 8px; padding-bottom: 5px; border-bottom: 1px solid var(--line); }
+  .row { display: grid; grid-template-columns: 1fr 52px; gap: 6px; align-items: center;
+         margin-bottom: 7px; }
+  .row label { color: var(--dim); font-size: 12px; }
+  .row output { text-align: right; font-variant-numeric: tabular-nums; font-size: 11.5px; }
+  input[type=range] { grid-column: 1 / -1; width: 100%; accent-color: var(--accent); margin: 0; }
+  .check { display: flex; align-items: center; gap: 7px; margin-bottom: 7px; color: var(--dim); }
+  select { width: 100%; background: #22262e; color: var(--text); border: 1px solid var(--line);
+           border-radius: 3px; padding: 4px; }
+  .note { color: var(--dim); font-size: 11.5px; margin: 8px 0 0; }
+  button { background: #22262e; color: var(--text); border: 1px solid var(--line);
+           border-radius: 3px; padding: 6px 10px; cursor: pointer; margin-right: 6px; }
+  button:hover { border-color: var(--accent); }
+  @media (max-width: 820px) {
+    #wrap { flex-direction: column; }
+    #panel { width: 100%; border-left: none; border-top: 1px solid var(--line); }
+    #view { height: 56vh; }
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="view">
+    <canvas id="gl"></canvas>
+    <div id="hud"><b id="spp">0</b> spp &nbsp;·&nbsp; <span id="ms">–</span> ms/frame &nbsp;·&nbsp; <span id="res">–</span></div>
+  </div>
+
+  <div id="panel">
+    <h1>Mistytune — Phase 0</h1>
+    <p class="sub">Ice / fallstreak. Drag to orbit, scroll to zoom.</p>
+
+    <h2>Generating cells</h2>
+    <div class="row"><label>Altitude</label><output id="o_cellAlt"></output>
+      <input type="range" id="cellAlt" min="5000" max="13000" step="100" value="9000"></div>
+    <div class="row"><label>Cell density</label><output id="o_cellDen"></output>
+      <input type="range" id="cellDen" min="0.05" max="1" step="0.01" value="0.35"></div>
+    <div class="row"><label>Cell size (m)</label><output id="o_cellSize"></output>
+      <input type="range" id="cellSize" min="200" max="3000" step="25" value="900"></div>
+    <div class="row"><label>Cell strength</label><output id="o_cellStr"></output>
+      <input type="range" id="cellStr" min="0.1" max="3" step="0.05" value="1"></div>
+
+    <h2>Habit &amp; fall</h2>
+    <select id="habit">
+      <option value="0">Plate — slow, oriented</option>
+      <option value="1" selected>Column — faster, random</option>
+      <option value="2">Bullet rosette</option>
+      <option value="3">Dendrite — slowest</option>
+      <option value="4">Aggregate</option>
+    </select>
+    <div class="row" style="margin-top:8px"><label>Fall speed ×</label><output id="o_fall"></output>
+      <input type="range" id="fall" min="0.25" max="3" step="0.05" value="1"></div>
+    <div class="row"><label>Streak length (m)</label><output id="o_streak"></output>
+      <input type="range" id="streak" min="400" max="6000" step="50" value="2600"></div>
+    <div class="row"><label>Sublimation /km</label><output id="o_subl"></output>
+      <input type="range" id="subl" min="0" max="2" step="0.02" value="0.55"></div>
+    <div class="row"><label>Optical depth</label><output id="o_od"></output>
+      <input type="range" id="od" min="0.02" max="3" step="0.02" value="0.45"></div>
+
+    <h2>Shear profile — the hero control</h2>
+    <p class="note" style="margin-top:0">Speed (m/s) at six heights, generating level first.
+      A <em>turning</em> wind is what hooks a fallstreak — that is uncinus rather than fibratus.</p>
+    <div class="row"><label>Speed · level 1</label><output id="o_s0"></output><input type="range" id="s0" min="0" max="80" step="1" value="34"></div>
+    <div class="row"><label>Speed · level 2</label><output id="o_s1"></output><input type="range" id="s1" min="0" max="80" step="1" value="30"></div>
+    <div class="row"><label>Speed · level 3</label><output id="o_s2"></output><input type="range" id="s2" min="0" max="80" step="1" value="25"></div>
+    <div class="row"><label>Speed · level 4</label><output id="o_s3"></output><input type="range" id="s3" min="0" max="80" step="1" value="19"></div>
+    <div class="row"><label>Speed · level 5</label><output id="o_s4"></output><input type="range" id="s4" min="0" max="80" step="1" value="13"></div>
+    <div class="row"><label>Speed · level 6</label><output id="o_s5"></output><input type="range" id="s5" min="0" max="80" step="1" value="8"></div>
+    <div class="row"><label>Total turning (°)</label><output id="o_turn"></output>
+      <input type="range" id="turn" min="-90" max="90" step="1" value="-30"></div>
+
+    <h2>Advected detail</h2>
+    <p class="note" style="margin-top:0">Detail rides the flow and is re-seeded at the cells.
+      It is never sampled from noise at the shading point — that is the difference between
+      fibres that flow and fibres that shimmer.</p>
+    <div class="row"><label>Amount</label><output id="o_det"></output>
+      <input type="range" id="det" min="0" max="1" step="0.02" value="0.7"></div>
+    <div class="row"><label>Scale (m)</label><output id="o_detScale"></output>
+      <input type="range" id="detScale" min="20" max="600" step="5" value="140"></div>
+    <div class="row"><label>Octaves</label><output id="o_oct"></output>
+      <input type="range" id="oct" min="1" max="6" step="1" value="4"></div>
+
+    <h2>Sun &amp; sky</h2>
+    <div class="row"><label>Sun elevation (°)</label><output id="o_sunEl"></output>
+      <input type="range" id="sunEl" min="-6" max="80" step="0.5" value="8"></div>
+    <div class="row"><label>Sun azimuth (°)</label><output id="o_sunAz"></output>
+      <input type="range" id="sunAz" min="0" max="360" step="1" value="180"></div>
+    <div class="row"><label>Sun size (°)</label><output id="o_sunR"></output>
+      <input type="range" id="sunR" min="0.05" max="3" step="0.01" value="0.266"></div>
+    <div class="row"><label>Turbidity</label><output id="o_turb"></output>
+      <input type="range" id="turb" min="1" max="12" step="0.1" value="2.2"></div>
+    <div class="row"><label>Ground albedo</label><output id="o_alb"></output>
+      <input type="range" id="alb" min="0" max="1" step="0.01" value="0.1"></div>
+    <label class="check"><input type="checkbox" id="cloudShadow" checked> Cloud shadows cast into the air</label>
+
+    <h2>Droplet phase (Jendersie–d'Eon)</h2>
+    <p class="note" style="margin-top:0">The liquid model, kept live so the two can be compared.
+      Ice habits get their own phase library at Phase 4 — that is what produces 22° and 46° haloes,
+      sundogs and pillars, and it is what a spherical-droplet model cannot reach.</p>
+    <div class="row"><label>Droplet diameter (µm)</label><output id="o_drop"></output>
+      <input type="range" id="drop" min="5" max="50" step="0.5" value="12"></div>
+    <label class="check"><input type="checkbox" id="useIcePhase" checked> Use the ice phase instead</label>
+
+    <h2>Transport</h2>
+    <div class="row"><label>Max bounces</label><output id="o_bounce"></output>
+      <input type="range" id="bounce" min="1" max="64" step="1" value="32"></div>
+    <div class="row"><label>Single-scatter albedo</label><output id="o_ssa"></output>
+      <input type="range" id="ssa" min="0.8" max="1" step="0.001" value="0.999"></div>
+    <div class="row"><label>Render scale</label><output id="o_scale"></output>
+      <input type="range" id="scale" min="0.25" max="1" step="0.05" value="0.6"></div>
+    <div class="row"><label>Samples per frame</label><output id="o_burst"></output>
+      <input type="range" id="burst" min="1" max="16" step="1" value="1"></div>
+    <p class="note">Raise this on a fast card: the image converges in proportion, at the
+      cost of the controls feeling heavier. It is the same trade the plugin makes between
+      Draft and Final.</p>
+
+    <h2>Output</h2>
+    <div class="row"><label>Exposure (EV)</label><output id="o_ev"></output>
+      <input type="range" id="ev" min="-8" max="8" step="0.1" value="0"></div>
+    <label class="check"><input type="checkbox" id="agx" checked> AgX tonemap</label>
+    <p class="note">Off = linear float, unclamped. That is the shipping default; the tonemap is
+      here so the look can be judged the way it will be graded.</p>
+
+    <h2>Presets</h2>
+    <button id="p_fibratus">Cirrus fibratus</button>
+    <button id="p_uncinus">Cirrus uncinus</button>
+    <button id="p_backlit">Backlit</button>
+    <p class="note" id="verdict"></p>
+  </div>
+</div>
+
+<script id="vs" type="x-shader/x-vertex">#version 300 es
+// A single full-screen triangle, generated from gl_VertexID. No buffers, no
+// attributes -- three vertices covering the viewport with one degenerate corner
+// off-screen, which avoids the diagonal seam a two-triangle quad puts down the
+// middle of every derivative.
+void main() {
+    vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}
+</script>
+
+<script id="fs_transmittance" type="x-shader/x-fragment">#version 300 es
+// ---------------------------------------------------------------------------
+// PASS 1: the transmittance LUT.
+//
+// Bruneton's parameterisation: x = altitude from ground to the top of the
+// atmosphere, y = cosine of the sun's zenith angle. Each texel holds the
+// transmittance from that altitude, in that direction, out to space.
+//
+// THIS IS THE WHOLE REASON A PRECOMPUTED ATMOSPHERE IS AFFORDABLE. Without it
+// every atmosphere sample has to march towards the sun, and that inner loop
+// multiplies against the outer one -- which is exactly what the C++ placeholder
+// in src/kernel/Shading.h does and exactly why it costs what it does.
+//
+// Computed once, on parameter change only. Sun DIRECTION is a lookup coordinate
+// rather than an input, so moving the sun does not invalidate it.
+// ---------------------------------------------------------------------------
+precision highp float;
+out vec4 fragColor;
+
+uniform vec2  uLutSize;
+uniform float uTurbidity;
+
+const float R_GROUND = 6360000.0;
+const float R_TOP    = 6420000.0;
+const float H_RAYLEIGH = 8000.0;
+const float H_MIE      = 1200.0;
+
+const vec3  BETA_R = vec3(5.802e-6, 13.558e-6, 33.1e-6);
+
+float betaM() { return 3.996e-6 * (uTurbidity / 2.2); }
+
+// Distance to the top of the atmosphere. Written from altitude and mu rather
+// than from a position, so the planet-sized cancellation never happens.
+float distanceToTop(float r, float mu) {
+    float disc = r * r * (mu * mu - 1.0) + R_TOP * R_TOP;
+    return max(-r * mu + sqrt(max(disc, 0.0)), 0.0);
+}
+
+void main() {
+    vec2 uv = gl_FragCoord.xy / uLutSize;
+
+    // Altitude is distributed so the low atmosphere -- where nearly all the air
+    // is -- gets most of the texels. A linear altitude axis wastes half the table
+    // on the near-vacuum above 30 km.
+    float r  = R_GROUND + (R_TOP - R_GROUND) * uv.y * uv.y;
+    float mu = uv.x * 2.0 - 1.0;
+
+    float tMax = distanceToTop(r, mu);
+
+    const int STEPS = 64;
+    float depthR = 0.0;
+    float depthM = 0.0;
+
+    for (int i = 0; i < STEPS; ++i) {
+        float t  = (float(i) + 0.5) / float(STEPS) * tMax;
+        // Law of cosines, so the altitude of the sample never needs |p| - R.
+        float ri = sqrt(r * r + t * t + 2.0 * r * t * mu);
+        float h  = max(ri - R_GROUND, 0.0);
+        float dt = tMax / float(STEPS);
+        depthR += exp(-h / H_RAYLEIGH) * dt;
+        depthM += exp(-h / H_MIE) * dt;
+    }
+
+    vec3 tau = BETA_R * depthR + vec3(betaM() * 1.11) * depthM;
+    fragColor = vec4(exp(-tau), 1.0);
+}
+</script>
+
+<script id="fs_render" type="x-shader/x-fragment">#version 300 es
+// ===========================================================================
+// PASS 2: the path tracer.
+//
+// This is the Phase 0 question in one file: does an ice fallstreak, generated
+// from cells and a shear curve and rendered with real volumetric transport,
+// read as photographed?
+//
+// What is in here, in the order PLAN.md lists it:
+//
+//   * null-collision (delta / ratio) tracking through the density field
+//   * many-bounce brute-force multiple scattering
+//   * the Jendersie-d'Eon (2023) Draine-based Mie approximation for liquid
+//   * a precomputed Bruneton-style atmosphere -- sun transmittance from the LUT,
+//     skylight, aerial perspective, and cloud shadows cast into the medium
+//   * the ice / fallstreak generator: generating cells, habit-dependent fall
+//     speed, a shear profile curve, sublimation, and detail ADVECTED along the
+//     flow and re-seeded at the cells
+//   * blue-noise-offset progressive accumulation
+//   * linear float throughout, real EV, AgX at the very end only
+// ===========================================================================
+precision highp float;
+precision highp sampler2D;
+
+out vec4 fragColor;
+
+uniform vec2      uResolution;
+uniform int       uFrameIndex;      // how many samples are already accumulated
+uniform sampler2D uPrev;            // the accumulation buffer
+uniform sampler2D uTransmittance;   // pass 1
+uniform sampler2D uBlueNoise;
+
+uniform vec3  uCamPos;
+uniform mat3  uCamBasis;            // columns: right, up, forward
+uniform float uTanHalfFov;
+
+uniform float uCellAltitude, uCellDensity, uCellSize, uCellStrength;
+uniform float uFallSpeed, uStreakLength, uSublimation, uOpticalDepth;
+uniform float uDetailAmount, uDetailScale;
+uniform int   uOctaves;
+uniform vec2  uDisp[33];            // prefix integral of wind / fall speed
+uniform vec2  uCellDrift;
+
+uniform vec3  uSunDir;
+uniform float uSunCosRadius, uTurbidity, uGroundAlbedo;
+uniform bool  uCloudShadowsInAir;
+
+uniform float uHgG, uDraineG, uDraineAlpha, uDraineW;   // Jendersie-d'Eon
+uniform bool  uUseIcePhase;
+
+uniform int   uMaxBounces;
+uniform float uAlbedo;
+uniform float uMajorant;
+uniform float uTime;
+
+const float PI = 3.14159265359;
+const float R_GROUND = 6360000.0;
+const float R_TOP    = 6420000.0;
+const float H_RAYLEIGH = 8000.0;
+const float H_MIE      = 1200.0;
+const vec3  BETA_R = vec3(5.802e-6, 13.558e-6, 33.1e-6);
+const float SUN_IRRADIANCE = 22.0;
+
+// ---------------------------------------------------------------------------
+// Randomness
+//
+// SEEDED FROM (pixel, sample index) AND NOTHING ELSE -- no clock, no frame
+// counter that survives a parameter change. The same rule the shipping renderer
+// is held to, for the same reason: the accumulation has to be reproducible, and
+// under MFR and motion blur a frame is rendered more than once.
+// ---------------------------------------------------------------------------
+uint rngState;
+
+uint pcgHash(uint v) {
+    uint state = v * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+float rand() {
+    rngState = rngState * 747796405u + 2891336453u;
+    uint word = ((rngState >> ((rngState >> 28u) + 4u)) ^ rngState) * 277803737u;
+    return float((word >> 22u) ^ word) * (1.0 / 4294967296.0);
+}
+
+// THE BLUE-NOISE OFFSET, and it is the first mitigation to reach for against
+// denoiser flicker -- PLAN.md lists it ahead of auxiliary buffers, prefiltering
+// and raising spp.
+//
+// A per-pixel offset read from a blue-noise texture, advanced along the golden
+// ratio with the sample index (a Cranley-Patterson rotation). STABLE ACROSS
+// FRAMES: the same pixel gets the same offset every frame, so the residual noise
+// is fixed in screen space rather than crawling -- which is what a temporally
+// unaware denoiser needs in order not to shimmer.
+vec2 blueNoiseOffset(ivec2 px, int index) {
+    vec2 bn = texelFetch(uBlueNoise, px & ivec2(63), 0).rg;
+    return fract(bn + float(index) * vec2(0.7548776662, 0.5698402910));
+}
+
+// ---------------------------------------------------------------------------
+// Noise, for the advected detail only
+// ---------------------------------------------------------------------------
+
+vec3 hash33(vec3 p) {
+    p = vec3(dot(p, vec3(127.1, 311.7, 74.7)),
+             dot(p, vec3(269.5, 183.3, 246.1)),
+             dot(p, vec3(113.5, 271.9, 124.6)));
+    return fract(sin(p) * 43758.5453123) * 2.0 - 1.0;
+}
+
+vec2 hash22(vec2 p) {
+    p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
+    return fract(sin(p) * 43758.5453123);
+}
+
+float gradientNoise(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    vec3 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(mix(dot(hash33(i + vec3(0,0,0)), f - vec3(0,0,0)),
+                       dot(hash33(i + vec3(1,0,0)), f - vec3(1,0,0)), u.x),
+                   mix(dot(hash33(i + vec3(0,1,0)), f - vec3(0,1,0)),
+                       dot(hash33(i + vec3(1,1,0)), f - vec3(1,1,0)), u.x), u.y),
+               mix(mix(dot(hash33(i + vec3(0,0,1)), f - vec3(0,0,1)),
+                       dot(hash33(i + vec3(1,0,1)), f - vec3(1,0,1)), u.x),
+                   mix(dot(hash33(i + vec3(0,1,1)), f - vec3(0,1,1)),
+                       dot(hash33(i + vec3(1,1,1)), f - vec3(1,1,1)), u.x), u.y), u.z);
+}
+
+float fbm(vec3 p, int octaves) {
+    float sum = 0.0, amp = 0.5, norm = 0.0;
+    for (int i = 0; i < 6; ++i) {
+        if (i >= octaves) break;
+        sum  += amp * gradientNoise(p);
+        norm += amp;
+        p    *= 2.02;
+        amp  *= 0.5;
+    }
+    return norm > 0.0 ? sum / norm : 0.0;
+}
+
+// ---------------------------------------------------------------------------
+// THE ICE / FALLSTREAK GENERATOR
+//
+// The whole idea in three lines:
+//
+//   1. Crystals are BORN in discrete generating cells at one altitude.
+//   2. They FALL at a speed their habit decides, while the wind carries them
+//      sideways at a speed and bearing that change with height.
+//   3. They SUBLIME away as they fall into drier air, which is what gives a
+//      streak an end.
+//
+// So the density at a point is not "noise evaluated here". It is: work out how
+// far a parcel now at this height must have drifted since it was released, look
+// back along that drift to find which cell released it, and ask how much of it
+// is left. DETAIL IS CARRIED IN THE PARCEL'S OWN FRAME, which is why the fibres
+// flow along the streak instead of shimmering through it.
+//
+// That inversion is the entire difference between this and a noise stack, and it
+// is the thing Phase 0 exists to put in front of a reference photograph.
+// ---------------------------------------------------------------------------
+
+// Horizontal drift accumulated between release and a given depth below the
+// generating level. Precomputed on the CPU as a prefix integral of wind / fall
+// speed and uploaded as 33 knots -- so this is a lookup, not an integral.
+vec2 driftAt(float depth) {
+    float x = clamp(depth / uStreakLength, 0.0, 1.0) * 32.0;
+    int i = int(floor(x));
+    i = clamp(i, 0, 31);
+    return mix(uDisp[i], uDisp[i + 1], x - float(i));
+}
+
+// The generating cells, at the release altitude. A jittered grid rather than a
+// noise threshold: cells are DISCRETE OBJECTS with a position and a size, and
+// that is what a photograph of uncinus shows -- a row of distinct heads, each
+// trailing its own streak.
+// THE GRID IS WIDER THAN THE CELLS, and that spacing is the whole reason this
+// reads as generating cells rather than as a slab.
+//
+// A cell whose blob radius equals the grid spacing overlaps all of its
+// neighbours, so at any occupancy above a third the field is continuous
+// everywhere -- no gaps, no distinct heads, and an optical depth several times
+// what the slider says because the overlaps sum. The sky it produces is a flat
+// sheet, which is exactly what the generator exists not to be.
+//
+// At 2.2 grid units between slots and a blob one cell-size across, cells touch
+// only occasionally. THE CLEAR LANES BETWEEN STREAK FAMILIES ARE AS MUCH OF THE
+// LOOK AS THE STREAKS ARE -- a photograph of uncinus is mostly empty sky.
+const float CELL_SPACING = 2.2;
+
+float cellField(vec2 q) {
+    float spacing = uCellSize * CELL_SPACING;
+    vec2 g = (q - uCellDrift) / spacing;
+    vec2 gi = floor(g);
+    float acc = 0.0;
+
+    for (int j = -1; j <= 1; ++j) {
+        for (int i = -1; i <= 1; ++i) {
+            vec2 o = gi + vec2(float(i), float(j));
+
+            // Whether this slot holds a cell at all. A SEPARATE HASH from the one
+            // that jitters the position: reusing one would correlate "is there a
+            // cell here" with "where is it", and the cells would drift towards one
+            // corner of every occupied slot in a visibly regular way.
+            if (hash22(o + 17.3).x > uCellDensity) continue;
+
+            vec2 jitter = hash22(o) - 0.5;
+            vec2 c = o + 0.5 + jitter * 0.8;
+
+            // Measured in cell-sizes rather than grid units, so uCellSize means
+            // the cell and not the spacing.
+            float d = length(g - c) * CELL_SPACING;
+            acc += smoothstep(1.0, 0.05, d);
+        }
+    }
+    return acc * uCellStrength;
+}
+
+float iceDensity(vec3 p) {
+    float depth = uCellAltitude - p.y;
+    if (depth < 0.0 || depth > uStreakLength) return 0.0;
+
+    // BACK ALONG THE DRIFT to where this parcel was released.
+    vec2 source = p.xz - driftAt(depth);
+
+    float cell = cellField(source);
+    if (cell <= 0.001) return 0.0;
+
+    // SUBLIMATION gives the streak an end. Without it every streak reaches the
+    // bottom of the slab and the sky looks combed rather than alive.
+    float subl = exp(-uSublimation * depth / 1000.0);
+
+    // A soft head at the generating level: crystals take a moment to grow, so the
+    // very top of a streak is thinner than just below it.
+    float head = smoothstep(0.0, 0.08 * uStreakLength, depth);
+
+    // ...and a soft tail, so the streak fades out rather than being cut off by
+    // the slab boundary.
+    float tail = 1.0 - smoothstep(0.75 * uStreakLength, uStreakLength, depth);
+
+    // THE ADVECTED DETAIL. Sampled in the SOURCE frame -- the parcel's own
+    // coordinates at release -- plus its age. Sample it at p instead and the
+    // fibres sit still in world space while the cloud moves through them, which
+    // is the single most recognisable tell of a procedural cloud.
+    float age = depth / max(uFallSpeed, 0.01);
+    float det = fbm(vec3(source / uDetailScale, age * 0.02 + uTime * 0.01), uOctaves);
+    float detail = 1.0 + uDetailAmount * det * 1.8;
+
+    float shape = cell * subl * head * tail * max(detail, 0.0);
+
+    // NORMALISED BY THE STREAK LENGTH, so that "optical depth" MEANS optical
+    // depth: a vertical path through the thickest part of a streak integrates to
+    // roughly the value on the slider.
+    //
+    // Worth doing rather than leaving a tuned constant in front of it. Cirrus has
+    // a measured optical depth of about 0.1 to 0.7, and a parameter that agrees
+    // with the literature is checkable against it; one that happens to look right
+    // at 0.45 because of a factor hidden in the code is not. It also means the
+    // slider keeps its meaning when the streak length changes, instead of the
+    // cloud thickening every time the streaks get longer.
+    return max(shape, 0.0) * uOpticalDepth / max(uStreakLength, 1.0);
+}
+
+// ---------------------------------------------------------------------------
+// Phase functions
+// ---------------------------------------------------------------------------
+
+float hg(float cosT, float g) {
+    float d = 1.0 + g * g - 2.0 * g * cosT;
+    return (1.0 - g * g) / (4.0 * PI * d * sqrt(max(d, 1e-6)));
+}
+
+// Draine, the second lobe of the Jendersie-d'Eon fit.
+float draine(float cosT, float g, float a) {
+    float d = 1.0 + g * g - 2.0 * g * cosT;
+    return (1.0 - g * g) / (4.0 * PI * d * sqrt(max(d, 1e-6)))
+         * (1.0 + a * cosT * cosT) / (1.0 + a * (1.0 + 2.0 * g * g) / 3.0);
+}
+
+// JENDERSIE-D'EON (2023), the approximate Mie function for fog and cloud.
+//
+// WHY IT MATTERS AND HENYEY-GREENSTEIN DOES NOT. HG has one lobe and no
+// structure. Real droplets produce a very strong narrow forward peak, a
+// backscatter rise, and the angular features that become a fogbow and a glory --
+// and HG has none of them, which is why HG clouds read as smoke. The fit is two
+// lobes whose parameters come from the droplet diameter, so DROPLET SIZE becomes
+// a physical control with a visible consequence instead of a tuning slider.
+float phaseLiquid(float cosT) {
+    return (1.0 - uDraineW) * hg(cosT, uHgG) + uDraineW * draine(cosT, uDraineG, uDraineAlpha);
+}
+
+// ICE, and this is explicitly a placeholder for the habit-indexed library.
+//
+// Ice is not spheres. Plates, columns, bullets and dendrites each refract through
+// their own prism angles, and the 22 and 46 degree haloes, the sundogs and the
+// pillars are all consequences of that geometry -- none of which a droplet model
+// can produce at any parameter setting. Phase 4 builds the real library.
+//
+// What is here keeps the two features that matter for the Phase 0 verdict: a very
+// strong forward lobe (ice is optically thin and near single-scatter, so backlit
+// streaks glow) and a faint 22 degree ring so the SHAPE of the halo can be judged
+// even though its physics is not modelled yet.
+float phaseIce(float cosT) {
+    // THESE TWO CONSTANTS ARE ALSO IN samplePhaseDir. They have to agree, or the
+    // pdf stops describing what was sampled -- see the note there.
+    float forward = hg(cosT, 0.85);
+    float diffuse = 1.0 / (4.0 * PI);
+    // 22 degrees is 0.3840 radians. The width is arbitrary; the ANGLE is not, and
+    // it is the only part of this the real library will keep.
+    float halo = exp(-pow((acos(clamp(cosT, -1.0, 1.0)) - 0.3840) / 0.035, 2.0)) * 0.35;
+    return mix(diffuse, forward, 0.72) + halo;
+}
+
+float phase(float cosT) {
+    return uUseIcePhase ? phaseIce(cosT) : phaseLiquid(cosT);
+}
+
+// One Henyey-Greenstein lobe, sampled analytically. g = 0 degenerates to uniform.
+vec3 sampleHG(vec3 wo, float g, out float cosT) {
+    g = clamp(g, -0.95, 0.95);
+    float u1 = rand(), u2 = rand();
+
+    if (abs(g) < 1e-3) {
+        cosT = 1.0 - 2.0 * u1;
+    } else {
+        float s = (1.0 - g * g) / (1.0 - g + 2.0 * g * u1);
+        cosT = (1.0 + g * g - s * s) / (2.0 * g);
+    }
+    cosT = clamp(cosT, -1.0, 1.0);
+
+    float sinT = sqrt(max(0.0, 1.0 - cosT * cosT));
+    float phi  = 2.0 * PI * u2;
+
+    vec3 w = normalize(wo);
+    vec3 a = abs(w.y) < 0.95 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 u = normalize(cross(a, w));
+    vec3 v = cross(w, u);
+
+    return normalize(sinT * cos(phi) * u + sinT * sin(phi) * v + cosT * w);
+}
+
+// ---------------------------------------------------------------------------
+// SAMPLING THE MIXTURE -- BY SAMPLING THE SAME MIXTURE, lobe for lobe.
+//
+// The tempting shortcut is to sample ONE Henyey-Greenstein lobe at some average g
+// and reweight by phase/pdf. It is unbiased and it does not work, for a reason
+// worth writing down because the symptom points somewhere else entirely.
+//
+// A single proxy lobe is always less forward-peaked than the real forward lobe, so
+// in the forward direction phase/pdf comes out well above 1 -- around 2.7 for the
+// ice phase against a g = 0.72 proxy. The throughput is multiplied by that weight
+// at every bounce, so a path that forward-scatters repeatedly GROWS: 2.7, then 7,
+// then 20. In a medium with a single-scatter albedo of 0.999 and a thirty-bounce
+// budget, a handful of paths per frame come home carrying hundreds, and the image
+// fills with isolated white pixels that never average away.
+//
+// That reads as a firefly problem -- a sampling-noise problem -- and the usual
+// responses to fireflies are clamping (biased) or more samples (useless here,
+// because the variance is unbounded). It is neither. It is the proxy.
+//
+// Sampling each lobe with its own probability makes the pdf match the phase term
+// for term, so the weight is exactly 1 wherever the phase is a pure mixture of the
+// sampled lobes, and bounded and small where it is not (the ice halo, which is not
+// sampled). Nothing to clamp, and nothing biased.
+// ---------------------------------------------------------------------------
+
+// The forward fraction of the ice phase. MUST MATCH phaseIce's mix() weight, or
+// the pdf stops being the density of what was actually sampled.
+const float ICE_FORWARD_W = 0.72;
+const float ICE_FORWARD_G = 0.85;
+
+vec3 samplePhaseDir(vec3 wo, out float weight) {
+    float cosT;
+    vec3 dir;
+    float pdf;
+
+    if (uUseIcePhase) {
+        if (rand() < ICE_FORWARD_W) dir = sampleHG(wo, ICE_FORWARD_G, cosT);
+        else                        dir = sampleHG(wo, 0.0, cosT);
+
+        pdf = ICE_FORWARD_W * hg(cosT, ICE_FORWARD_G)
+            + (1.0 - ICE_FORWARD_W) * (1.0 / (4.0 * PI));
+
+        // The weight is 1 plus the halo's share -- the one term not sampled. It
+        // peaks around 2 at 22 degrees and is 1 everywhere else.
+        weight = pdf > 1e-9 ? phaseIce(cosT) / pdf : 0.0;
+    } else {
+        // Jendersie-d'Eon: the Draine lobe is sampled as an HG lobe of the same g,
+        // which is exact in its angular spread and differs only by the (1 + a cos^2)
+        // factor -- a bounded ratio, around 1.8 at the diameters this covers.
+        if (rand() < uDraineW) dir = sampleHG(wo, uDraineG, cosT);
+        else                   dir = sampleHG(wo, uHgG, cosT);
+
+        pdf = uDraineW * hg(cosT, uDraineG) + (1.0 - uDraineW) * hg(cosT, uHgG);
+        weight = pdf > 1e-9 ? phaseLiquid(cosT) / pdf : 0.0;
+    }
+
+    return dir;
+}
+
+// ---------------------------------------------------------------------------
+// The atmosphere
+// ---------------------------------------------------------------------------
+
+// THE FRAME IS LOCAL BUT THE PLANET IS ROUND, and those two facts have to be
+// reconciled in exactly one place or they disagree where it matters most.
+//
+// The origin sits on the ground with the planet's centre at (0, -R, 0). Near the
+// observer, altitude is very nearly p.y -- but a horizon ray travels hundreds of
+// kilometres, and out there the ground has curved away beneath it by several
+// kilometres. Using p.y as the altitude therefore puts the sample far too low,
+// overestimates the density, and makes the horizon much too bright. That is the
+// single worst place to be wrong, because the horizon is where the longest paths
+// and most of the interesting light are.
+//
+// WRITTEN SO THE BIG SUBTRACTION NEVER HAPPENS. q = |p - centre|^2 - R^2 expands
+// to x^2 + y^2 + z^2 + 2yR, every term of which is moderate -- no cancellation of
+// two numbers near 4e13. Dividing by (|p-centre| + R) then recovers the altitude.
+float altitudeAt(vec3 p) {
+    float q = p.x * p.x + p.y * p.y + p.z * p.z + 2.0 * p.y * R_GROUND;
+    return q / (R_GROUND + sqrt(max(R_GROUND * R_GROUND + q, 0.0)));
+}
+
+// The local vertical at p. Safe to normalise directly: the components are
+// planet-sized but nothing cancels.
+vec3 upAt(vec3 p) { return normalize(vec3(p.x, p.y + R_GROUND, p.z)); }
+
+vec3 transmittanceToSpace(float altitude, float mu) {
+    float u = clamp(mu * 0.5 + 0.5, 0.0, 1.0);
+    float v = clamp(sqrt(clamp(altitude / (R_TOP - R_GROUND), 0.0, 1.0)), 0.0, 1.0);
+    return texture(uTransmittance, vec2(u, v)).rgb;
+}
+
+// Sun transmittance to a point, INCLUDING the cloud if asked.
+//
+// THE CLOUD SHADOW IS CAST INTO THE MEDIUM, not faked as a darkening. That is what
+// produces crepuscular rays and what makes a deck sit IN the air rather than in
+// front of it. It costs a ratio-tracking march per atmosphere sample, which is why
+// it is a switch.
+vec3 sunTransmittance(vec3 p, float cloudTr) {
+    float mu = dot(upAt(p), uSunDir);
+    return transmittanceToSpace(max(altitudeAt(p), 0.0), mu) * cloudTr;
+}
+
+float betaMie() { return 3.996e-6 * (uTurbidity / 2.2); }
+
+// Where a ray leaves the atmosphere shell, in the local frame.
+float atmosphereExit(vec3 ro, vec3 rd) {
+    vec3 c = vec3(0.0, -R_GROUND, 0.0);          // planet centre below the origin
+    vec3 oc = ro - c;
+    float b = dot(oc, rd);
+    float cc = dot(oc, oc) - R_TOP * R_TOP;
+    float disc = b * b - cc;
+    if (disc < 0.0) return -1.0;
+    return -b + sqrt(disc);
+}
+
+float groundHit(vec3 ro, vec3 rd) {
+    vec3 c = vec3(0.0, -R_GROUND, 0.0);
+    vec3 oc = ro - c;
+    float b = dot(oc, rd);
+    float cc = dot(oc, oc) - R_GROUND * R_GROUND;
+    float disc = b * b - cc;
+    if (disc < 0.0) return -1.0;
+    float t = -b - sqrt(disc);
+    return t;
+}
+
+// Sky radiance along a ray, with the LUT doing the sun-transmittance work.
+// This is also what an ESCAPED path picks up, which is how the cloud gets its
+// skylight -- no separate ambient term, and none wanted.
+//
+// includeSunDisc IS NOT A CONVENIENCE FLAG. It is what stops the sun being
+// counted twice -- see the call sites in trace().
+vec3 skyRadiance(vec3 ro, vec3 rd, float maxDist, bool includeSunDisc) {
+    float tTop = atmosphereExit(ro, rd);
+    if (tTop <= 0.0) return vec3(0.0);
+
+    float tGround = groundHit(ro, rd);
+    bool hitsGround = tGround > 0.0;
+    float tMax = min(hitsGround ? tGround : tTop, maxDist);
+    if (tMax <= 0.0) return vec3(0.0);
+
+    float cosT = dot(rd, uSunDir);
+    float phaseR = 3.0 / (16.0 * PI) * (1.0 + cosT * cosT);
+    float phaseM = hg(cosT, 0.76);
+
+    const int STEPS = 12;
+    vec3 sumR = vec3(0.0), sumM = vec3(0.0);
+    float depthR = 0.0, depthM = 0.0;
+    float tPrev = 0.0;
+
+    for (int i = 0; i < STEPS; ++i) {
+        float tNext = tMax * pow(float(i + 1) / float(STEPS), 2.0);
+        float dt = tNext - tPrev;
+        float tMid = 0.5 * (tPrev + tNext);
+        tPrev = tNext;
+
+        vec3 p = ro + rd * tMid;
+        float h = max(altitudeAt(p), 0.0);
+
+        float dR = exp(-h / H_RAYLEIGH) * dt;
+        float dM = exp(-h / H_MIE) * dt;
+        depthR += dR;
+        depthM += dM;
+
+        // Cloud shadow into the air, if asked. One deterministic ratio-tracking
+        // probe rather than a full march: this is inside the atmosphere loop and
+        // the shadow only needs to be soft, not exact.
+        float cloudTr = 1.0;
+        if (uCloudShadowsInAir) {
+            cloudTr = exp(-iceDensity(p + uSunDir * 400.0) * 800.0);
+        }
+
+        vec3 viewT = exp(-(BETA_R * depthR + vec3(betaMie() * 1.11) * depthM));
+        vec3 sunT  = sunTransmittance(p, cloudTr);
+
+        sumR += viewT * sunT * dR;
+        sumM += viewT * sunT * dM;
+    }
+
+    vec3 radiance = (sumR * BETA_R * phaseR + sumM * (betaMie() * phaseM)) * SUN_IRRADIANCE;
+
+    if (hitsGround && tGround <= maxDist) {
+        vec3 gp = ro + rd * tGround;
+        vec3 n = normalize(gp - vec3(0.0, -R_GROUND, 0.0));
+        float nDotL = max(dot(n, uSunDir), 0.0);
+        vec3 viewT = exp(-(BETA_R * depthR + vec3(betaMie() * 1.11) * depthM));
+        radiance += viewT * sunTransmittance(gp, 1.0) * (uGroundAlbedo * nDotL / PI) * SUN_IRRADIANCE;
+    }
+
+    // The sun disc, only where the ray actually escapes AND the caller has not
+    // already accounted for the sun by other means.
+    if (includeSunDisc && !hitsGround && maxDist > tTop * 0.999 && cosT > uSunCosRadius) {
+        float solid = 2.0 * PI * (1.0 - uSunCosRadius);
+        vec3 viewT = exp(-(BETA_R * depthR + vec3(betaMie() * 1.11) * depthM));
+        radiance += viewT * (SUN_IRRADIANCE / max(solid, 1e-9));
+    }
+
+    return radiance;
+}
+
+// ---------------------------------------------------------------------------
+// The cloud slab
+// ---------------------------------------------------------------------------
+
+bool slabRange(vec3 ro, vec3 rd, out float t0, out float t1) {
+    float top = uCellAltitude;
+    float bot = uCellAltitude - uStreakLength;
+    t0 = 0.0; t1 = 1e9;
+
+    if (abs(rd.y) < 1e-6) {
+        if (ro.y < bot || ro.y > top) return false;
+    } else {
+        float ta = (bot - ro.y) / rd.y;
+        float tb = (top - ro.y) / rd.y;
+        t0 = max(t0, min(ta, tb));
+        t1 = min(t1, max(ta, tb));
+    }
+    // A HORIZONTAL BOUND AS WELL, or a ray parallel to the deck marches forever
+    // through empty grid cells and the frame rate collapses with nothing on screen.
+    t1 = min(t1, 120000.0);
+    return t1 > t0 && t1 > 0.0;
+}
+
+// TRANSMITTANCE BY RATIO TRACKING. Unbiased, and it does not terminate the path --
+// which is what next-event estimation needs: a partial shadow has to return a
+// fraction, not a yes or a no.
+float cloudTransmittance(vec3 p, vec3 dir) {
+    float t0, t1;
+    if (!slabRange(p, dir, t0, t1)) return 1.0;
+    t0 = max(t0, 0.0);
+
+    float tr = 1.0;
+    float t = t0;
+    for (int i = 0; i < 128; ++i) {
+        t -= log(max(1.0 - rand(), 1e-7)) / uMajorant;
+        if (t >= t1) break;
+        float sigma = iceDensity(p + dir * t);
+        tr *= max(0.0, 1.0 - sigma / uMajorant);
+        // Russian roulette, so a long clear path does not cost 128 iterations for
+        // an answer that is already 1.
+        if (tr < 0.01) {
+            if (rand() > 0.5) return 0.0;
+            tr *= 2.0;
+        }
+    }
+    return tr;
+}
+
+// ---------------------------------------------------------------------------
+// The path
+// ---------------------------------------------------------------------------
+
+vec3 trace(vec3 ro, vec3 rd) {
+    vec3 radiance = vec3(0.0);
+    vec3 throughput = vec3(1.0);
+
+    for (int bounce = 0; bounce < 64; ++bounce) {
+        if (bounce >= uMaxBounces) break;
+
+        float t0, t1;
+        bool inSlab = slabRange(ro, rd, t0, t1);
+
+        bool scattered = false;
+        vec3 scatterPoint = vec3(0.0);
+
+        if (inSlab) {
+            // DELTA TRACKING. Step by an exponential distance drawn against the
+            // MAJORANT -- an upper bound on density -- then accept the collision
+            // as real with probability sigma / majorant. The rejected ones are
+            // "null collisions": fictitious matter that makes the medium uniform
+            // so the free-flight distance has a closed form.
+            //
+            // The whole point is that it needs NO integral of density along the
+            // ray, which is what makes a heterogeneous medium tractable at all.
+            // A majorant that is too low biases the result; too high and it is
+            // merely slow. Measured from the field on the CPU each time the
+            // parameters change.
+            float t = max(t0, 0.0);
+            for (int i = 0; i < 256; ++i) {
+                t -= log(max(1.0 - rand(), 1e-7)) / uMajorant;
+                if (t >= t1) break;
+                vec3 p = ro + rd * t;
+                if (rand() < iceDensity(p) / uMajorant) {
+                    scattered = true;
+                    scatterPoint = p;
+                    break;
+                }
+            }
+        }
+
+        if (!scattered) {
+            // The path left the cloud. Whatever the sky is in that direction is
+            // what it carries home -- which is the skylight term, arrived at by
+            // transport rather than by an ambient constant.
+            //
+            // THE SUN DISC IS INCLUDED ONLY FOR A RAY THAT NEVER SCATTERED, and
+            // getting this wrong is expensive in a way that is easy to misread.
+            //
+            // Every scattering event below already estimates the sun directly
+            // (next-event estimation). If an escaped path ALSO picked up the sun
+            // disc, the sun would be counted twice -- and not merely twice as
+            // bright: the disc subtends 6.8e-5 steradians, so a path that happens
+            // to scatter into it returns something like 3e5 while its neighbours
+            // return 1, and the image fills with fireflies that never average out.
+            //
+            // A camera ray that reached the sky without scattering had no NEE, so
+            // for that one the disc is the correct and only answer.
+            bool neverScattered = (bounce == 0);
+            radiance += throughput * skyRadiance(ro, rd, 1e9, neverScattered);
+            break;
+        }
+
+        // NEXT-EVENT ESTIMATION towards the sun. Without it a thin cirrus takes
+        // thousands of samples to find the sun at all, because the phase function
+        // is sharply forward and the sun is half a degree wide.
+        float shadow = cloudTransmittance(scatterPoint + uSunDir * 1.0, uSunDir);
+        if (shadow > 0.0) {
+            vec3 sunT = sunTransmittance(scatterPoint, 1.0);
+            float ph = phase(dot(rd, uSunDir));
+            radiance += throughput * uAlbedo * sunT * shadow * ph * SUN_IRRADIANCE;
+        }
+
+        // Scatter, and continue. THIS LOOP IS THE MULTIPLE SCATTERING -- no
+        // approximation, no ambient fudge, just the path carrying on until it
+        // leaves or runs out of budget.
+        float w;
+        vec3 newDir = samplePhaseDir(rd, w);
+        throughput *= uAlbedo * w;
+
+        ro = scatterPoint;
+        rd = newDir;
+
+        // Russian roulette on the throughput, after a few bounces so the cheap
+        // early ones are never killed.
+        if (bounce > 3) {
+            float p = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.05, 1.0);
+            if (rand() > p) break;
+            throughput /= p;
+        }
+    }
+
+    return radiance;
+}
+
+void main() {
+    ivec2 px = ivec2(gl_FragCoord.xy);
+    rngState = pcgHash(uint(px.x) + 1920u * uint(px.y) + 7919u * uint(uFrameIndex));
+
+    vec2 jitter = blueNoiseOffset(px, uFrameIndex) - 0.5;
+    vec2 uv = (gl_FragCoord.xy + jitter) / uResolution;
+    vec2 ndc = uv * 2.0 - 1.0;
+    float aspect = uResolution.x / uResolution.y;
+
+    vec3 rd = normalize(uCamBasis * vec3(ndc.x * uTanHalfFov * aspect,
+                                         ndc.y * uTanHalfFov,
+                                         -1.0));
+
+    vec3 sample_ = trace(uCamPos, rd);
+
+    // AERIAL PERSPECTIVE is already in the result: the sky march that an escaped
+    // path performs starts at the camera, so the air between the viewer and the
+    // cloud is integrated by the same code that produces the sky itself. There is
+    // no separate haze pass to keep in sync, and self-aerial-perspective -- the
+    // far side of one cloud seen through the near side's air -- falls out of it.
+
+    // PROGRESSIVE ACCUMULATION as a running sum, weighted by the counts. A lerp
+    // by 1/n loses precision as n grows; a sum divided once does not.
+    vec3 prev = texelFetch(uPrev, px, 0).rgb;
+    float n = float(uFrameIndex);
+    vec3 acc = (uFrameIndex == 0) ? sample_ : prev + sample_;
+
+    fragColor = vec4(acc, n + 1.0);
+}
+</script>
+
+<script id="fs_display" type="x-shader/x-fragment">#version 300 es
+// ---------------------------------------------------------------------------
+// PASS 3: display.
+//
+// THE ONLY PLACE ANYTHING NON-LINEAR HAPPENS. Everything upstream is linear
+// radiance, and the exposure below is real EV rather than a gain slider -- so a
+// value that looks right here means the same thing in the plugin.
+// ---------------------------------------------------------------------------
+precision highp float;
+out vec4 fragColor;
+
+uniform sampler2D uAccum;
+uniform vec2  uAccumSize;     // the accumulation buffer, which is SMALLER
+uniform vec2  uOutputSize;    // the canvas
+uniform float uExposure;      // stops
+uniform bool  uAgx;
+
+// AgX, with the real inset and outset matrices rather than the curve alone.
+//
+// The matrices are what give AgX its characteristic behaviour: they rotate
+// saturated colours towards the achromatic axis BEFORE the curve, so a blown
+// highlight desaturates on its way to white instead of clipping to a primary.
+// Applying only the polynomial -- which is what most short implementations do --
+// gets the contrast and misses the entire point.
+const mat3 AGX_IN = mat3(
+    0.8566271, 0.0951212, 0.0482516,
+    0.1373401, 0.7612019, 0.1014594,
+    0.1118217, 0.0767998, 0.8747050);
+
+const mat3 AGX_OUT = mat3(
+     1.1271006, -0.1413172, -0.1413172,
+    -0.1413172,  1.1271006, -0.1413172,
+    -0.1413172, -0.1413172,  1.1271006);
+
+vec3 agxCurve(vec3 x) {
+    return 15.5 * pow(x, vec3(6.0))
+         - 40.14 * pow(x, vec3(5.0))
+         + 31.96 * pow(x, vec3(4.0))
+         - 6.868 * pow(x, vec3(3.0))
+         + 0.4298 * x * x
+         + 0.1191 * x
+         - 0.00232;
+}
+
+vec3 agx(vec3 c) {
+    const float MIN_EV = -12.47393;
+    const float MAX_EV = 4.026069;
+
+    c = AGX_IN * max(c, vec3(0.0));
+    c = clamp((log2(max(c, vec3(1e-10))) - MIN_EV) / (MAX_EV - MIN_EV), 0.0, 1.0);
+    c = agxCurve(c);
+    c = AGX_OUT * c;
+    return max(c, vec3(0.0));
+}
+
+void main() {
+    // THE ACCUMULATION BUFFER IS SMALLER THAN THE CANVAS, by the render-scale
+    // slider, so the screen coordinate has to be mapped into it.
+    //
+    // texelFetch at gl_FragCoord alone -- which is the obvious thing to write --
+    // reads the buffer one-to-one and leaves everything outside its extent
+    // sampling out of bounds and returning black. The symptom is a correct image
+    // occupying one corner of the canvas with the rest empty, which reads as a
+    // viewport bug rather than as a missing scale.
+    vec2 uv = gl_FragCoord.xy / uOutputSize;
+    ivec2 texel = ivec2(clamp(uv * uAccumSize, vec2(0.0), uAccumSize - 1.0));
+
+    // NEAREST rather than bilinear, deliberately. These are RGBA32F targets and
+    // linear filtering of full-float textures needs OES_texture_float_linear,
+    // which is not universal -- and a silently unfiltered fetch on a machine
+    // without it would look like a driver bug. Nearest makes the render-scale
+    // slider's cost visible, which is the honest presentation of it anyway.
+    vec4 a = texelFetch(uAccum, texel, 0);
+    vec3 c = a.a > 0.0 ? a.rgb / a.a : vec3(0.0);
+
+    c *= exp2(uExposure);
+
+    if (uAgx) {
+        c = agx(c);
+    } else {
+        // LINEAR, and only the sRGB transfer applied so a monitor shows it.
+        // Deliberately NOT a tonemap: values above 1 clip, which is what "no
+        // tonemap" has to mean if the switch is to be worth anything.
+        c = clamp(c, 0.0, 1.0);
+        c = mix(c * 12.92, 1.055 * pow(max(c, 1e-8), vec3(1.0 / 2.4)) - 0.055,
+                step(0.0031308, c));
+        fragColor = vec4(c, 1.0);
+        return;
+    }
+
+    // AgX already lands in display-referred sRGB primaries; the transfer curve is
+    // still ours to apply.
+    c = mix(c * 12.92, 1.055 * pow(max(c, 1e-8), vec3(1.0 / 2.4)) - 0.055,
+            step(0.0031308, c));
+    fragColor = vec4(c, 1.0);
+}
+</script>
+
+<script>
+"use strict";
+
+// ===========================================================================
+// Host side: GL setup, the parameter plumbing, and the two things that are
+// genuinely CPU work -- the shear prefix integral and the density majorant.
+// ===========================================================================
+
+const canvas = document.getElementById("gl");
+const gl = canvas.getContext("webgl2", { antialias: false, preserveDrawingBuffer: false });
+
+if (!gl) {
+  document.body.innerHTML =
+    '<p style="padding:24px;font:14px system-ui;color:#d8dce3">' +
+    'WebGL2 is required and is not available in this browser.</p>';
+  throw new Error("no webgl2");
+}
+
+// FLOAT RENDER TARGETS ARE NOT OPTIONAL HERE. The accumulation buffer holds
+// linear radiance with the sun in it -- values in the thousands -- so an 8-bit
+// target would clip the only part of the image that carries the backlighting.
+const extColorFloat = gl.getExtension("EXT_color_buffer_float");
+if (!extColorFloat) {
+  document.body.innerHTML =
+    '<p style="padding:24px;font:14px system-ui;color:#d8dce3">' +
+    'EXT_color_buffer_float is required for the accumulation buffer.</p>';
+  throw new Error("no float targets");
+}
+
+function compile(type, src, name) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    console.error(name + ":\n" + gl.getShaderInfoLog(s));
+    throw new Error(name + " failed to compile");
+  }
+  return s;
+}
+
+function program(fsId, name) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, document.getElementById("vs").text, "vs"));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, document.getElementById(fsId).text, name));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+    console.error(name + ":\n" + gl.getProgramInfoLog(p));
+    throw new Error(name + " failed to link");
+  }
+  return p;
+}
+
+const progTransmittance = program("fs_transmittance", "transmittance");
+const progRender        = program("fs_render", "render");
+const progDisplay       = program("fs_display", "display");
+
+const vao = gl.createVertexArray();
+
+function makeTexture(w, h, internal, format, type, data, filter) {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0, format, type, data || null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter || gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter || gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
+}
+
+// --- the transmittance LUT -------------------------------------------------
+const LUT_W = 256, LUT_H = 64;
+const lutTex = makeTexture(LUT_W, LUT_H, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, null, gl.LINEAR);
+const lutFbo = gl.createFramebuffer();
+gl.bindFramebuffer(gl.FRAMEBUFFER, lutFbo);
+gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, lutTex, 0);
+gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+// --- blue noise ------------------------------------------------------------
+//
+// A 64x64 tile, generated by void-and-cluster. WORTH THE ~40 LINES rather than
+// using white noise: the property that matters is that the error is pushed into
+// HIGH spatial frequencies, so what is left after a few samples looks like fine
+// grain rather than clumps -- and a denoiser removes fine grain and preserves
+// clumps, mistaking them for detail.
+function voidAndCluster(n) {
+  const N = n * n;
+  const SIGMA = 1.9;
+  const RAD = 4;
+
+  // THE ENERGY FIELD IS UPDATED INCREMENTALLY, NEVER RECOMPUTED.
+  //
+  // This matters more than it looks. The textbook description of void-and-cluster
+  // says "find the tightest cluster, remove it, recompute the energy" -- and a
+  // literal reading of that is O(N) updates each costing O(N * kernel), which for
+  // a 64x64 tile is about two billion operations and a hung tab. Toggling one
+  // pixel changes the field only within the kernel's radius, so splatting that
+  // one kernel is the same answer for 121 operations instead of half a million.
+  const energy = new Float32Array(N);
+  const kernel = [];
+  for (let dy = -RAD; dy <= RAD; dy++) {
+    for (let dx = -RAD; dx <= RAD; dx++) {
+      kernel.push([dx, dy, Math.exp(-(dx * dx + dy * dy) / (2 * SIGMA * SIGMA))]);
+    }
+  }
+
+  // Wrapped, so the tile is seamless when it repeats across the screen -- which
+  // it does, at 64 pixels across a 4K frame.
+  function splat(i, sign) {
+    const y = (i / n) | 0, x = i % n;
+    for (let k = 0; k < kernel.length; k++) {
+      const dx = kernel[k][0], dy = kernel[k][1], w = kernel[k][2];
+      const yy = (y + dy + n) % n, xx = (x + dx + n) % n;
+      energy[yy * n + xx] += sign * w;
+    }
+  }
+
+  const bin = new Uint8Array(N);
+  const rank = new Int32Array(N).fill(-1);
+
+  let s = 12345;
+  const rnd = () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+
+  let count = Math.floor(N / 10);
+  for (let placed = 0; placed < count; ) {
+    const i = Math.floor(rnd() * N);
+    if (!bin[i]) { bin[i] = 1; splat(i, +1); placed++; }
+  }
+
+  function tightest() {
+    let bi = -1, bv = -Infinity;
+    for (let i = 0; i < N; i++) if (bin[i] && energy[i] > bv) { bv = energy[i]; bi = i; }
+    return bi;
+  }
+  function largestVoid() {
+    let bi = -1, bv = Infinity;
+    for (let i = 0; i < N; i++) if (!bin[i] && energy[i] < bv) { bv = energy[i]; bi = i; }
+    return bi;
+  }
+
+  // Phase 1: relax, until moving the tightest cluster into the largest void is a
+  // no-op. The bound is a safety net -- it converges in a few hundred.
+  for (let iter = 0; iter < 2000; iter++) {
+    const c = tightest(); bin[c] = 0; splat(c, -1);
+    const v = largestVoid();
+    if (v === c) { bin[c] = 1; splat(c, +1); break; }
+    bin[v] = 1; splat(v, +1);
+  }
+
+  const initial = bin.slice();
+
+  // Phase 2: rank the initial points, densest first, by taking them away.
+  for (let r = count - 1; r >= 0; r--) {
+    const c = tightest();
+    bin[c] = 0; splat(c, -1); rank[c] = r;
+  }
+
+  // Phase 3: rank everything else by filling the emptiest place each time.
+  bin.set(initial);
+  energy.fill(0);
+  for (let i = 0; i < N; i++) if (bin[i]) splat(i, +1);
+
+  for (let r = count; r < N; r++) {
+    const v = largestVoid();
+    bin[v] = 1; splat(v, +1); rank[v] = r;
+  }
+
+  // Two decorrelated channels, so one texel supplies both jitter dimensions: the
+  // rank, and the same rank read from half a tile away.
+  const out = new Uint8Array(N * 4);
+  const half = n >> 1;
+  for (let i = 0; i < N; i++) {
+    const y = (i / n) | 0, x = i % n;
+    const j = ((y + half) % n) * n + ((x + half) % n);
+    out[i * 4 + 0] = Math.min(255, Math.floor(rank[i] / N * 256));
+    out[i * 4 + 1] = Math.min(255, Math.floor(rank[j] / N * 256));
+    out[i * 4 + 2] = 0;
+    out[i * 4 + 3] = 255;
+  }
+  return out;
+}
+
+const blueNoiseTex = makeTexture(64, 64, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE,
+                                 voidAndCluster(64));
+gl.bindTexture(gl.TEXTURE_2D, blueNoiseTex);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+
+// --- accumulation ping-pong ------------------------------------------------
+let accTex = [null, null], accFbo = [null, null], accW = 0, accH = 0, frameIndex = 0;
+
+function resizeAccum(w, h) {
+  if (w === accW && h === accH) return;
+  accW = w; accH = h;
+  for (let i = 0; i < 2; i++) {
+    if (accTex[i]) gl.deleteTexture(accTex[i]);
+    if (accFbo[i]) gl.deleteFramebuffer(accFbo[i]);
+    accTex[i] = makeTexture(w, h, gl.RGBA32F, gl.RGBA, gl.FLOAT, null);
+    accFbo[i] = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, accFbo[i]);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, accTex[i], 0);
+  }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  frameIndex = 0;
+}
+
+// --- parameters ------------------------------------------------------------
+const P = {};
+const ids = ["cellAlt","cellDen","cellSize","cellStr","fall","streak","subl","od",
+             "s0","s1","s2","s3","s4","s5","turn","det","detScale","oct",
+             "sunEl","sunAz","sunR","turb","alb","drop","bounce","ssa","scale","ev","burst"];
+
+// URL OVERRIDES, for repeatable captures.
+//
+// ?burst=64&scale=0.3&sunEl=4 renders the same frame the same way every time,
+// which is what a side-by-side against a photograph needs -- and what a golden
+// image would need if this page were ever wired into the test harness. Applied
+// once, at load, so the sliders still own the values afterwards.
+(function applyUrlOverrides() {
+  const q = new URLSearchParams(location.search);
+  for (const [k, v] of q) {
+    const el = document.getElementById(k);
+    if (!el) continue;
+    if (el.type === "checkbox") el.checked = (v !== "0" && v !== "false");
+    else el.value = v;
+  }
+})();
+
+function readParams() {
+  for (const id of ids) P[id] = parseFloat(document.getElementById(id).value);
+  P.habit = parseInt(document.getElementById("habit").value, 10);
+  P.cloudShadow = document.getElementById("cloudShadow").checked;
+  P.useIcePhase = document.getElementById("useIcePhase").checked;
+  P.agx = document.getElementById("agx").checked;
+}
+
+function showParams() {
+  const fmt = (v, d) => v.toFixed(d);
+  document.getElementById("o_cellAlt").textContent  = (P.cellAlt / 1000).toFixed(1) + "km";
+  document.getElementById("o_cellDen").textContent  = fmt(P.cellDen, 2);
+  document.getElementById("o_cellSize").textContent = P.cellSize;
+  document.getElementById("o_cellStr").textContent  = fmt(P.cellStr, 2);
+  document.getElementById("o_fall").textContent     = fmt(P.fall, 2);
+  document.getElementById("o_streak").textContent   = P.streak;
+  document.getElementById("o_subl").textContent     = fmt(P.subl, 2);
+  document.getElementById("o_od").textContent       = fmt(P.od, 2);
+  for (let i = 0; i < 6; i++)
+    document.getElementById("o_s" + i).textContent = P["s" + i];
+  document.getElementById("o_turn").textContent     = P.turn + "°";
+  document.getElementById("o_det").textContent      = fmt(P.det, 2);
+  document.getElementById("o_detScale").textContent = P.detScale;
+  document.getElementById("o_oct").textContent      = P.oct;
+  document.getElementById("o_sunEl").textContent    = fmt(P.sunEl, 1) + "°";
+  document.getElementById("o_sunAz").textContent    = P.sunAz + "°";
+  document.getElementById("o_sunR").textContent     = fmt(P.sunR, 2);
+  document.getElementById("o_turb").textContent     = fmt(P.turb, 1);
+  document.getElementById("o_alb").textContent      = fmt(P.alb, 2);
+  document.getElementById("o_drop").textContent     = fmt(P.drop, 1);
+  document.getElementById("o_bounce").textContent   = P.bounce;
+  document.getElementById("o_ssa").textContent      = fmt(P.ssa, 3);
+  document.getElementById("o_scale").textContent    = fmt(P.scale, 2);
+  document.getElementById("o_burst").textContent    = P.burst;
+  document.getElementById("o_ev").textContent       = fmt(P.ev, 1);
+}
+
+// HABIT SETS FALL SPEED, and that is not cosmetic: fall speed against the shear
+// profile IS the streak shape. A dendrite falling at 0.3 m/s through the same
+// wind draws a streak six times longer and shallower than a column at 1.0.
+const HABIT_FALL = [0.35, 1.0, 1.4, 0.28, 0.9];   // m/s, plate/column/bullet/dendrite/aggregate
+
+// --- the shear prefix integral --------------------------------------------
+//
+// ON THE CPU, ONCE PER PARAMETER CHANGE, because it is the same for every ray.
+// The shader needs "how far sideways has a parcel drifted by the time it has
+// fallen this far", which is the integral of wind / fall speed over depth -- and
+// integrating that per density sample, inside a delta-tracking loop, inside a
+// bounce loop, would dominate the whole render.
+function shearIntegral() {
+  const KNOTS = 33;
+  const out = new Float32Array(KNOTS * 2);
+  const vfall = HABIT_FALL[P.habit] * P.fall;
+  const speeds = [P.s0, P.s1, P.s2, P.s3, P.s4, P.s5];
+
+  // ---------------------------------------------------------------------
+  // THE WIND IS TAKEN RELATIVE TO THE GENERATING LEVEL, and that is a physics
+  // correction rather than a convenience.
+  //
+  // The generating cell is not nailed to the ground -- it is carried along by the
+  // wind at its OWN altitude, at 34 m/s in the default profile. A crystal falling
+  // out of it is carried by the wind at whatever level it has reached. What draws
+  // the streak is the DIFFERENCE between those two, which is the shear.
+  //
+  // Integrating the absolute wind instead puts the whole streak 34 m/s downwind of
+  // a cell that has moved just as far, so the streak is drawn tens of kilometres
+  // from its own head: at the default settings, 88 km of drift for 2.6 km of fall.
+  // Every streak then overlaps every other one and the sky is a featureless sheet.
+  // The generator looks broken, and what is actually broken is the frame of
+  // reference.
+  //
+  // With the subtraction, a zero-shear profile gives a vertical curtain hanging
+  // straight below its cell -- which is the correct answer and an obvious one to
+  // check.
+  // ---------------------------------------------------------------------
+  const bearing0 = (270 + 0) * Math.PI / 180;
+  const w0x = Math.sin(bearing0) * speeds[0];
+  const w0z = Math.cos(bearing0) * speeds[0];
+
+  let x = 0, z = 0;
+  const steps = KNOTS - 1;
+  for (let k = 1; k < KNOTS; k++) {
+    const frac0 = (k - 1) / steps, frac1 = k / steps;
+    const fracM = 0.5 * (frac0 + frac1);
+    const dDepth = (frac1 - frac0) * P.streak;
+
+    // Speed interpolated between the six knots.
+    const sx = fracM * 5;
+    const si = Math.min(4, Math.floor(sx));
+    const st = sx - si;
+    const speed = speeds[si] * (1 - st) + speeds[si + 1] * st;
+
+    // A TURNING WIND, distributed over the depth. This is what makes a fallstreak
+    // HOOK rather than trail -- the difference between cirrus fibratus and
+    // cirrus uncinus, and the reason the total turning is its own control.
+    const bearing = (270 + P.turn * fracM) * Math.PI / 180;
+
+    const dt = dDepth / Math.max(vfall, 0.01);
+    x += (Math.sin(bearing) * speed - w0x) * dt;
+    z += (Math.cos(bearing) * speed - w0z) * dt;
+
+    out[k * 2 + 0] = x;
+    out[k * 2 + 1] = z;
+  }
+  return out;
+}
+
+// --- the density majorant --------------------------------------------------
+//
+// Delta tracking needs an UPPER BOUND on density. Too low and the estimator is
+// biased -- silently, and in a way that looks like the cloud being too thin. Too
+// high and it is merely slow.
+//
+// Estimated by sampling the field rather than derived analytically, because the
+// detail term is a noise product and its bound is not tight in closed form. The
+// margin is what covers the samples the estimate missed.
+function estimateMajorant() {
+  // The peak of the analytic terms, in the same units the shader produces:
+  //
+  //   cell strength, times the overlap of adjacent blobs (the 3x3 neighbourhood
+  //   sums, so two cells whose edges meet exceed either one), times the detail
+  //   term at its high end, times the optical depth normalisation.
+  //
+  // Sublimation, the head and the tail only ever REDUCE the value, so they are
+  // correctly absent from a bound.
+  // Cells are spaced 2.2 cell-sizes apart, so two blobs overlap only where their
+  // edges meet and three effectively never do.
+  const OVERLAP = 1.6;
+  const peak = P.cellStr * OVERLAP * (1 + P.det * 1.8) * P.od / Math.max(P.streak, 1);
+
+  // The margin covers what an analytic bound cannot: the detail term is a noise
+  // product whose true supremum is not the sum of its octave amplitudes.
+  //
+  // A MAJORANT THAT IS TOO LOW BIASES THE ESTIMATOR SILENTLY, and the symptom --
+  // a cloud that is thinner than the parameters say -- reads as the density
+  // scale being wrong rather than as the tracker being broken. Too high is
+  // merely slow, so the margin errs upward.
+  return Math.max(peak * 1.3, 1e-9);
+}
+
+// --- camera ----------------------------------------------------------------
+//
+// A FREE-LOOK CAMERA STANDING ON THE GROUND, not an orbit around the cloud.
+//
+// That is not a UI preference, it is the viewpoint the whole product is about.
+// Cirrus is nine kilometres up and tens of kilometres across; nobody ever sees it
+// from outside. Orbiting it would let the prototype be judged from a position no
+// photograph is ever taken from, and the Phase 0 verdict is specifically a
+// comparison against photographs.
+//
+// So: the eye stays near the ground, drag aims it, and the wheel changes the
+// FOCAL LENGTH -- which is what a photographer would change.
+// THE DEFAULT LENS IS WIDE, AND THAT FOLLOWS FROM THE PHYSICS RATHER THAN TASTE.
+//
+// A crystal falling at a metre a second through a shear of twenty metres a second
+// takes most of an hour to fall two kilometres, and travels tens of kilometres
+// sideways while it does. Fallstreaks really are that long. Seen from below at
+// nine kilometres, one streak subtends far more than a normal lens covers -- so a
+// 46 degree view shows a piece of one streak and reads as an even haze.
+//
+// Photographs of cirrus are taken wide for exactly this reason: the sweeping
+// strokes across the whole frame ARE the subject. 75 degrees and a steep upward
+// pitch is roughly a 24 mm lens aimed at the sky, which is what those photographs
+// were shot on.
+const cam = { yaw: 0.0, pitch: 0.78, fovDeg: 75, height: 20 };
+let dragging = false, lastX = 0, lastY = 0;
+
+canvas.addEventListener("mousedown", e => { dragging = true; lastX = e.clientX; lastY = e.clientY; });
+window.addEventListener("mouseup", () => dragging = false);
+window.addEventListener("mousemove", e => {
+  if (!dragging) return;
+  cam.yaw   -= (e.clientX - lastX) * 0.004;
+  cam.pitch += (e.clientY - lastY) * 0.003;
+  // Up to just past the zenith, down to a little below the horizon.
+  cam.pitch = Math.max(-0.15, Math.min(1.5, cam.pitch));
+  lastX = e.clientX; lastY = e.clientY;
+  // A CAMERA MOVE RESTARTS ACCUMULATION AND REBUILDS NOTHING -- the same rule the
+  // plugin's field cache enforces, and the reason exploring stays cheap.
+  frameIndex = 0;
+});
+canvas.addEventListener("wheel", e => {
+  e.preventDefault();
+  cam.fovDeg *= Math.exp(e.deltaY * 0.0012);
+  cam.fovDeg = Math.max(8, Math.min(100, cam.fovDeg));
+  frameIndex = 0;
+}, { passive: false });
+
+function cameraBasis() {
+  const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
+  const cy = Math.cos(cam.yaw),   sy = Math.sin(cam.yaw);
+  // forward, looking up at the deck
+  const f = [ sy * cp, sp, -cy * cp ];
+  const upW = [0, 1, 0];
+  let r = [ f[1]*upW[2] - f[2]*upW[1], f[2]*upW[0] - f[0]*upW[2], f[0]*upW[1] - f[1]*upW[0] ];
+  const rl = Math.hypot(r[0], r[1], r[2]) || 1;
+  r = r.map(v => v / rl);
+  const u = [ r[1]*f[2] - r[2]*f[1], r[2]*f[0] - r[0]*f[2], r[0]*f[1] - r[1]*f[0] ];
+  // Column-major for WebGL: columns are right, up, forward.
+  return new Float32Array([ r[0], r[1], r[2], u[0], u[1], u[2], -f[0], -f[1], -f[2] ]);
+}
+
+// --- uniform plumbing ------------------------------------------------------
+function loc(p, n) { return gl.getUniformLocation(p, n); }
+
+let lutDirty = true;
+let lastSignature = "";
+
+function fieldSignature() {
+  // THE SAME IDEA AS THE PLUGIN'S FIELD FINGERPRINT: everything that changes what
+  // is in the sky, and nothing that only changes where it is seen from. Camera
+  // moves restart accumulation; they never rebuild anything.
+  return ids.filter(i => i !== "scale" && i !== "ev").map(i => P[i]).join(",") +
+         "|" + P.habit + P.cloudShadow + P.useIcePhase;
+}
+
+function drawTransmittance() {
+  gl.bindFramebuffer(gl.FRAMEBUFFER, lutFbo);
+  gl.viewport(0, 0, LUT_W, LUT_H);
+  gl.useProgram(progTransmittance);
+  gl.uniform2f(loc(progTransmittance, "uLutSize"), LUT_W, LUT_H);
+  gl.uniform1f(loc(progTransmittance, "uTurbidity"), P.turb);
+  gl.bindVertexArray(vao);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+
+let lastTime = performance.now(), emaMs = 0;
+
+function frame() {
+  readParams();
+  showParams();
+
+  const sig = fieldSignature();
+  if (sig !== lastSignature) {
+    lastSignature = sig;
+    frameIndex = 0;
+    lutDirty = true;
+  }
+
+  // ONLY WHEN IT ACTUALLY CHANGED. Assigning canvas.width at all reallocates and
+  // clears the drawing buffer, even when the value is identical -- so doing it
+  // unconditionally every frame would throw the displayed image away sixty times
+  // a second and the accumulation would never appear to converge.
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const wantW = Math.max(1, Math.floor(canvas.clientWidth  * dpr));
+  const wantH = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+  if (canvas.width !== wantW || canvas.height !== wantH) {
+    canvas.width = wantW;
+    canvas.height = wantH;
+  }
+
+  const rw = Math.max(1, Math.floor(canvas.width  * P.scale));
+  const rh = Math.max(1, Math.floor(canvas.height * P.scale));
+  resizeAccum(rw, rh);
+
+  if (lutDirty) { drawTransmittance(); lutDirty = false; }
+
+  // --- render into the accumulation buffer ---
+  gl.viewport(0, 0, rw, rh);
+  gl.useProgram(progRender);
+
+  gl.uniform2f(loc(progRender, "uResolution"), rw, rh);
+
+  gl.uniform1i(loc(progRender, "uPrev"), 0);          // rebound per sample below
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, lutTex);
+  gl.uniform1i(loc(progRender, "uTransmittance"), 1);
+  gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, blueNoiseTex);
+  gl.uniform1i(loc(progRender, "uBlueNoise"), 2);
+
+  // Standing on the ground, looking up. See the camera block above for why this
+  // is not an orbit.
+  gl.uniform3f(loc(progRender, "uCamPos"), 0.0, cam.height, 0.0);
+  gl.uniformMatrix3fv(loc(progRender, "uCamBasis"), false, cameraBasis());
+  gl.uniform1f(loc(progRender, "uTanHalfFov"), Math.tan(0.5 * cam.fovDeg * Math.PI / 180));
+
+  gl.uniform1f(loc(progRender, "uCellAltitude"), P.cellAlt);
+  gl.uniform1f(loc(progRender, "uCellDensity"),  P.cellDen);
+  gl.uniform1f(loc(progRender, "uCellSize"),     P.cellSize);
+  gl.uniform1f(loc(progRender, "uCellStrength"), P.cellStr);
+  gl.uniform1f(loc(progRender, "uFallSpeed"),    HABIT_FALL[P.habit] * P.fall);
+  gl.uniform1f(loc(progRender, "uStreakLength"), P.streak);
+  gl.uniform1f(loc(progRender, "uSublimation"),  P.subl);
+  gl.uniform1f(loc(progRender, "uOpticalDepth"), P.od);
+  gl.uniform1f(loc(progRender, "uDetailAmount"), P.det);
+  gl.uniform1f(loc(progRender, "uDetailScale"),  P.detScale);
+  gl.uniform1i(loc(progRender, "uOctaves"),      P.oct);
+  gl.uniform2fv(loc(progRender, "uDisp"),        shearIntegral());
+  gl.uniform2f(loc(progRender, "uCellDrift"),    0.0, 0.0);
+
+  const el = P.sunEl * Math.PI / 180, az = P.sunAz * Math.PI / 180;
+  gl.uniform3f(loc(progRender, "uSunDir"),
+               Math.sin(az) * Math.cos(el), Math.sin(el), Math.cos(az) * Math.cos(el));
+  gl.uniform1f(loc(progRender, "uSunCosRadius"), Math.cos(P.sunR * Math.PI / 180));
+  gl.uniform1f(loc(progRender, "uTurbidity"),    P.turb);
+  gl.uniform1f(loc(progRender, "uGroundAlbedo"), P.alb);
+  gl.uniform1i(loc(progRender, "uCloudShadowsInAir"), P.cloudShadow ? 1 : 0);
+
+  // JENDERSIE-D'EON coefficients for 5 <= d <= 50 um, straight from the paper.
+  // Computed here rather than in the shader because they depend only on the
+  // droplet diameter, which is a parameter and not a per-pixel quantity.
+  const d = P.drop;
+  gl.uniform1f(loc(progRender, "uHgG"),       Math.exp(-0.0990567 / (d - 1.67154)));
+  gl.uniform1f(loc(progRender, "uDraineG"),   Math.exp(-(2.20679 / (d + 3.91029)) - 0.428934));
+  gl.uniform1f(loc(progRender, "uDraineAlpha"), Math.exp(3.62489 - 8.29288 / (d + 5.52825)));
+  gl.uniform1f(loc(progRender, "uDraineW"),   Math.exp(-(0.599085 / (d - 0.641583)) - 0.665888));
+  gl.uniform1i(loc(progRender, "uUseIcePhase"), P.useIcePhase ? 1 : 0);
+
+  gl.uniform1i(loc(progRender, "uMaxBounces"), P.bounce);
+  gl.uniform1f(loc(progRender, "uAlbedo"),     P.ssa);
+  gl.uniform1f(loc(progRender, "uMajorant"),   estimateMajorant());
+  gl.uniform1f(loc(progRender, "uTime"),       0.0);
+
+  // SEVERAL SAMPLES PER DISPLAYED FRAME, ping-ponging between the two buffers.
+  //
+  // Each iteration is a complete sample of the same image, so this is the same
+  // accumulation the plugin performs across chunked launches -- and it is here
+  // for one of the same two reasons. The plugin chunks because a single launch
+  // long enough to finish a frame trips the Windows display-driver timeout; this
+  // page bursts because a browser that only gets one sample per vsync takes a
+  // minute to converge on a slow card.
+  gl.bindVertexArray(vao);
+  let dst = frameIndex % 2;
+  const burst = Math.max(1, P.burst | 0);
+
+  for (let b = 0; b < burst; b++) {
+    const src = frameIndex % 2;
+    dst = (frameIndex + 1) % 2;
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, accFbo[dst]);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, accTex[src]);
+    gl.uniform1i(loc(progRender, "uFrameIndex"), frameIndex);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    frameIndex++;
+  }
+
+  // --- display ---
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.useProgram(progDisplay);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, accTex[dst]);
+  gl.uniform1i(loc(progDisplay, "uAccum"), 0);
+  gl.uniform2f(loc(progDisplay, "uAccumSize"), rw, rh);
+  gl.uniform2f(loc(progDisplay, "uOutputSize"), canvas.width, canvas.height);
+  gl.uniform1f(loc(progDisplay, "uExposure"), P.ev);
+  gl.uniform1i(loc(progDisplay, "uAgx"), P.agx ? 1 : 0);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  const now = performance.now();
+  emaMs = emaMs === 0 ? (now - lastTime) : emaMs * 0.9 + (now - lastTime) * 0.1;
+  lastTime = now;
+
+  document.getElementById("spp").textContent = frameIndex;
+  document.getElementById("ms").textContent  = emaMs.toFixed(1);
+  document.getElementById("res").textContent = rw + "×" + rh;
+
+  requestAnimationFrame(frame);
+}
+
+// --- presets ---------------------------------------------------------------
+function setAll(vals) {
+  for (const k in vals) {
+    const el = document.getElementById(k);
+    if (!el) continue;
+    if (el.type === "checkbox") el.checked = vals[k]; else el.value = vals[k];
+  }
+  frameIndex = 0;
+}
+
+document.getElementById("p_fibratus").onclick = () => setAll({
+  // FIBRATUS: straight, fine, parallel fibres. Little turning, fast fall,
+  // moderate sublimation -- the streak trails without hooking.
+  habit: 1, fall: 1.4, turn: -4, streak: 2200, subl: 0.7, od: 0.35,
+  cellDen: 0.55, cellSize: 700, det: 0.8, detScale: 110,
+  s0: 38, s1: 35, s2: 31, s3: 27, s4: 22, s5: 18, sunEl: 14
+});
+
+document.getElementById("p_uncinus").onclick = () => setAll({
+  // UNCINUS: the hook. A slow-falling habit, strong speed shear and a turning
+  // wind, so the head stays put while the tail is dragged and rotated away.
+  habit: 3, fall: 0.8, turn: -55, streak: 3400, subl: 0.45, od: 0.5,
+  cellDen: 0.25, cellSize: 1200, det: 0.65, detScale: 160,
+  s0: 42, s1: 34, s2: 25, s3: 16, s4: 9, s5: 4, sunEl: 11
+});
+
+document.getElementById("p_backlit").onclick = () => setAll({
+  // BACKLIT is the default the plugin ships with, and the reason is here: ice is
+  // optically thin and near single-scatter, so its forward lobe is where all the
+  // structure lives. Lit from behind it glows; lit from the front it is a smear.
+  sunEl: 4, sunAz: 180, ev: 1.2, od: 0.55, turb: 2.6, agx: true
+});
+
+document.getElementById("verdict").textContent =
+  "Phase 0 exit criterion: side by side with reference photographs of cirrus " +
+  "fibratus and uncinus, backlit, this must read as photographed — and the hook " +
+  "must visibly be the shear curve rather than a sculpted shape.";
+
+readParams();
+showParams();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

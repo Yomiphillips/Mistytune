@@ -1,0 +1,29 @@
+# Build output
+build/
+build-dist/
+out/
+
+# Release staging produced by `build.ps1 -Package` and `package-mac.sh`. The ZIP
+# is uploaded to a release page, not committed -- a binary in git is a binary in
+# git forever.
+dist/
+*.zip
+*.aex
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# macOS
+.DS_Store
+*.dSYM/
+
+# Adobe's AE SDK -- NEVER commit. Licensed by Adobe, redistribution not
+# permitted. Download separately and point AE_SDK_ROOT at it.
+sdk/
+
+# IDE
+.vs/
+.vscode/
+CMakeSettings.json
+CMakeUserPresets.json

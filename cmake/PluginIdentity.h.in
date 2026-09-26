@@ -1,0 +1,38 @@
+#pragma once
+
+// GENERATED FILE -- do not edit, and do not commit.
+//
+// Written by CMake from cmake/PluginIdentity.h.in, filled in from
+// cmake/PluginConfig.cmake. Lands in <build>/generated/PluginIdentity.h, which
+// the plugin_identity INTERFACE target puts on the include path.
+//
+// This is what keeps the plugin's name out of the shared infrastructure: the
+// effect, the bridge and the diagnostics all ask here rather than hardcoding a
+// string, so cmake/PluginConfig.cmake stays the one file that names the plugin.
+
+#define PLUGIN_NAME       "@PLUGIN_DISPLAY_NAME@"
+#define PLUGIN_CATEGORY   "@PLUGIN_CATEGORY@"
+#define PLUGIN_VENDOR     "@PLUGIN_VENDOR@"
+
+// THE PERMANENT IDENTITY. After Effects stores this in every project file that
+// uses the effect and finds the effect by it at load time. Changing it after ship
+// drops the effect from every saved comp and takes the user's sky settings with
+// it. See cmake/PluginConfig.cmake.
+#define PLUGIN_MATCH_NAME "@PLUGIN_MATCH_NAME@"
+
+// Diagnostics: set @PLUGIN_ENV_PREFIX@_DIAG=1 before launching After Effects,
+// then read this file in the temp directory. See src/ae/DiagLog.h.
+//
+// Logs interleave under multi-frame rendering, so diagnose on a single still
+// frame -- if the output looks shuffled, that is why.
+#define PLUGIN_DIAG_ENV   "@PLUGIN_ENV_PREFIX@_DIAG"
+#define PLUGIN_LOG_NAME   "@PLUGIN_LOG_NAME@"
+
+// Effect registration numbers, single-sourced in cmake/EffectFlags.cmake.
+//
+// src/ae/EffectCommon.h static_asserts that these equal the OR of the symbolic
+// PF_OutFlag_* constants the effect actually sets, so a flag typo is a compile
+// error on this machine rather than a load failure on someone else's.
+#define PLUGIN_EFFECT_OUT_FLAGS   @MT_EFFECT_OUT_FLAGS@
+#define PLUGIN_EFFECT_OUT_FLAGS2  @MT_EFFECT_OUT_FLAGS2@
+#define PLUGIN_EFFECT_VERSION     @MT_EFFECT_VERSION@

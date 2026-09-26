@@ -1,0 +1,37 @@
+# Unit tests for the engine. No AE SDK, no After Effects, no GPU, no host -- they
+# build and run anywhere, which is what makes them the fast iteration loop.
+#
+# THIS IS TIER 1 OF THREE (PLAN.md, "Testing"). It covers the parameter model,
+# the cache policy, the fingerprint's coverage and the contour extraction --
+# everything whose answer does not depend on a renderer. Tier 2 is
+# tests/golden/, which renders fixed scenes through src/cli/ and compares with
+# tolerance; tier 3 is the in-host checks that are scripted but judged by eye.
+#
+# THE SPLIT EXISTS SO THAT THE FIRST TIER NEEDS NEITHER AE NOR A GPU. A path
+# tracer that can only be tested inside After Effects cannot be bisected, and the
+# whole reason src/engine/ holds no host and no GPU headers is to keep this loop
+# measured in milliseconds.
+#
+# Target name is deliberately generic, so the build scripts need no edit when the
+# plugin is renamed.
+
+add_executable(plugin_tests
+    unit/TestMain.cpp
+
+    # The field fingerprint. The coverage test is the one that matters: a hash
+    # that misses a parameter passes every other check you can write about it.
+    unit/TestFingerprint.cpp
+
+    # The three-way cache decision. CameraMoveKeepsTheField is the row PLAN.md
+    # calls the difference between a plugin people use and one they abandon.
+    unit/TestFieldCache.cpp
+
+    # Ordered contours out of a matte: the front half of pareidolia.
+    unit/TestContour.cpp
+
+    unit/TestFramework.h
+)
+
+target_link_libraries(plugin_tests PRIVATE plugin_engine)
+
+add_test(NAME unit COMMAND plugin_tests)
