@@ -4,6 +4,272 @@ Tracked against `PLAN.md`. Newest first.
 
 ---
 
+## 2026-09-28 — The 3D camera is real; the field cache is NOT worth wiring yet
+
+### `fillCameraFromComp()` is no longer a stub
+
+It calls `AEGP_GetEffectCameraMatrix` and takes the comp camera's orientation and
+field of view. A zero plane size means no camera, which is the ordinary case for a
+generator on a solid and takes the default; `cameraFromComp` records which, and the
+log now names it rather than leaving it to be inferred from the picture.
+
+**THE CONVERSION LIVES IN `src/engine/CameraConvert.h`, NOT IN `src/ae/`.** It is a
+transpose and a handedness flip — AE is +Y down, +Z into the screen, row-vector; this
+renderer is +Y up, -Z forward, column-vector — and it produces a camera, which is the
+thing in this renderer whose errors look least like errors. A camera pointing the
+wrong way renders a plausible, well-formed, entirely incorrect picture. Every bug this
+project shipped lived in host glue that tier 1 could not reach, so the AE types stop
+at the caller and the arithmetic is sixteen doubles in, sixteen floats out.
+
+Six unit tests, **worked out by hand rather than blessed from a run** — a conversion
+test recorded from its own output agrees with whatever the code did that day, which
+for a camera means agreeing with a wrong picture. They cover: AE's identity camera is
+our identity; a camera pitched up pitches UP (the assertion that would have caught the
+20-degrees-below-the-horizon default that rendered black); a yaw does not roll (the
+transpose); position does not reach the rays; the FOV comes from the plane HEIGHT, not
+the width; and no camera reports zero rather than a default.
+
+**Verified in the host, both halves, by independent evidence.**
+
+- *Orientation*: a fresh AE camera is level, and the rendered horizon sits at the
+  vertical centre of the frame. A handedness error would have put it anywhere else.
+- *Field of view*: the effect logged **12.5 degrees vertical**, which looked wrong --
+  AE's default 50mm camera on a 1920x1080 comp is about 22.9 degrees vertical, and a
+  wrong FOV renders a completely convincing picture. It was not wrong. The camera in
+  the comp was a **92.59mm** lens showing **Angle of View 22.00 degrees**, and AE
+  measures that **horizontally** (Measure Film Size: Horizontally). At 16:9 that is
+  2*atan(tan(11 deg) * 1080/1920) = **12.48 degrees vertical**.
+
+So the conversion agrees with AE's own UI, through a unit AE does not print. The raw
+`distanceToPlane` and plane size are logged beside the derived angle now, because that
+question took a screenshot of the camera panel to answer and should take one log line
+next time.
+
+**Aside, measured:** one sample at 1920x1080 costs 0.09-0.18 s with this camera against
+0.02 s with the default one. A level camera at a narrow FOV points every ray near the
+horizon, where the slant paths are longest and the ray-march takes the most steps. Same
+kernel, more work per pixel -- worth knowing before anyone reads a future timing as a
+regression.
+
+**Translation is deliberately dropped.** AE's world is comp pixels with an arbitrary
+origin; this renderer's is metres with the observer at `observerAltitude`. There is no
+conversion without a scene-scale parameter, which does not exist and should not be
+invented here. It costs nothing while the sky is at infinity, and starts costing
+something in Phase 3 when clouds sit at a finite altitude and the camera flies past
+them.
+
+### The field cache was NOT wired in, and that is the finding
+
+PLAN.md's Phase 2 asks for "the field cache keyed on the fingerprint", and the last
+entry carried "nothing is cached between renders" forward as debt. Having gone to wire
+it up: **it should not be wired up yet, for three reasons, and the third is the one
+that would have bitten.**
+
+**1. There is no field to cache.** `FieldCache` exists to avoid rebuilding an
+expensive volumetric medium. The Phase 1 sky is an analytic integral in `skyRadiance`
+with no build step at all, so the cache would wrap a rebuild that costs nothing. It
+becomes real the same week the medium does.
+
+**2. "Exposure should cost nothing" contradicts a deliberate decision already made
+here, with a better reason than the debt note had.** `FieldCache.cpp` puts
+`exposureEV` and `agxTonemap` in the view hash on purpose: OIDN is trained on roughly
+perceptual magnitudes, so the exposure the user chose has to be in the numbers before
+the denoiser sees them, or denoising strength silently tracks the exposure slider.
+
+The resolution is neither of the two positions on record: store **raw** radiance and
+make exposure, denoise and tonemap a RESOLVE pass over it. Then an exposure change
+costs one denoise rather than a re-render, and the denoiser still sees exposed values.
+That splits `viewHash` into a sampling key and a resolve key — and it should be
+designed the week OIDN lands, not guessed at now, because OIDN's actual cost is the
+only number that says whether the resolve pass is worth having.
+
+**3. MULTI-FRAME RENDERING IS ON**, and a cross-render accumulator is shared mutable
+state between concurrently rendering frames. `PF_OutFlag2_SUPPORTS_THREADED_RENDERING`
+is set; docs/HOST-NOTES.md is blunt that anything shared then needs a lock or needs not
+to be shared. A single accumulator keyed on one `RenderKey` would thrash between the
+frames AE has in flight, so it wants a keyed cache with an eviction policy and a lock.
+
+That is a real piece of work whose payoff today is saving a re-render **of a frame that
+takes 20 ms**. It is worth building when a frame takes two seconds, which is the same
+week as reasons 1 and 2.
+
+**Carried forward, with the reasoning rather than as a bare line:** the cache lands
+with the real transport, and its design question is the sampling/resolve key split.
+
+---
+
+## 2026-09-28 — Phase 2: the GPU stops allocating, and a frame stops being one launch
+
+Three things in the launch path, plus a fourth defect found the moment a Region of
+Interest was finally drawn in the host.
+
+### THE THIRD TIME THIS PROJECT HAS SHIPPED THE SAME SHAPE OF BUG
+
+A Region of Interest was drawn over part of the frame, and the effect rendered a flat
+pale-blue rectangle. The log:
+
+    PRE_RENDER: frame=1920x1080 request=[633,387 907x751] downsample=1/1,1/1
+      result_rect=[633,387 907x693]
+    SMART_RENDER_HOST: output=907x693 rowbytes=7296
+      frame=1920x1080 origin=0,0
+
+AE asked for a rect at **(633,387)**, returned a buffer of exactly that size, and
+`in_data->output_origin_x/y` reported **ZERO**. So the renderer drew the top-left
+907x693 of the sky into a buffer AE composited at (633,387) — and the top-left corner
+of a sky is empty, so it came back as a flat rectangle that reads as a broken effect.
+
+**It is the same bug three times, each time with a different field to blame:**
+
+| | the wrong number | what it looked like |
+| --- | --- | --- |
+| the requested rect stored as the frame | request 2304x1296 vs frame 1920x1080 | FOV widened, image off centre |
+| the layer size stored at full resolution | 1920 against a 640-wide buffer | flat blue at Third resolution |
+| output_origin read instead of the result rect | 0,0 against a rect at 633,387 | flat pale blue inside the ROI |
+
+Every one is the same mistake: **the buffer is a WINDOW into the frame, and the number
+that says where the window sits came from the wrong place.** Every one was found by a
+render in the host, and none by any test.
+
+**The fix.** Pre-render now records its own `result_rect` into `PreRenderData` and both
+render paths take the origin from there, through one `applyRenderOrigin()` rather than
+two copies of a subtle line. The result rect is the rect the effect TOLD AE it would
+fill, and the buffer handed back has matched it exactly on every frame measured.
+
+**The size is now checked rather than assumed**, and the log prints `output_origin`
+beside the value actually used — so if the two ever disagree in the other direction,
+or AE hands back a buffer that is not the promised rect, it announces itself instead
+of quietly rendering the wrong patch.
+
+**Verified in the host.** `origin=933,433 (output_origin=0,0)` on the ROI frame, and
+the correct patch of sky inside the box.
+
+### The test that was missing, and the fourth bug it found immediately
+
+`mistytunec` gained `--window <x> <y> <w> <h>` (render a sub-rect; `-w/-h` stay the
+frame) and `--compare-at <x> <y>` (compare against that region of a reference).
+`determinism.window` renders a window and checks it against the same patch of a
+whole-frame render, on both engines, with a control that the same window compared at
+the WRONG place must fail.
+
+**It failed on the first run, at max 190 of 255.**
+
+`renderPixel()` seeded the sampler from `px, py` -- the BUFFER pixel -- while building
+the ray from `px + originX` -- the FRAME pixel. So the same frame pixel got different
+sub-pixel jitter depending on how the frame happened to be divided. A Region of
+Interest disagreed with the picture underneath it, and a banded render disagreed with
+a whole-frame one.
+
+**`determinism.gpuBands` had been asserting almost exactly that property, and passing.**
+Its scene was the suite's shared 96x54 sky at sun elevation 20 -- smooth enough that a
+different jitter moves no pixel by a whole level. The bug was live underneath a green
+test. Its scene is now 256x144 with the sun disc in frame, where sub-pixel differences
+become whole levels, and with the fix reverted **both** tests now fail. Before the
+scene change, only the new one did.
+
+    A TEST CAN ONLY CATCH WHAT ITS SCENE CAN SHOW.
+
+That is the third lesson of the day and the most expensive one, because a green test
+asserting the right property is harder to doubt than no test at all.
+
+**The mean was 0.51** while the maximum was 190 -- the whole case for comparing maxima,
+made again by an unrelated bug. 13 ctest suites now.
+
+### The rest, none of it yet seen by After Effects
+
+### The device buffer persists
+
+`renderCudaToHost()` allocated and freed per band. It now reserves grow-only
+thread-local scratch (`DeviceScratch` in `Mistytune.cu`) and hands back the same
+pointer for the life of the thread.
+
+Measured, 1920x1080 at one sample through `mistytunec --require-gpu`:
+
+| | before | after |
+| --- | --- | --- |
+| 135 bands of 8 rows | 302 ms | **227 ms** |
+| one band, whole frame | 186 ms | 177 ms |
+
+About **0.55 ms per band** of driver-side allocation removed. The one-band row barely
+moves, which is the check that the number means what it says: one launch allocates
+once either way. Both totals include roughly 150 ms of process start and CUDA context
+init, so the render-only share of that 75 ms is much larger than it looks.
+
+**thread_local, not global.** Multi-frame rendering puts several frames in this
+process at once; one shared buffer needs a lock on every launch, and an unlocked one
+is two frames writing the same device memory.
+
+### A frame is now many launches, and the reason was not obvious
+
+**Row banding alone cannot bound a launch, and it looked as though it could.** The
+host sizes bands from a pixel-sample budget, so a band is roughly constant work -- but
+only until it hits its FLOOR, which exists because a band under 16 rows idles most of
+the threads in every CUDA block. Past the floor the only thing still scaling is the
+sample count. At 1920 wide the crossover is about **1041 samples per pixel**, and the
+Samples parameter goes to **65536** -- 63x past it, which is roughly ten seconds of
+GPU work against a display-driver timeout of about two. That failure is a driver reset
+that takes the whole CUDA context, and After Effects with it.
+
+So above the crossover the samples are split too, with the accumulator carrying the
+partial sums. `samplesPerLaunch()` in `KernelApi.h` decides where.
+
+**IT IS A PURE FUNCTION OF THE REQUEST, AND THAT IS THE DESIGN CONSTRAINT.** Splitting
+samples regroups a floating-point sum and addition is not associative, so anything
+that changes the split changes the image. `determinism.gpuBands` and
+`determinism.threadCount` demand byte-identical output across band sizes and worker
+counts, and under MFR the worker count is AE's to choose. The chunk size therefore
+takes the FLOOR band's pixel count, never the band being rendered, and never a thread
+count or a measured time.
+
+**Below the crossover it is one chunk and changes nothing, bit for bit.** The golden
+references were blessed from the unsplit path and still match at max 0.
+
+`renderPixel()` already implemented the accumulation; what was missing was a host loop
+to use it. Both engines now have one, and both attach an accumulator only when the
+request is actually split.
+
+### Abort is now checked per chunk, not per band
+
+At a high sample count a band is many launches. Checking only between bands would
+leave AE unresponsive for exactly as long as the split exists to avoid.
+
+### `PF_Cmd_SMART_RENDER_GPU` no longer carries the hazard
+
+It is still dead code -- AE reports `what_gpu=NONE` and never calls it -- but it no
+longer contains the one-launch-for-all-samples bug, because the day AE does start
+calling it is not the day to discover that. No row banding there (AE hands the buffer
+over whole), so it splits on samples alone, against the whole frame rather than a
+floor band. `reserveDeviceAccumulator()` was added to `KernelApi.h` so `src/ae/` can
+get device memory without a CUDA header.
+
+Everything in that function is reasoned rather than measured, **including whether
+PF_ABORT and PF_PROGRESS are legal from inside it.**
+
+### The test, and what it is worth
+
+`determinism.sampleChunks` -- 64 samples in one launch against 64 samples in 64
+launches, on both engines, compared at tolerance 2. 12 ctest suites now, 44 unit tests.
+
+**It carries its own control, and without it the test is worthless:** a 1-sample render
+must FAIL the same comparison. It does, at max 206.
+
+**Verified to go red.** Breaking the accumulator the realistic way -- re-initialising
+every launch instead of honouring `samplesAlreadyDone` -- fails this test while **every
+golden scene stays green**, which is exactly why the tier could not already catch it.
+
+Measured aside: at 8-bit PPM output every split tested compares max 0 against the
+unsplit render, on both engines. That is a stronger result than the design is entitled
+to claim -- the output quantisation hides sub-1/255 float differences -- so the test
+asserts tolerance rather than equality.
+
+### What needs After Effects next
+
+- **A high sample count in the host.** Everything above the crossover is untested in
+  AE: whether the progress bar moves, whether cancel is responsive, and whether the
+  driver timeout is genuinely avoided at 2048+ samples.
+- **A Region of Interest**, still the only way to drive a non-zero `output_origin`.
+
+---
+
 ## 2026-09-28 — Phase 1 exit criterion MET
 
 The two paths the last entry listed as never exercised were driven in AE 2026. One
@@ -111,8 +377,12 @@ work in this effect can meet the letter until AE is persuaded to offer a device.
   to date logs `origin=0,0`, including the one where AE expanded the request to
   [-192,-108 2304x1296] and still asked for the full frame. The path is covered by
   unit tests and by the CUDA band split; it is not covered by a host.
-- **`src/engine/AutoSolveGate.{h,cpp}` and its test are out of the build but on disk.**
-  They should be deleted.
+- ~~`src/engine/AutoSolveGate.{h,cpp}` and its test are out of the build but on disk.~~
+  **Already deleted**, in a commit before this entry. The bullet was carried forward
+  from the previous entry without checking, which is the same mistake as the comment
+  in the section above — a stale claim repeated because it was written down once. The
+  only surviving mention is the deliberate one in `FieldCache.h`, explaining what the
+  cache replaced and why, and that one should stay.
 
 ---
 

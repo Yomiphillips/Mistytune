@@ -24,6 +24,31 @@
 
 namespace plugin::kernel {
 
+namespace {
+
+// The accumulator, owned by the thread that calls renderCpu.
+//
+// NOT thread_local INSIDE THE WORKERS, which is the trap here. renderCpu fans a band
+// out across a pool, and every worker writes into the SAME accumulator -- safely,
+// because they own disjoint rows. A per-worker buffer would give each of them its own
+// partial sums to throw away, and the image would be whichever worker wrote last.
+//
+// FULL FRAME, NOT BAND-SIZED, unlike the GPU's. renderPixel indexes the accumulator
+// with the same py it uses for the destination, and on this path the destination is
+// the whole frame rather than a band window -- so the two have to be the same shape
+// or the rows land on top of each other.
+//
+// Grow-only, for the reason the device buffer is: a comp renders one size over and
+// over. It is released when the calling thread ends.
+thread_local std::vector<float> g_accum;
+
+float* reserveAccumulator(size_t floats) {
+    if (g_accum.size() < floats) g_accum.resize(floats);
+    return g_accum.data();
+}
+
+} // namespace
+
 void renderCpu(const RenderRequest& req, int threads, int rowBegin, int rowEnd) {
     if (!req.dest.data || req.dest.widthPx <= 0 || req.dest.heightPx <= 0) return;
 
@@ -67,10 +92,30 @@ void renderCpu(const RenderRequest& req, int threads, int rowBegin, int rowEnd) 
     }
     if (threads > height) threads = height > 0 ? height : 1;
 
-    const auto renderRows = [&req](int y0, int y1) {
+    // THE ACCUMULATOR IS ATTACHED ONLY WHEN THE REQUEST IS ACTUALLY SPLIT, exactly as
+    // on the CUDA path, and for the same two reasons: an unsplit render has nothing to
+    // carry, and renderPixel's no-accumulator branch is bit-for-bit what this function
+    // produced before accumulation existed. The golden references were taken that way.
+    //
+    // A LOCAL COPY OF THE REQUEST, because the accumulator pointer belongs to this
+    // call and the caller's struct is const. The workers capture this one.
+    RenderRequest work = req;
+    const bool split = req.samplesAlreadyDone > 0 || req.sampleCount < req.quality.samplesPerPixel;
+    if (split) {
+        const int pitchPx = req.dest.pitchPx > 0 ? req.dest.pitchPx : req.dest.widthPx;
+        const size_t floats = static_cast<size_t>(pitchPx) * 4u
+                            * static_cast<size_t>(req.dest.heightPx);
+        work.accumulator        = reserveAccumulator(floats);
+        work.accumulatorPitchPx = pitchPx;
+    } else {
+        work.accumulator        = nullptr;
+        work.accumulatorPitchPx = 0;
+    }
+
+    const auto renderRows = [&work](int y0, int y1) {
         for (int y = y0; y < y1; ++y) {
-            for (int x = 0; x < req.dest.widthPx; ++x) {
-                renderPixel(req, x, y);
+            for (int x = 0; x < work.dest.widthPx; ++x) {
+                renderPixel(work, x, y);
             }
         }
     };

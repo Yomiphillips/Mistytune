@@ -177,6 +177,32 @@ if(PLUGIN_CUDA_FOUND)
                      -P "${CMAKE_CURRENT_SOURCE_DIR}/RunDeterminism.cmake")
 endif()
 
+# A WINDOW OF THE FRAME MUST MATCH THE SAME PATCH OF THE WHOLE FRAME.
+#
+# The test three shipped bugs were waiting for -- see the mode in RunDeterminism.cmake.
+# All three were the same mistake (the buffer is a window, and the number saying where
+# it sits came from the wrong place) and all three were found by a human in After
+# Effects, because nothing headless could ask for a sub-rect until now.
+add_test(NAME determinism.window
+         COMMAND ${CMAKE_COMMAND}
+                 -DMISTYTUNEC=$<TARGET_FILE:mistytunec>
+                 -DOUT_DIR=${GOLDEN_OUT}
+                 -DWITH_GPU=${PLUGIN_CUDA_FOUND}
+                 -DMODE=window
+                 -P "${CMAKE_CURRENT_SOURCE_DIR}/RunDeterminism.cmake")
+
+# SAMPLE CHUNKING MUST NOT CHANGE THE IMAGE. The accumulator is the only state in
+# the renderer that outlives a launch, and this is the only test that carries one
+# across sixty-four of them. Runs on both engines, and each half carries its own
+# control -- see the mode in RunDeterminism.cmake.
+add_test(NAME determinism.sampleChunks
+         COMMAND ${CMAKE_COMMAND}
+                 -DMISTYTUNEC=$<TARGET_FILE:mistytunec>
+                 -DOUT_DIR=${GOLDEN_OUT}
+                 -DWITH_GPU=${PLUGIN_CUDA_FOUND}
+                 -DMODE=samplechunks
+                 -P "${CMAKE_CURRENT_SOURCE_DIR}/RunDeterminism.cmake")
+
 # A different seed MUST give a different image. Without this, a renderer that
 # ignored the seed entirely would pass both tests above with full marks -- the
 # most determinstic renderer of all is one that always returns black.

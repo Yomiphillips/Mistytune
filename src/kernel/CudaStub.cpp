@@ -29,6 +29,8 @@ bool renderCuda(const RenderRequest&) { return false; }
 
 bool renderCudaToHost(const RenderRequest&, int, int) { return false; }
 
+float* reserveDeviceAccumulator(int, int) { return nullptr; }
+
 const char* lastCudaError() { return ""; }
 
 } // namespace plugin::kernel

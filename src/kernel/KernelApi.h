@@ -82,8 +82,13 @@ bool renderCuda(const RenderRequest& req);
 void renderCpu(const RenderRequest& req, int threads = 0,
                int rowBegin = 0, int rowEnd = 0);
 
-// Renders on the GPU into HOST memory: allocates a device buffer, launches into
-// it, copies the result back, frees. req.dest.data is ordinary host memory.
+// Renders on the GPU into HOST memory: reserves a device buffer, launches into it,
+// copies the result back. req.dest.data is ordinary host memory.
+//
+// THE DEVICE BUFFER IS NOT FREED WHEN THIS RETURNS. It is grow-only, thread-local
+// scratch that lives until the calling thread ends, because a comp renders the same
+// size thousands of times in a row and a driver-side allocation is a synchronising
+// call. See DeviceScratch in Mistytune.cu. The caller owns nothing and frees nothing.
 //
 // WHY THIS EXISTS ALONGSIDE renderCuda(), WHICH LOOKS LIKE IT DOES THE SAME JOB.
 //
@@ -128,6 +133,71 @@ void renderCpu(const RenderRequest& req, int threads = 0,
 // down by rowBegin so every ray still knows which row of the FULL FRAME it is. Get
 // that wrong and each band renders the top of the picture.
 bool renderCudaToHost(const RenderRequest& req, int rowBegin = 0, int rowEnd = 0);
+
+// ---------------------------------------------------------------------------
+// How many samples one launch may take
+// ---------------------------------------------------------------------------
+
+// WHY ROW BANDS ARE NOT ENOUGH, WHICH IS NOT OBVIOUS AND COST A READING TO FIND.
+//
+// The host already splits a frame into bands of rows and sizes them from a
+// pixel-sample budget, so a band is roughly constant work however many samples the
+// user asked for. That bounds the launch -- right up until the band hits its FLOOR.
+//
+// The floor exists for its own good reasons (below it, most threads in every 16-row
+// CUDA block idle, and the CPU pool runs out of rows to divide). Once the band is at
+// the floor, the only thing left that scales with the sample count is the launch
+// itself. Measured at 1920 wide with a 16-row floor and a 32M pixel-sample budget,
+// the crossover is about 1041 samples per pixel -- and the Samples parameter's range
+// goes to 65536, which is 63x past it. At that setting one launch is roughly ten
+// seconds of GPU work against a display-driver timeout of about two, and the failure
+// is a driver reset that takes the whole CUDA context -- and After Effects with it.
+//
+// So above the crossover the SAMPLES have to be split as well, with the accumulator
+// carrying the partial sums between launches.
+//
+// IT IS A PURE FUNCTION OF THE REQUEST, AND THAT IS THE WHOLE DESIGN CONSTRAINT.
+//
+// Splitting the samples REGROUPS the per-pixel sum, and floating-point addition is
+// not associative -- so anything that changes the split changes the image. The row
+// split is safe because rows never interact; this one is not. tests/golden/ asserts
+// byte-identical output across band sizes and across thread counts, and a user under
+// multi-frame rendering gets whatever worker count AE felt like.
+//
+// Therefore: pass the FLOOR band's pixel count here, never the band actually being
+// rendered, and never a thread count or a measured time. Two renders of the same
+// request then agree whatever the host does around them.
+//
+// Returns at least 1, and never more than samplesPerPixel -- so a request below the
+// crossover is one launch and is bit-for-bit what it was before this existed.
+inline int samplesPerLaunch(long long pixelSampleBudget,
+                            long long pixelsInFloorBand,
+                            int samplesPerPixel) {
+    if (samplesPerPixel <= 1) return 1;
+    if (pixelsInFloorBand <= 0 || pixelSampleBudget <= 0) return samplesPerPixel;
+
+    const long long fit = pixelSampleBudget / pixelsInFloorBand;
+    if (fit <= 1) return 1;
+    if (fit >= samplesPerPixel) return samplesPerPixel;
+    return static_cast<int>(fit);
+}
+
+// Device memory to accumulate into, for a caller that owns its own destination.
+//
+// FOR THE ONE CASE renderCudaToHost() CANNOT SERVE: a host that hands out GPU
+// buffers. After Effects' PF_Cmd_SMART_RENDER_GPU gives the effect a device pointer
+// to write into, so the destination is not ours -- but a sample split still needs an
+// accumulator, and src/ae/ has no CUDA headers to allocate one with. This hands back
+// a bare pointer and keeps the allocation on this side of the wall.
+//
+// THE CALLER OWNS NOTHING AND FREES NOTHING. It is the same grow-only thread-local
+// scratch the rest of this file uses, released when the thread ends, and the pointer
+// is stable for as long as the geometry is -- which is what lets the launches of one
+// frame accumulate into it.
+//
+// Sized in the same units as Surface: pitch in pixels of four floats, times rows.
+// Returns null if the allocation failed or this build has no CUDA.
+float* reserveDeviceAccumulator(int pitchPx, int heightPx);
 
 // The last CUDA error, cleared by reading it. Empty when there was none.
 const char* lastCudaError();

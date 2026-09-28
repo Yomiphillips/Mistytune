@@ -61,6 +61,14 @@ void printUsage() {
         "  --cpu            force the CPU path even when CUDA is available. The GPU\n"
         "                   is used by default when a device is present.\n"
         "  --require-gpu    fail instead of falling back if the GPU cannot render\n"
+        "  --window <x> <y> <w> <h>  render only this sub-rect of the frame, as\n"
+        "                   After Effects does for a Region of Interest. -w/-h stay\n"
+        "                   the FRAME; the buffer becomes w x h at origin x,y.\n"
+        "  --compare-at <x> <y>  compare the render against the region of <ref>\n"
+        "                   at x,y instead of against the whole file.\n"
+        "  --sample-chunk <n>   accumulate the frame in chunks of n samples\n"
+        "                   (0 = all in one). Changes the image only by the\n"
+        "                   rounding of a regrouped sum.\n"
         "  --gpu-band-rows <n>  render the GPU frame in bands of n rows (0 = one\n"
         "                   launch). Must not change the image.\n"
         "  --threads <n>    CPU worker threads (0 = choose). Must not change the image.\n"
@@ -150,17 +158,23 @@ bool readPpm(const char* path, std::vector<unsigned char>& rgb, int& width, int&
 // The mean is printed anyway, because when the maximum does trip it is the
 // number that says whether the whole image moved or one pixel did.
 // ---------------------------------------------------------------------------
+// THE REFERENCE MAY BE LARGER THAN THE RENDER, AND THEN refX/refY SAY WHERE TO LOOK.
+//
+// That is the whole point of the window tests: render a sub-rect of a frame, then
+// check it against THE SAME SUB-RECT of a render of the whole frame. Equal sizes with
+// an offset of 0,0 is the ordinary golden comparison and is unchanged.
 int comparePpm(const char* refPath, const std::vector<float>& argb,
-               int width, int height, int tolerance) {
+               int width, int height, int tolerance, int refX = 0, int refY = 0) {
     std::vector<unsigned char> ref;
     int rw = 0, rh = 0;
     if (!readPpm(refPath, ref, rw, rh)) {
         std::fprintf(stderr, "could not read reference %s\n", refPath);
         return 1;
     }
-    if (rw != width || rh != height) {
-        std::fprintf(stderr, "size mismatch: reference is %dx%d, render is %dx%d\n",
-                     rw, rh, width, height);
+    if (refX < 0 || refY < 0 || refX + width > rw || refY + height > rh) {
+        std::fprintf(stderr,
+                     "region out of range: reference is %dx%d, render is %dx%d at %d,%d\n",
+                     rw, rh, width, height, refX, refY);
         return 1;
     }
 
@@ -174,7 +188,8 @@ int comparePpm(const char* refPath, const std::vector<float>& argb,
                 float v = argb[(static_cast<size_t>(y) * width + x) * 4 + 1 + c];
                 v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
                 const int got = static_cast<int>(v * 255.0f + 0.5f);
-                const int want = ref[(static_cast<size_t>(y) * width + x) * 3 + c];
+                const int want =
+                    ref[(static_cast<size_t>(y + refY) * rw + (x + refX)) * 3 + c];
                 const int d = got > want ? got - want : want - got;
                 if (d > maxDiff) { maxDiff = d; worstX = x; worstY = y; }
                 sumDiff += d;
@@ -183,8 +198,10 @@ int comparePpm(const char* refPath, const std::vector<float>& argb,
     }
 
     const double mean = sumDiff / (static_cast<double>(width) * height * 3);
-    std::printf("compare %s: max %d (at %d,%d), mean %.4f, tolerance %d -- %s\n",
-                refPath, maxDiff, worstX, worstY, mean, tolerance,
+    std::printf("compare %s%s: max %d (at %d,%d), mean %.4f, tolerance %d -- %s\n",
+                refPath,
+                (refX || refY) ? " (region)" : "",
+                maxDiff, worstX, worstY, mean, tolerance,
                 maxDiff <= tolerance ? "PASS" : "FAIL");
 
     return maxDiff <= tolerance ? 0 : 1;
@@ -223,6 +240,9 @@ int main(int argc, char** argv) {
     // see in a whole-frame render, so determinism.gpuBands renders the same scene
     // banded and unbanded and demands the two be byte-identical.
     int  gpuBandRows     = 0;
+    int  sampleChunk     = 0;
+    int  windowX = 0, windowY = 0, windowW = 0, windowH = 0;
+    int  compareAtX = 0, compareAtY = 0;
     bool printDevice     = false;
     bool printHashes     = false;
     int  threads         = 0;      // 0 = let the renderer choose
@@ -258,6 +278,17 @@ int main(int argc, char** argv) {
         else if (argIs(a, "--cpu"))                  forceCpu = true;
         else if (argIs(a, "--require-gpu"))          requireGpu = true;
         else if (argIs(a, "--gpu-band-rows") && hasNext) gpuBandRows = std::atoi(argv[++i]);
+        else if (argIs(a, "--sample-chunk") && hasNext)  sampleChunk = std::atoi(argv[++i]);
+        else if (argIs(a, "--window") && i + 4 < argc) {
+            windowX = std::atoi(argv[++i]);
+            windowY = std::atoi(argv[++i]);
+            windowW = std::atoi(argv[++i]);
+            windowH = std::atoi(argv[++i]);
+        }
+        else if (argIs(a, "--compare-at") && i + 2 < argc) {
+            compareAtX = std::atoi(argv[++i]);
+            compareAtY = std::atoi(argv[++i]);
+        }
         else if (argIs(a, "--threads") && hasNext)   threads = std::atoi(argv[++i]);
         else if (argIs(a, "--compare") && hasNext)   comparePath = argv[++i];
         else if (argIs(a, "--tolerance") && hasNext) tolerance = std::atoi(argv[++i]);
@@ -317,23 +348,64 @@ int main(int argc, char** argv) {
         for (int i = 0; i < 16; ++i) req.view.cameraToWorld[i] = m[i];
     }
 
+    // THE WINDOW, WHICH IS WHAT AFTER EFFECTS ACTUALLY ASKS FOR MOST OF THE TIME.
+    //
+    // -w/-h are the FRAME: the whole picture the lens sees. Without --window the
+    // buffer is that same frame and the origin is 0,0, which is every render this
+    // program did before the option existed.
+    //
+    // WITH IT, THE BUFFER IS A SUB-RECT AND THE FRAME IS NOT, which is the one shape
+    // this project keeps getting wrong. Three separate bugs -- the requested rect
+    // stored as the frame, the layer size stored at full resolution, and the origin
+    // read from output_origin_x/y -- were all the same mistake, all shipped, and all
+    // found by a human looking at After Effects because nothing here could ask for a
+    // window. Now it can.
+    int destW = req.view.widthPx;
+    int destH = req.view.heightPx;
+
+    if (windowW > 0 && windowH > 0) {
+        destW = windowW;
+        destH = windowH;
+        req.view.originX = windowX;
+        req.view.originY = windowY;
+    }
+
     // TIGHTLY PACKED, UNLIKE AE'S WORLDS. AE pads rows and the kernel is told the
     // pitch separately for exactly that reason; here there is no padding, so pitch
     // equals width. Writing it out rather than leaving it zero is what keeps the two
     // callers' assumptions visible side by side.
-    std::vector<float> pixels(static_cast<size_t>(req.view.widthPx) *
-                              static_cast<size_t>(req.view.heightPx) * 4, 0.0f);
+    std::vector<float> pixels(static_cast<size_t>(destW) *
+                              static_cast<size_t>(destH) * 4, 0.0f);
 
     req.dest.data     = pixels.data();
-    req.dest.widthPx  = req.view.widthPx;
-    req.dest.heightPx = req.view.heightPx;
-    req.dest.pitchPx  = req.view.widthPx;
+    req.dest.widthPx  = destW;
+    req.dest.heightPx = destH;
+    req.dest.pitchPx  = destW;
     req.dest.order    = kernel::ChannelOrder::ARGB;
 
     req.firstSample        = 0;
     req.sampleCount        = req.quality.samplesPerPixel;
     req.samplesAlreadyDone = 0;
     req.accumulator        = nullptr;
+
+    // THE SAMPLE SPLIT, WHICH THE EFFECT DERIVES AND THIS PROGRAM TAKES AS AN OPTION.
+    //
+    // In the effect the chunk size comes from samplesPerLaunch() so that no launch
+    // approaches the display-driver timeout. Here it is an argument instead, because
+    // the thing worth testing is not the policy but the ARITHMETIC underneath it: that
+    // a frame split into N pieces and accumulated agrees with the same frame rendered
+    // whole. A test that could only reach the split by asking for 65536 samples would
+    // take minutes to say so.
+    const int totalSamples = req.quality.samplesPerPixel;
+    const int chunk = (sampleChunk > 0 && sampleChunk < totalSamples)
+                    ? sampleChunk : totalSamples;
+
+    // CHUNKS ARE ALWAYS INNER, BANDS ALWAYS OUTER, ON BOTH PATHS.
+    //
+    // The CUDA accumulator is ONE band-sized buffer reused for every band, so a band's
+    // launches have to be consecutive. Swapping the loops would have band 2's first
+    // chunk overwrite the partial sums band 1 was still adding to -- which shows up as
+    // horizontal stripes of differently-converged sky and looks like a sampling bug.
 
     // ---------------------------------------------------------------------
     // THE PATH CHOICE, AND WHY --cpu EXISTS.
@@ -355,15 +427,30 @@ int main(int argc, char** argv) {
     // ---------------------------------------------------------------------
     bool renderedOnGpu = false;
 
+    // One band's worth of chunks. Sets the sample window on `req` and launches for
+    // each piece; rowEnd <= 0 means the whole frame, exactly as the kernel takes it.
+    const auto renderGpuBand = [&](int y, int y1) {
+        for (int s0 = 0; s0 < totalSamples; s0 += chunk) {
+            req.firstSample        = s0;
+            req.sampleCount        = std::min(chunk, totalSamples - s0);
+            req.samplesAlreadyDone = s0;
+            if (!kernel::renderCudaToHost(req, y, y1)) return false;
+        }
+        return true;
+    };
+
     if (!forceCpu && kernel::cudaAvailable()) {
         if (gpuBandRows <= 0) {
-            renderedOnGpu = kernel::renderCudaToHost(req);
+            renderedOnGpu = renderGpuBand(0, 0);
         } else {
             renderedOnGpu = true;
-            for (int y = 0; y < req.view.heightPx; y += gpuBandRows) {
+            // BANDS ARE ROWS OF THE BUFFER, NOT OF THE FRAME. With --window the two
+            // differ, and banding the frame would walk off the end of a smaller
+            // buffer.
+            for (int y = 0; y < req.dest.heightPx; y += gpuBandRows) {
                 int y1 = y + gpuBandRows;
-                if (y1 > req.view.heightPx) y1 = req.view.heightPx;
-                if (!kernel::renderCudaToHost(req, y, y1)) { renderedOnGpu = false; break; }
+                if (y1 > req.dest.heightPx) y1 = req.dest.heightPx;
+                if (!renderGpuBand(y, y1)) { renderedOnGpu = false; break; }
             }
         }
         if (!renderedOnGpu) {
@@ -381,7 +468,12 @@ int main(int argc, char** argv) {
     }
 
     if (!renderedOnGpu) {
-        kernel::renderCpu(req, threads);
+        for (int s0 = 0; s0 < totalSamples; s0 += chunk) {
+            req.firstSample        = s0;
+            req.sampleCount        = std::min(chunk, totalSamples - s0);
+            req.samplesAlreadyDone = s0;
+            kernel::renderCpu(req, threads);
+        }
     }
 
     if (comparePath) {
@@ -389,16 +481,17 @@ int main(int argc, char** argv) {
         // comparison that does not say what it compared is a number without a claim.
         std::printf("rendered on the %s path\n",
                     renderedOnGpu ? "GPU (CUDA)" : "CPU reference");
-        return comparePpm(comparePath, pixels, req.view.widthPx, req.view.heightPx, tolerance);
+        return comparePpm(comparePath, pixels, destW, destH, tolerance,
+                          compareAtX, compareAtY);
     }
 
-    if (!writePpm(outPath, pixels, req.view.widthPx, req.view.heightPx)) {
+    if (!writePpm(outPath, pixels, destW, destH)) {
         std::fprintf(stderr, "could not write %s\n", outPath);
         return 1;
     }
 
     std::printf("wrote %s (%dx%d, %d spp)\n",
-                outPath, req.view.widthPx, req.view.heightPx, req.quality.samplesPerPixel);
+                outPath, destW, destH, req.quality.samplesPerPixel);
     std::printf("  path: %s\n", renderedOnGpu ? "GPU (CUDA)" : "CPU reference");
     return 0;
 }

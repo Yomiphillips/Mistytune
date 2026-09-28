@@ -26,6 +26,11 @@
 // alone links to nothing.
 #include "Smart_Utils.h"
 
+// The camera conversion logs the raw host values it derives from -- see
+// fillCameraFromComp, and DiagLog.h on why measuring beats inferring.
+#include "DiagLog.h"
+
+#include "CameraConvert.h"
 #include "CloudParams.h"
 #include "RenderRequest.h"
 
@@ -208,8 +213,68 @@ inline float encodeSrgb(float linear) {
 // accumulation; it is stubbed rather than omitted so that the flag, the parameter
 // and the hash are all already in place and the change is one function body.
 inline void fillCameraFromComp(PF_InData* in_data, cloud::ViewParams& view) {
-    (void)in_data;
     view.cameraFromComp = false;
+
+    // ---------------------------------------------------------------------
+    // THE COMP'S OWN CAMERA, WHEN THERE IS ONE.
+    //
+    // AEGP_GetEffectCameraMatrix needs PF_OutFlag2_I_USE_3D_CAMERA, which is set in
+    // EffectFlags.cmake, and docs/HOST-NOTES.md records that it is safe to call on a
+    // render thread. The conversion itself is in src/engine/CameraConvert.h, tested
+    // against hand-derived cases -- a camera pointing the wrong way renders a
+    // plausible picture, so it is the last thing to verify by eye.
+    //
+    // A ZERO PLANE SIZE MEANS NO CAMERA, NOT AN ERROR. A comp without one is the
+    // ordinary case for a generator dropped on a solid, and it takes the default
+    // below. cameraFromComp records which happened, so the log can say "no camera,
+    // defaulting" rather than leaving it to be guessed from the picture.
+    // ---------------------------------------------------------------------
+    if (in_data && in_data->pica_basicP) {
+        A_Matrix4 aeMatrix;
+        AEFX_CLR_STRUCT(aeMatrix);
+
+        A_FpLong distanceToPlane = 0.0;
+        A_short  planeWidth = 0, planeHeight = 0;
+
+        A_Time when;
+        when.value = in_data->current_time;
+        when.scale = in_data->time_scale;
+
+        AEGP_SuiteHandler suites(in_data->pica_basicP);
+        const A_Err aeErr = suites.PFInterfaceSuite1()->AEGP_GetEffectCameraMatrix(
+            in_data->effect_ref, &when, &aeMatrix,
+            &distanceToPlane, &planeWidth, &planeHeight);
+
+        // THE RAW VALUES, LOGGED BEFORE ANYTHING IS DERIVED FROM THEM.
+        //
+        // The field of view is computed from these two numbers and nothing else, and a
+        // wrong field of view renders a picture that looks entirely reasonable -- so
+        // the inputs are on the record rather than only the conclusion. For a default
+        // AE camera on a 1920x1080 comp expect distance 2666.7 against a 1080 plane,
+        // which is 22.9 degrees vertical; anything far from that is either a real lens
+        // choice or a units mistake, and these two numbers are what tells them apart.
+        diagLog("  camera raw: err=%d distanceToPlane=%.1f plane=%dx%d",
+                static_cast<int>(aeErr), static_cast<double>(distanceToPlane),
+                static_cast<int>(planeWidth), static_cast<int>(planeHeight));
+
+        if (!aeErr && planeHeight > 0 && distanceToPlane > 0.0) {
+            // A_Matrix4 is mat[row][col] of A_FpLong; CameraConvert takes the same
+            // sixteen values in memory order and owns every convention question.
+            double flat[16];
+            for (int r = 0; r < 4; ++r) {
+                for (int c = 0; c < 4; ++c) flat[r * 4 + c] = aeMatrix.mat[r][c];
+            }
+
+            cloud::cameraToWorldFromAE(flat, view.cameraToWorld);
+
+            const cloud::Real fov =
+                cloud::verticalFovFromPlane(distanceToPlane, planeHeight);
+            if (fov > 0) view.verticalFovDegrees = fov;
+
+            view.cameraFromComp = true;
+            return;
+        }
+    }
 
     // A DEFAULT THAT LOOKS AT THE SKY rather than the identity, which looks along
     // -Z at the horizon and would make the Phase 1 sky a flat band.

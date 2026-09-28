@@ -648,9 +648,29 @@ MT_DEVICE void renderPixel(const RenderRequest& req, int px, int py) {
 
     Vec3 sum = vec3(0.0f, 0.0f, 0.0f);
 
+    // THE SEED IS KEYED TO THE FRAME PIXEL, NOT THE BUFFER PIXEL, and the difference
+    // is the whole determinism claim rather than a detail.
+    //
+    // px,py index the destination, which is routinely a WINDOW into the frame: a CUDA
+    // band, or a Region of Interest. Seeding from those gave the same frame pixel a
+    // different jitter depending on how the frame happened to be divided -- so a ROI
+    // render disagreed with the full render underneath it, and a banded render
+    // disagreed with a whole-frame one.
+    //
+    // MEASURED before the fix: a 120x70 window of a 256x144 frame differed from the
+    // same patch of the whole frame by max 190 of 255, concentrated at the sun disc.
+    // The mean was 0.51, which is exactly why tests/golden/ compares maxima.
+    //
+    // determinism.gpuBands DID NOT CATCH IT. That test renders a smooth 96x54 sky at
+    // sun elevation 20, where a different jitter moves no pixel by a whole level, so
+    // it compared byte-identical while the property it names was broken. A test can
+    // only catch what its scene can show.
+    const int frameX = px + req.view.originX;
+    const int frameY = py + req.view.originY;
+
     for (int s = 0; s < req.sampleCount; ++s) {
         const int sampleIndex = req.firstSample + s;
-        const unsigned int h = hashPixelSample(px, py, sampleIndex, req.field.seed);
+        const unsigned int h = hashPixelSample(frameX, frameY, sampleIndex, req.field.seed);
 
         // Two decorrelated dimensions from one hash. Blue-noise offsets stable
         // across frames are a Phase 2 upgrade -- they are the first mitigation to

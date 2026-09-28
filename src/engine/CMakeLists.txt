@@ -23,6 +23,11 @@ add_library(plugin_engine STATIC
     # and proto/ all mirror these names.
     CloudParams.h
 
+    # AE's camera in the renderer's conventions -- a transpose and a handedness
+    # flip, kept here rather than in src/ae/ so tests/unit/ can reach the one
+    # piece of host arithmetic whose errors render a convincing wrong picture.
+    CameraConvert.h
+
     # 2D primitives for the contour tracer. What is left of the rigid-body
     # engine's Hull.h once the hull builder went with the solver.
     Geometry.h

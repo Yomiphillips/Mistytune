@@ -16,6 +16,7 @@
 
 #include "TestFramework.h"
 
+#include "CameraConvert.h"
 #include "Shading.h"
 
 using namespace plugin;
@@ -119,4 +120,155 @@ PL_TEST(BandOffsetMatchesTheUnsplitFrame) {
         checkSameRay(primaryRayDirection(band,  480, y, 0.0f, 0.0f),
                      primaryRayDirection(whole, 480, bandBegin + y, 0.0f, 0.0f));
     }
+}
+
+// --------------------------------------------------------------------------
+// After Effects' camera, converted
+// --------------------------------------------------------------------------
+//
+// THESE CASES ARE WORKED OUT BY HAND, not recorded from a run. A conversion test
+// blessed from its own output agrees with whatever the code did on the day, which for
+// a camera means it agrees with a plausible picture pointing the wrong way.
+
+namespace {
+
+// AE's A_Matrix4 in memory order: mat[row][col], row-vector convention, so the
+// camera's world-space axes are the ROWS.
+void aeMatrix(double out[16],
+              double xx, double xy, double xz,
+              double yx, double yy, double yz,
+              double zx, double zy, double zz,
+              double px = 0.0, double py = 0.0, double pz = 0.0) {
+    const double m[16] = {
+        xx, xy, xz, 0.0,
+        yx, yy, yz, 0.0,
+        zx, zy, zz, 0.0,
+        px, py, pz, 1.0
+    };
+    for (int i = 0; i < 16; ++i) out[i] = m[i];
+}
+
+// Where a camera-space direction ends up in world space, under our column-vector
+// row-major convention -- the same three lines primaryRayDirection uses.
+Vec3 throughMatrix(const Real m[16], Vec3 v) {
+    return vec3(
+        static_cast<float>(m[0] * v.x + m[1] * v.y + m[2]  * v.z),
+        static_cast<float>(m[4] * v.x + m[5] * v.y + m[6]  * v.z),
+        static_cast<float>(m[8] * v.x + m[9] * v.y + m[10] * v.z));
+}
+
+const Vec3 kForward = vec3(0.0f, 0.0f, -1.0f);   // our camera looks down -Z
+const Vec3 kUp      = vec3(0.0f, 1.0f,  0.0f);
+const Vec3 kRight   = vec3(1.0f, 0.0f,  0.0f);
+
+} // namespace
+
+// AE'S DEFAULT CAMERA LOOKS ALONG +Z AND ITS UP IS -Y, because AE's Y points down.
+// In our conventions that is looking along -Z with up at +Y -- the identity. If the
+// handedness flip were applied on only one side, this case still passes, which is why
+// it is the first test and not the only one.
+PL_TEST(AnAEIdentityCameraIsOurIdentity) {
+    double ae[16];
+    aeMatrix(ae, 1, 0, 0,
+                 0, 1, 0,
+                 0, 0, 1);
+
+    Real m[16];
+    cameraToWorldFromAE(ae, m);
+
+    checkSameRay(throughMatrix(m, kForward), kForward);
+    checkSameRay(throughMatrix(m, kUp),      kUp);
+    checkSameRay(throughMatrix(m, kRight),   kRight);
+}
+
+// A CAMERA PITCHED UP MUST PITCH UP, which is the case the whole feature exists for
+// and the one a sign error inverts.
+//
+// In AE, pitching the camera up means its forward axis tilts toward -Y (AE's up).
+// Worked by hand at 30 degrees: forward becomes (0, -sin30, cos30) = (0, -0.5, 0.866)
+// and up becomes (0, -cos30, -sin30). Converted, our forward must be
+// (0, +sin30, -cos30) -- above the horizon, still looking down -Z.
+PL_TEST(AnAECameraPitchedUpPitchesUp) {
+    const double c = 0.86602540378;   // cos 30
+    const double s = 0.5;             // sin 30
+
+    double ae[16];
+    aeMatrix(ae, 1,  0,  0,           // X axis unchanged by a pitch
+                 0,  c,  s,           // Y axis (AE's down) tilts
+                 0, -s,  c);          // Z axis (forward) tilts toward -Y
+
+    Real m[16];
+    cameraToWorldFromAE(ae, m);
+
+    const Vec3 fwd = throughMatrix(m, kForward);
+
+    // ABOVE THE HORIZON. This single assertion is the one that would have caught the
+    // 20-degrees-below-the-horizon default that made the effect render black.
+    PL_CHECK(fwd.y > 0.0f);
+
+    checkSameRay(fwd, vec3(0.0f, static_cast<float>(s), static_cast<float>(-c)));
+}
+
+// A PAN MUST NOT ROLL, which is what the row-vector/column-vector transpose decides.
+// Getting it backwards leaves the forward axis of a yaw looking right, so this checks
+// the axis that moves AND the axis that must not.
+PL_TEST(AnAECameraYawedStaysLevel) {
+    const double c = 0.0, s = 1.0;    // 90 degrees
+
+    double ae[16];
+    aeMatrix(ae,  c, 0, -s,
+                  0, 1,  0,
+                  s, 0,  c);
+
+    Real m[16];
+    cameraToWorldFromAE(ae, m);
+
+    // Yawed 90 degrees: forward swings onto the X axis, and up stays up.
+    const Vec3 fwd = throughMatrix(m, kForward);
+    PL_CHECK_NEAR(fwd.y, 0.0, 1e-5);
+    checkSameRay(throughMatrix(m, kUp), kUp);
+}
+
+// TRANSLATION IS DROPPED, not silently folded into the rotation. A camera parked a
+// thousand pixels away must give the same rays as one at the origin -- the sky is at
+// infinity and primaryRayDirection applies the upper 3x3 alone.
+PL_TEST(CameraPositionDoesNotReachTheRays) {
+    double atOrigin[16], moved[16];
+    aeMatrix(atOrigin, 1, 0, 0,  0, 1, 0,  0, 0, 1);
+    aeMatrix(moved,    1, 0, 0,  0, 1, 0,  0, 0, 1,  960.0, -540.0, -2666.0);
+
+    Real a[16], b[16];
+    cameraToWorldFromAE(atOrigin, a);
+    cameraToWorldFromAE(moved,    b);
+
+    checkSameRay(throughMatrix(a, kForward), throughMatrix(b, kForward));
+}
+
+// --------------------------------------------------------------------------
+// The field of view AE's camera implies
+// --------------------------------------------------------------------------
+
+// AE gives a distance to the comp plane and that plane's size. Half the HEIGHT over
+// the distance is the tangent of half the VERTICAL field of view.
+PL_TEST(FovComesFromThePlaneHeight) {
+    // The 50mm-on-full-frame default this project uses elsewhere: 39.6 degrees
+    // vertical. A 1080-tall plane at that field of view sits 1499.4 px away.
+    PL_CHECK_NEAR(verticalFovFromPlane(1499.4, 1080.0), 39.6, 0.05);
+
+    // Twice as far is roughly half the angle, and exactly a smaller one.
+    PL_CHECK(verticalFovFromPlane(2998.8, 1080.0) < verticalFovFromPlane(1499.4, 1080.0));
+
+    // THE WIDTH MUST NOT BE WHAT IS PASSED. A 1920-wide plane at the same distance
+    // implies a much wider angle, and using it would widen the lens by the aspect
+    // ratio -- which looks like a wrong camera, not like a wrong argument.
+    PL_CHECK(verticalFovFromPlane(1499.4, 1920.0) > 60.0);
+}
+
+// NO CAMERA REPORTS ZERO RATHER THAN A DEFAULT. docs/HOST-NOTES.md: a comp without a
+// camera returns a zero plane size, and the caller has to be able to tell that from a
+// camera that genuinely is 90 degrees wide.
+PL_TEST(NoCameraGivesZeroFov) {
+    PL_CHECK_NEAR(verticalFovFromPlane(1499.4, 0.0), 0.0, 1e-9);
+    PL_CHECK_NEAR(verticalFovFromPlane(0.0, 1080.0), 0.0, 1e-9);
+    PL_CHECK_NEAR(verticalFovFromPlane(-1.0, 1080.0), 0.0, 1e-9);
 }

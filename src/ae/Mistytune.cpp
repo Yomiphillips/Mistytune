@@ -78,6 +78,29 @@ struct PreRenderData {
 
     // The cache key, computed once here rather than twice on two render paths.
     sim::RenderKey key;
+
+    // WHERE THE BUFFER AE WILL HAND BACK SITS IN THE FRAME, recorded here because
+    // this is the only place the host says so.
+    //
+    // in_data->output_origin_x/y IS NOT THAT, AND READING IT WAS A BUG. Measured in
+    // AE 2026 with a Region of Interest drawn over part of the frame: pre-render was
+    // asked for [633,387 907x751], returned a result_rect of [633,387 907x693], and
+    // was handed a 907x693 buffer at smart render -- with output_origin_x/y both
+    // reporting ZERO. The renderer therefore drew the top-left 907x693 of the sky
+    // into a buffer AE composited at (633,387), which on a sky whose top-left corner
+    // is empty is a flat pale-blue rectangle, and reads as a broken effect rather
+    // than as a missing offset. The THIRD time this project has shipped that shape of
+    // bug: see the reduced-resolution entry in PROGRESS.md.
+    //
+    // The result rect is the rect we TOLD AE we would fill, and the buffer that comes
+    // back has matched it exactly every time it has been measured. renderOriginValid
+    // records whether we actually got one, so smart render can say so rather than
+    // silently trusting a zero.
+    A_long renderOriginX = 0;
+    A_long renderOriginY = 0;
+    A_long renderWidth   = 0;
+    A_long renderHeight  = 0;
+    bool   renderOriginValid = false;
 };
 
 void disposePreRenderData(void* p) {
@@ -268,6 +291,14 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
 
     fillCameraFromComp(in_data, data->view);
 
+    // WHICH CAMERA, NAMED RATHER THAN INFERRED FROM THE PICTURE. "No camera,
+    // defaulting" and "the comp's camera, and it points there" produce different
+    // skies, and telling them apart by looking is exactly the diagnosis this
+    // project has repeatedly got wrong.
+    diagLog("  camera: %s, vertical fov %.1f deg",
+            data->view.cameraFromComp ? "from the comp" : "no comp camera -- default",
+            static_cast<double>(data->view.verticalFovDegrees));
+
     // THE RENDER PATH HAD NO INSTRUMENTATION AT ALL, and that is what made "nothing
     // renders" un-diagnosable: the log proved the effect LOADED and said nothing
     // about whether AE ever asked it for a pixel. These lines are the difference
@@ -313,7 +344,56 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
             static_cast<int>(rr.right - rr.left), static_cast<int>(rr.bottom - rr.top),
             (rr.right <= rr.left || rr.bottom <= rr.top)
                 ? "  <-- EMPTY: AE will not call SMART_RENDER" : "");
+
+    // CARRIED TO SMART RENDER, WHERE THE HOST WILL NOT SAY IT AGAIN. See the note on
+    // PreRenderData for why in_data->output_origin_x/y cannot be used for this.
+    data->renderOriginX     = rr.left;
+    data->renderOriginY     = rr.top;
+    data->renderWidth       = rr.right - rr.left;
+    data->renderHeight      = rr.bottom - rr.top;
+    data->renderOriginValid = (rr.right > rr.left && rr.bottom > rr.top);
+
     return err;
+}
+
+// ---------------------------------------------------------------------------
+// Where the buffer sits in the frame
+// ---------------------------------------------------------------------------
+
+// Both render paths need this and both used to get it wrong the same way, so it is
+// one function rather than two copies of a subtle line.
+//
+// THE SIZE IS CHECKED, NOT ASSUMED. The offset is only right if the buffer AE handed
+// back is the rect pre-render promised to fill. That has matched on every frame
+// measured so far -- but if it ever stops matching, the renderer draws the wrong part
+// of the picture into a buffer of the right size, which is the failure mode this
+// project has now shipped three times and recognised late every time. A line in the
+// log is the difference between finding it in a minute and finding it in a day.
+void applyRenderOrigin(const PreRenderData& data, const PF_EffectWorld* output,
+                       const PF_InData* in_data, cloud::ViewParams& view) {
+    if (!data.renderOriginValid) {
+        // No usable rect from pre-render. output_origin_x/y is the documented field
+        // even though it has measured zero whenever it mattered, so it is a better
+        // guess than assuming the top-left corner -- and the log says which one ran.
+        view.originX = in_data->output_origin_x;
+        view.originY = in_data->output_origin_y;
+        diagLog("  origin: pre-render left no result rect -- falling back to "
+                "output_origin=%d,%d",
+                static_cast<int>(in_data->output_origin_x),
+                static_cast<int>(in_data->output_origin_y));
+        return;
+    }
+
+    view.originX = static_cast<int32_t>(data.renderOriginX);
+    view.originY = static_cast<int32_t>(data.renderOriginY);
+
+    if (output->width != data.renderWidth || output->height != data.renderHeight) {
+        diagLog("  ORIGIN SUSPECT: buffer is %dx%d but pre-render promised %dx%d "
+                "at %d,%d -- the offset below may be for a different rect.",
+                static_cast<int>(output->width), static_cast<int>(output->height),
+                static_cast<int>(data.renderWidth), static_cast<int>(data.renderHeight),
+                static_cast<int>(data.renderOriginX), static_cast<int>(data.renderOriginY));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -356,36 +436,63 @@ PF_Err smartRenderGpu(PF_InData* in_data, PF_OutData* out_data,
     req.dest    = toSurface(output, format);
     req.dest.data = destMem;
 
-    // READ AT RENDER, NOT AT PRE-RENDER. AE fills output_origin_x/y in for the call
-    // that hands over the buffer; it is the offset of this buffer's pixel (0,0)
-    // within the frame, and without it the renderer draws the wrong part of the
-    // picture. See the frame/window note in CloudParams.h.
-    req.view.originX = in_data->output_origin_x;
-    req.view.originY = in_data->output_origin_y;
+    // The offset of this buffer's pixel (0,0) within the frame. Without it the
+    // renderer draws the wrong part of the picture into the right buffer -- see the
+    // frame/window note in CloudParams.h, and PreRenderData on where it comes from.
+    applyRenderOrigin(data, output, in_data, req.view);
 
-    // ONE LAUNCH, ALL THE SAMPLES -- FOR NOW, AND THIS IS THE ONE PLACE PHASE 1
-    // KNOWINGLY LEAVES A KNOWN HAZARD IN.
+    // MANY LAUNCHES, NOT ONE, AND THIS USED TO BE THE HAZARD PHASE 1 LEFT IN.
     //
-    // The Windows display driver's timeout is about two seconds and a real frame sits
-    // on it, so the shipping renderer must be many launches with the accumulator
-    // persisting between them, checking AE's abort and reporting progress in between.
-    // req.firstSample / sampleCount and the accumulator fields already exist for
-    // exactly that, and FieldCache already counts samples across launches.
+    // The Windows display driver's timeout is about two seconds and it kills the whole
+    // CUDA context rather than the launch -- taking After Effects with it. A frame at
+    // a high sample count in one launch sits past that, so the samples are split and
+    // the accumulator carries the partial sums between them.
     //
-    // It is safe HERE only because the placeholder kernel is a handful of
-    // transcendentals per pixel and cannot approach the timeout. The chunked loop
-    // lands in Phase 2 with the real transport, where it is load-bearing rather than
-    // precautionary -- and where the abort and progress callbacks land with it,
-    // because a host that looks frozen for a whole frame gets killed by the user.
-    req.firstSample        = 0;
-    req.sampleCount        = data.quality.samplesPerPixel;
-    req.samplesAlreadyDone = 0;
+    // NO ROW BANDING HERE, unlike smartRenderHost. AE owns this buffer and hands it
+    // over whole, so the only axis left to split is the samples -- which is why the
+    // floor band passed to samplesPerLaunch() is the WHOLE FRAME rather than sixteen
+    // rows, and why the chunks here are correspondingly smaller.
+    const int totalSamples = data.quality.samplesPerPixel > 0 ? data.quality.samplesPerPixel : 1;
+    const int samplesPerChunk = kernel::samplesPerLaunch(
+        32 * 1024 * 1024,
+        static_cast<long long>(output->width) * output->height,
+        totalSamples);
+
     req.accumulator        = nullptr;
+    req.accumulatorPitchPx = 0;
 
-    if (!kernel::renderCuda(req)) {
-        const char* why = kernel::lastCudaError();
-        diagLog("SMART_RENDER_GPU: launch failed: %s", why[0] ? why : "(no detail)");
-        return PF_Err_INTERNAL_STRUCT_DAMAGED;
+    if (samplesPerChunk < totalSamples) {
+        req.accumulator = kernel::reserveDeviceAccumulator(req.dest.pitchPx, output->height);
+        if (!req.accumulator) {
+            const char* why = kernel::lastCudaError();
+            diagLog("SMART_RENDER_GPU: no accumulator (%s) -- asking AE for the CPU path.",
+                    why && why[0] ? why : "no detail");
+            return PF_Err_UNRECOGNIZED_PARAM_TYPE;
+        }
+        req.accumulatorPitchPx = req.dest.pitchPx;
+    }
+
+    // STILL NEVER EXERCISED BY A HOST. AE reports what_gpu=NONE and does not call this
+    // command, so everything above is reasoned rather than measured -- including
+    // whether PF_ABORT and PF_PROGRESS are legal from inside it. Written now because
+    // the alternative is that the day AE does start calling it, it calls the version
+    // with the driver-reset hazard in it.
+    for (int s0 = 0; s0 < totalSamples; s0 += samplesPerChunk) {
+        req.firstSample        = s0;
+        req.sampleCount        = std::min(samplesPerChunk, totalSamples - s0);
+        req.samplesAlreadyDone = s0;
+
+        if (!kernel::renderCuda(req)) {
+            const char* why = kernel::lastCudaError();
+            diagLog("SMART_RENDER_GPU: launch failed at sample %d of %d: %s",
+                    s0, totalSamples, why[0] ? why : "(no detail)");
+            return PF_Err_INTERNAL_STRUCT_DAMAGED;
+        }
+
+        if (PF_Err abortErr = PF_ABORT(in_data)) return abortErr;
+        if (PF_Err progErr = PF_PROGRESS(in_data, s0 + req.sampleCount, totalSamples)) {
+            return progErr;
+        }
     }
 
     return err;
@@ -447,13 +554,18 @@ PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
     req.view    = data.view;
     req.quality = data.quality;
 
-    // See the note on the GPU path: the buffer's offset within the frame is only
-    // known at render time.
-    req.view.originX = in_data->output_origin_x;
-    req.view.originY = in_data->output_origin_y;
+    // See the note on the GPU path, and PreRenderData on why this is not
+    // in_data->output_origin_x/y.
+    applyRenderOrigin(data, output, in_data, req.view);
 
-    diagLog("  frame=%dx%d origin=%d,%d", req.view.widthPx, req.view.heightPx,
-            req.view.originX, req.view.originY);
+    // output_origin IS LOGGED BESIDE THE ONE ACTUALLY USED, on purpose. It read 0,0
+    // on the Region of Interest frame that exposed the bug, and printing both is what
+    // makes a future disagreement between them visible instead of theoretical.
+    diagLog("  frame=%dx%d origin=%d,%d (output_origin=%d,%d)",
+            req.view.widthPx, req.view.heightPx,
+            req.view.originX, req.view.originY,
+            static_cast<int>(in_data->output_origin_x),
+            static_cast<int>(in_data->output_origin_y));
 
     req.firstSample        = 0;
     req.sampleCount        = data.quality.samplesPerPixel;
@@ -506,7 +618,10 @@ PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
     // bar that visibly moves.
     // =======================================================================
     // WHICH ENGINE FILLS THE BUFFER. Asked once, here, rather than per band.
-    const bool useGpu = kernel::cudaAvailable();
+    //
+    // NOT CONST: a GPU failure partway down a frame clears it, and every band after
+    // that goes to the CPU. See the fallback in the loop below.
+    bool useGpu = kernel::cudaAvailable();
 
     // THE BAND BUDGET IS PER ENGINE, because the two are three orders of magnitude
     // apart and one number cannot serve both.
@@ -545,43 +660,98 @@ PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
     if (rowsPerBand < kMinRowsPerBand) rowsPerBand = kMinRowsPerBand;
     if (rowsPerBand > output->height)  rowsPerBand = output->height;
 
+    // =======================================================================
+    // AND THE SAMPLES ARE SPLIT TOO, ONCE THE ROWS CANNOT GO ANY FINER.
+    //
+    // The row floor above is where the band stops shrinking, so past it the launch
+    // grows with the sample count and nothing bounds it. samplesPerLaunch() works out
+    // where that crossover is -- see KernelApi.h, which also says why this number may
+    // not depend on rowsPerBand, on the thread count, or on anything measured.
+    //
+    // BELOW THE CROSSOVER THIS IS ONE CHUNK AND CHANGES NOTHING, bit for bit. The
+    // frame only regroups its per-pixel sum when it was going to blow the driver
+    // timeout otherwise, which is a trade worth making exactly then and not before.
+    // =======================================================================
+    const int totalSamples = data.quality.samplesPerPixel > 0 ? data.quality.samplesPerPixel : 1;
+    const int samplesPerChunk = kernel::samplesPerLaunch(
+        kBandBudget,
+        static_cast<long long>(output->width) * kMinRowsPerBand,
+        totalSamples);
+
+    const int chunksPerBand = (totalSamples + samplesPerChunk - 1) / samplesPerChunk;
+    const A_long bandCount  = (output->height + rowsPerBand - 1) / rowsPerBand;
+    const A_long totalUnits = bandCount * chunksPerBand;
+    A_long unitsDone = 0;
+
     const double t0 = diagSeconds();
 
     for (A_long y = 0; y < output->height; y += rowsPerBand) {
         const A_long y1 = std::min<A_long>(y + rowsPerBand, output->height);
 
-        bool ok = true;
-        if (useGpu) {
-            ok = kernel::renderCudaToHost(req, static_cast<int>(y), static_cast<int>(y1));
-            if (!ok) {
-                // FALLS BACK FOR THE REST OF THE FRAME RATHER THAN FAILING IT.
-                // A driver reset or an out-of-memory partway down a frame should
-                // cost a slow frame, not a black one -- and the bands already
-                // written stay valid, because both engines write the identical
-                // pixels. The log names it so the slowness is not a mystery.
-                const char* why = kernel::lastCudaError();
-                diagLog("  GPU band at row %d failed (%s) -- CPU for the rest of this frame.",
-                        static_cast<int>(y), why && why[0] ? why : "no detail");
+        // THE BAND IS RESTARTED, NOT RESUMED, IF THE GPU DROPS OUT PARTWAY THROUGH IT.
+        //
+        // The partial sums live in device memory that the CPU path cannot see, so
+        // continuing from chunk N on the other engine would add this band's remaining
+        // samples to an accumulator that has nothing in it -- a band correct only in
+        // the samples taken after the failure, which is noise against its neighbours.
+        // Re-rendering the band costs one band; getting it wrong costs a visible seam.
+        const A_long unitsAtBandStart = unitsDone;
+
+        for (bool restart = true; restart; ) {
+            restart   = false;
+            unitsDone = unitsAtBandStart;   // the band's chunks are about to be redone
+
+            for (int s0 = 0; s0 < totalSamples; s0 += samplesPerChunk) {
+                const int n = std::min(samplesPerChunk, totalSamples - s0);
+
+                req.firstSample        = s0;
+                req.sampleCount        = n;
+                req.samplesAlreadyDone = s0;
+
+                if (useGpu) {
+                    if (!kernel::renderCudaToHost(req, static_cast<int>(y),
+                                                  static_cast<int>(y1))) {
+                        // FALLS BACK FOR THE REST OF THE FRAME RATHER THAN FAILING IT.
+                        // A driver reset or an out-of-memory partway down a frame
+                        // should cost a slow frame, not a black one -- and the bands
+                        // already written stay valid, because both engines write the
+                        // identical pixels. The log names it so the slowness is not a
+                        // mystery.
+                        const char* why = kernel::lastCudaError();
+                        diagLog("  GPU band at row %d failed (%s) -- CPU for the rest of this frame.",
+                                static_cast<int>(y), why && why[0] ? why : "no detail");
+                        useGpu  = false;
+                        restart = true;
+                        break;
+                    }
+                } else {
+                    kernel::renderCpu(req, 0, static_cast<int>(y), static_cast<int>(y1));
+                }
+
+                // ABORT BEFORE PROGRESS. PF_ABORT is what lets the user cancel and
+                // what lets AE discard a frame whose inputs already changed; a render
+                // that ignores it keeps burning minutes on a picture nobody is waiting
+                // for any more.
+                //
+                // PER CHUNK, NOT PER BAND, and that is the half of the fix that the
+                // user actually feels. At a high sample count a band is many launches,
+                // and checking only between bands would leave the host unresponsive
+                // for exactly as long as the split was introduced to avoid.
+                //
+                // The error is RETURNED, not swallowed: PF_Interrupt_CANCEL is how the
+                // host is told the buffer is incomplete, and converting a partly-filled
+                // staging buffer below would hand AE a half-rendered frame to cache.
+                if (PF_Err abortErr = PF_ABORT(in_data)) {
+                    diagLog("  aborted at row %d of %d, sample %d of %d, after %.2f s",
+                            static_cast<int>(y1), static_cast<int>(output->height),
+                            s0 + n, totalSamples, diagSeconds() - t0);
+                    return abortErr;
+                }
+
+                ++unitsDone;
+                if (PF_Err progErr = PF_PROGRESS(in_data, unitsDone, totalUnits)) return progErr;
             }
         }
-        if (!ok || !useGpu) {
-            kernel::renderCpu(req, 0, static_cast<int>(y), static_cast<int>(y1));
-        }
-
-        // ABORT BEFORE PROGRESS. PF_ABORT is what lets the user cancel and what lets
-        // AE discard a frame whose inputs already changed; a render that ignores it
-        // keeps burning minutes on a picture nobody is waiting for any more.
-        //
-        // The error is RETURNED, not swallowed: PF_Interrupt_CANCEL is how the host
-        // is told the buffer is incomplete, and converting a partly-filled staging
-        // buffer below would hand AE a half-rendered frame to cache.
-        if (PF_Err abortErr = PF_ABORT(in_data)) {
-            diagLog("  aborted at row %d of %d after %.2f s",
-                    static_cast<int>(y1), static_cast<int>(output->height),
-                    diagSeconds() - t0);
-            return abortErr;
-        }
-        if (PF_Err progErr = PF_PROGRESS(in_data, y1, output->height)) return progErr;
     }
 
     // THE NUMBER THAT SETTLES "IT RENDERS NOTHING" VERSUS "IT IS STILL RENDERING".

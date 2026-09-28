@@ -57,6 +57,83 @@ constexpr int kBlockY = 16;
 
 int divideRoundUp(int a, int b) { return (a + b - 1) / b; }
 
+// ---------------------------------------------------------------------------
+// The device buffer renderCudaToHost renders into, kept between calls.
+// ---------------------------------------------------------------------------
+//
+// IT USED TO BE A cudaMalloc AND A cudaFree PER BAND, and that was the right first
+// version: correct, obviously leak-free, and invisible next to a placeholder kernel
+// at 0.02 s a frame. It stops being invisible the moment the real transport lands --
+// a driver-side allocation is a synchronising call, so it does not merely cost its
+// own microseconds, it drains the pipeline every band.
+//
+// GROW-ONLY, NEVER SHRUNK. A comp renders the same size thousands of times in a row,
+// so after the first frame every call is a capacity check and a pointer. Shrinking
+// would hand the frees back to exactly the workload that just proved it needs the
+// bytes, and 33 MB for a 1920x1080 band is not worth defending on a card that has
+// gigabytes.
+//
+// THREAD_LOCAL, FOR THE SAME REASON THE ERROR SLOT ABOVE IS.
+//
+// Multi-frame rendering puts several frames in this process at once. One shared
+// buffer would need a lock around every launch, which would serialise the workers
+// against each other on a resource that is not actually scarce -- and an unlocked
+// shared buffer would be two frames writing the same device memory, which is a
+// corrupted frame rather than an error. A buffer per rendering thread costs VRAM
+// proportional to the workers AE chose, which is the same thing their host-side
+// buffers already cost.
+struct DeviceScratch {
+    void*  mem      = nullptr;
+    size_t capacity = 0;
+
+    // FREED WHEN THE THREAD ENDS, and errors here are deliberately ignored.
+    //
+    // At process teardown the CUDA runtime may already have torn down the context,
+    // and cudaFree then reports cudaErrorCudartUnloading. There is nothing to do
+    // about it and nobody left to tell: the driver reclaims the allocation with the
+    // context regardless. Reporting it would only put a false failure in the log
+    // after the last frame anyone cared about.
+    ~DeviceScratch() {
+        if (mem) cudaFree(mem);
+    }
+
+    void* reserve(size_t bytes) {
+        if (mem && bytes <= capacity) return mem;
+
+        // Released BEFORE the new request rather than after, so a grow needs the new
+        // size free and not the sum of both -- which is the difference between
+        // resizing and failing on a card that is nearly full.
+        if (mem) {
+            cudaFree(mem);
+            mem      = nullptr;
+            capacity = 0;
+        }
+
+        void* p = nullptr;
+        const cudaError_t err = cudaMalloc(&p, bytes);
+        if (err != cudaSuccess) {
+            setError("cudaMalloc", err);
+            return nullptr;
+        }
+        mem      = p;
+        capacity = bytes;
+        return mem;
+    }
+};
+
+// TWO BUFFERS, NOT ONE, AND THEY HAVE DIFFERENT LIFETIMES IN THE SAME FRAME.
+//
+// g_dest is overwritten by every launch and copied straight back to the host. g_accum
+// is linear radiance that has to SURVIVE between the launches of one band -- it is
+// what makes a sample split possible at all, and reusing one buffer for both would
+// destroy the partial sums the next launch is supposed to add to.
+//
+// Both are grow-only, so within a band the geometry never changes and reserve() keeps
+// handing back the same pointer. That is load-bearing: a reallocation mid-band would
+// silently discard the samples already accumulated.
+thread_local DeviceScratch g_dest;
+thread_local DeviceScratch g_accum;
+
 } // namespace
 
 // The kernel. ONE PIXEL PER THREAD, with the bounds check that every AE GPU
@@ -192,12 +269,12 @@ bool renderCudaToHost(const RenderRequest& req, int rowBegin, int rowEnd) {
     const size_t rowBytes = static_cast<size_t>(pitchPx) * 4u * sizeof(float);
     const size_t bytes    = rowBytes * static_cast<size_t>(bandRows);
 
-    void* devMem = nullptr;
-    cudaError_t err = cudaMalloc(&devMem, bytes);
-    if (err != cudaSuccess) {
-        setError("cudaMalloc", err);
-        return false;
-    }
+    // THE BUFFER OUTLIVES THE CALL -- see DeviceScratch above. Nothing here frees it,
+    // and that is not a leak: it is owned by this thread and released when the thread
+    // ends. The failure path below therefore does NOT free either, because a later
+    // band on this thread will want the same bytes.
+    void* devMem = g_dest.reserve(bytes);
+    if (!devMem) return false;   // reserve() has already set the error
 
     RenderRequest devReq = req;
     devReq.dest.data     = devMem;
@@ -211,33 +288,64 @@ bool renderCudaToHost(const RenderRequest& req, int rowBegin, int rowEnd) {
     // render the TOP of the frame into a different part of the output.
     devReq.view.originY = req.view.originY + rowBegin;
 
-    // THE ACCUMULATOR IS NOT CARRIED ACROSS. It would have to live in device memory
-    // and persist between calls, which is the progressive-accumulation design and
-    // not this function's job. Callers that want accumulation own the device buffer
-    // themselves and use renderCuda().
-    devReq.accumulator        = nullptr;
-    devReq.accumulatorPitchPx = 0;
-
-    const bool launched = renderCuda(devReq);
-    if (!launched) {
-        // renderCuda has already filled in the error; do not overwrite it with a
-        // less specific one from the cleanup path.
-        cudaFree(devMem);
-        return false;
+    // THE ACCUMULATOR IS CARRIED ACROSS THE LAUNCHES OF ONE BAND, and this function
+    // owns it so that no caller has to hold device memory to get a sample split.
+    //
+    // ASKED FOR ONLY WHEN THE REQUEST IS ACTUALLY SPLIT. A single-launch band has
+    // nothing to carry, and renderPixel's no-accumulator branch divides its own sum
+    // once -- which is bit-for-bit what this path did before accumulation existed.
+    // Allocating a second 33 MB buffer to hold one launch's partial sums would cost
+    // bandwidth and VRAM to reproduce a number we already have.
+    //
+    // THE HOST DECIDES WHERE THE BOUNDARIES ARE, through firstSample / sampleCount /
+    // samplesAlreadyDone in the request -- see samplesPerLaunch() in KernelApi.h for
+    // why that decision may not depend on the band, the thread count, or a clock.
+    // renderPixel treats samplesAlreadyDone <= 0 as "initialise", so a band's first
+    // launch overwrites whatever the previous band left behind and there is no reset
+    // to forget.
+    const bool split = req.samplesAlreadyDone > 0 || req.sampleCount < req.quality.samplesPerPixel;
+    if (split) {
+        void* accMem = g_accum.reserve(bytes);
+        if (!accMem) return false;
+        devReq.accumulator        = static_cast<float*>(accMem);
+        devReq.accumulatorPitchPx = pitchPx;
+    } else {
+        devReq.accumulator        = nullptr;
+        devReq.accumulatorPitchPx = 0;
     }
+
+    // renderCuda has already filled in the error; do not overwrite it with a less
+    // specific one, and do not free the scratch -- the next band wants it.
+    if (!renderCuda(devReq)) return false;
 
     // Back into the band's own slice of the host buffer, at the host pitch.
     char* hostBand = static_cast<char*>(req.dest.data)
                    + static_cast<size_t>(rowBegin) * rowBytes;
 
-    err = cudaMemcpy(hostBand, devMem, bytes, cudaMemcpyDeviceToHost);
-    cudaFree(devMem);
+    // ONLY THE BAND'S BYTES, NOT THE BUFFER'S CAPACITY. The scratch is grow-only, so
+    // after a large frame it is routinely bigger than the band being copied -- and
+    // copying `capacity` would run off the end of the host buffer.
+    const cudaError_t err = cudaMemcpy(hostBand, devMem, bytes, cudaMemcpyDeviceToHost);
 
     if (err != cudaSuccess) {
         setError("cudaMemcpy device->host", err);
         return false;
     }
     return true;
+}
+
+float* reserveDeviceAccumulator(int pitchPx, int heightPx) {
+    if (!cudaAvailable()) return nullptr;
+    if (pitchPx <= 0 || heightPx <= 0) return nullptr;
+
+    // SHARES g_accum WITH renderCudaToHost, WHICH IS SAFE ONLY BECAUSE THE TWO ARE
+    // NEVER IN FLIGHT TOGETHER: a frame is rendered by one command or the other, and
+    // within a thread the calls do not interleave. If a future path ever used both,
+    // this needs its own scratch -- the failure would be one frame's partial sums
+    // landing in the other's accumulator.
+    const size_t bytes = static_cast<size_t>(pitchPx) * 4u * sizeof(float)
+                       * static_cast<size_t>(heightPx);
+    return static_cast<float*>(g_accum.reserve(bytes));
 }
 
 const char* lastCudaError() {

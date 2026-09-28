@@ -84,6 +84,14 @@ elseif(MODE STREQUAL "gpubands")
     # kernel's 16-row block, so the last band is short and the block grid does not
     # line up with the band edges. A band size that divided evenly would pass while
     # hiding an off-by-one at the boundary.
+    # A SCENE THE PROPERTY CAN ACTUALLY FAIL IN, which this test did not have until
+    # 2026-09-28. It ran on the suite's shared 96x54 sky at sun elevation 20 -- smooth
+    # enough that a per-band change in the sampler's jitter moved no pixel by a whole
+    # level -- and so it compared byte-identical for weeks while the sampler really was
+    # seeded per band. The sun disc is where sub-pixel differences become whole levels,
+    # so the scene now contains one.
+    set(SCENE -w 256 -h 144 -s 8 --sun-el 12)
+
     gpu_render("${OUT_DIR}/gpu_whole.ppm")
     gpu_render("${OUT_DIR}/gpu_banded.ppm" --gpu-band-rows 37)
 
@@ -121,6 +129,146 @@ elseif(MODE STREQUAL "threads")
             "  Under MFR this is a frame that changes depending on machine load.")
     endif()
     message(STATUS "thread count: identical at 1 and 8")
+
+elseif(MODE STREQUAL "window")
+    # A WINDOW OF THE FRAME MUST MATCH THE SAME PATCH OF THE WHOLE FRAME.
+    #
+    # This is the test that three separate shipped bugs were all waiting for. The
+    # destination buffer is routinely a sub-rect -- a Region of Interest, a CUDA band,
+    # a reduced-resolution proxy -- and each time the number saying WHERE that rect
+    # sits came from the wrong place, the effect rendered the top-left corner of the
+    # picture into a buffer the host composited somewhere else. Every one of them was
+    # found by a human looking at After Effects, because nothing headless could ask
+    # for a window until --window existed.
+    #
+    # A SCENE WITH THE SUN IN IT, AND THAT IS NOT DECORATION. The first thing this
+    # test caught was the sampler being seeded from the BUFFER pixel instead of the
+    # FRAME pixel, which changes only the sub-pixel jitter -- invisible across a smooth
+    # gradient and worth 190 levels of 255 at the edge of the sun disc. determinism
+    # .gpuBands had been asserting a neighbouring property for weeks against a scene
+    # too smooth to show it, and passed throughout. A test can only catch what its
+    # scene can show.
+    set(WINDOW_SCENE -w 256 -h 144 -s 8 --sun-el 12)
+
+    foreach(_engine --cpu --require-gpu)
+        if(_engine STREQUAL "--require-gpu" AND NOT WITH_GPU)
+            continue()
+        endif()
+
+        execute_process(
+            COMMAND "${MISTYTUNEC}" ${WINDOW_SCENE} ${_engine}
+                    -o "${OUT_DIR}/window_full.ppm"
+            RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+        if(NOT _rc EQUAL 0)
+            message(FATAL_ERROR "mistytunec ${_engine} failed (${_rc}):\n${_out}\n${_err}")
+        endif()
+
+        # DELIBERATELY AWKWARD: 90,50 is not a multiple of the kernel's 16-row block
+        # and 120x70 does not tile the frame, so a window that lined up with the block
+        # grid cannot pass by accident.
+        execute_process(
+            COMMAND "${MISTYTUNEC}" ${WINDOW_SCENE} ${_engine} --window 90 50 120 70
+                    --compare "${OUT_DIR}/window_full.ppm" --compare-at 90 50
+                    --tolerance 2
+            RESULT_VARIABLE _same OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+        if(NOT _same EQUAL 0)
+            message(FATAL_ERROR
+                "A WINDOW DOES NOT MATCH THE FRAME on ${_engine}.\n"
+                "${_out}${_err}"
+                "  The buffer is a WINDOW, not a crop: view.originX/Y must reach BOTH\n"
+                "  the ray direction and the sampler seed, or the same frame pixel gets\n"
+                "  a different answer depending on how the frame was divided.\n"
+                "  Reaches a user as a Region of Interest that disagrees with the\n"
+                "  picture underneath it, or as banding seams across a frame.")
+        endif()
+
+        # THE CONTROL. Comparing the window against the WRONG patch must fail, or the
+        # comparison above is not actually looking at position at all.
+        execute_process(
+            COMMAND "${MISTYTUNEC}" ${WINDOW_SCENE} ${_engine} --window 90 50 120 70
+                    --compare "${OUT_DIR}/window_full.ppm" --compare-at 0 0
+                    --tolerance 2
+            RESULT_VARIABLE _differs OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+        if(_differs EQUAL 0)
+            message(FATAL_ERROR
+                "POSITION IGNORED on ${_engine}: the window matched the frame's\n"
+                "  top-left corner as well as its own position, so the test above\n"
+                "  proves nothing about where anything was rendered.")
+        endif()
+
+        message(STATUS "window (${_engine}): matches its own patch, and not another")
+    endforeach()
+
+elseif(MODE STREQUAL "samplechunks")
+    # ACCUMULATION ACROSS LAUNCHES MUST NOT CHANGE THE PICTURE.
+    #
+    # Above about a thousand samples per pixel the row bands hit their floor and one
+    # launch would sit past the Windows display-driver timeout, so the samples are
+    # split too and the partial sums are carried in an accumulator between launches.
+    # That accumulator is the only piece of state in the renderer that outlives a
+    # launch, which makes it the only place a frame can be silently half-rendered.
+    #
+    # A SCENE WITH SOMETHING TO CONVERGE. 64 samples, not the suite's usual 16: the
+    # sun disc and the horizon edge are where sample count actually shows, and a
+    # comparison of two already-converged skies would pass whatever the accumulator
+    # did.
+    #
+    # --sample-chunk 1 IS THE HARSHEST SETTING, not a gentle one: 64 launches each
+    # responsible for a single sample, so every one of them has to read what the last
+    # left behind. The obvious ways to break this -- keeping only the last chunk,
+    # re-initialising every launch, weighting by the chunk instead of the running
+    # total -- all produce a 1-sample image, which the control below measures at 206
+    # levels away.
+    set(CHUNK_SCENE -w 96 -h 54 -s 64 --sun-el 20)
+
+    foreach(_engine --cpu --require-gpu)
+        if(_engine STREQUAL "--require-gpu" AND NOT WITH_GPU)
+            continue()
+        endif()
+
+        execute_process(
+            COMMAND "${MISTYTUNEC}" ${CHUNK_SCENE} ${_engine}
+                    -o "${OUT_DIR}/chunk_whole.ppm"
+            RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+        if(NOT _rc EQUAL 0)
+            message(FATAL_ERROR "mistytunec ${_engine} failed (${_rc}):\n${_out}\n${_err}")
+        endif()
+
+        # COMPARED WITH TOLERANCE AND NOT BYTE-FOR-BYTE, unlike the tripwires above,
+        # and the difference is real rather than defensive. Splitting the samples
+        # REGROUPS a floating-point sum, and addition is not associative -- so an exact
+        # match is not something this test is entitled to demand, even though every
+        # split measured here has in fact produced one.
+        execute_process(
+            COMMAND "${MISTYTUNEC}" ${CHUNK_SCENE} ${_engine} --sample-chunk 1
+                    --compare "${OUT_DIR}/chunk_whole.ppm" --tolerance 2
+            RESULT_VARIABLE _same OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+        if(NOT _same EQUAL 0)
+            message(FATAL_ERROR
+                "ACCUMULATION IS LOSSY: 64 samples in one launch and 64 samples in 64\n"
+                "  launches disagree on ${_engine}.\n"
+                "${_out}${_err}"
+                "  The accumulator is not carrying partial sums between launches, or\n"
+                "  samplesAlreadyDone is not reaching the weighting in renderPixel.\n"
+                "  Reaches a user as a frame that gets NOISIER the more samples they\n"
+                "  ask for, because only the last chunk survives.")
+        endif()
+
+        # THE CONTROL, AND THIS TEST IS WORTHLESS WITHOUT IT. The comparison above
+        # passes trivially if the sample count does not reach the image at all. One
+        # sample against sixty-four must therefore FAIL the same tolerance.
+        execute_process(
+            COMMAND "${MISTYTUNEC}" -w 96 -h 54 -s 1 --sun-el 20 ${_engine}
+                    --compare "${OUT_DIR}/chunk_whole.ppm" --tolerance 2
+            RESULT_VARIABLE _differs OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+        if(_differs EQUAL 0)
+            message(FATAL_ERROR
+                "SAMPLE COUNT IGNORED on ${_engine}: 1 sample and 64 samples produced\n"
+                "  the same image, so the chunk comparison above proves nothing.")
+        endif()
+
+        message(STATUS "sample chunks (${_engine}): 64x1 matches 64, and 1 does not")
+    endforeach()
 
 elseif(MODE STREQUAL "seed")
     # THE CONTROL FOR THE OTHER TWO. A renderer that ignored the seed -- or that
