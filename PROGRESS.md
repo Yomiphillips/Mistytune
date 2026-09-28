@@ -4,6 +4,118 @@ Tracked against `PLAN.md`. Newest first.
 
 ---
 
+## 2026-09-28 — Phase 1 exit criterion MET
+
+The two paths the last entry listed as never exercised were driven in AE 2026. One
+passed untouched. The other rendered a flat blue frame, and the defect was a comment.
+
+### 16 bpc passes, and it was right the first time
+
+    SMART_RENDER_HOST: format=909206881 output=1920x1080 rowbytes=15360 samples=1
+
+`909206881` is `'ae16'`, and 15360 rowbytes on a 1920-wide buffer is 8 bytes per
+pixel — `PF_PixelFormat_ARGB64`, as expected. The frame came back at correct
+brightness, so the `0..32768` scaling at `Mistytune.cpp` is confirmed in a host. That
+is the classic way to get a 16 bpc render half as bright, and it is now checked rather
+than reasoned about.
+
+All three depths are therefore verified in the running host: 8 via `'argb'`, 16 via
+`'ae16'`, 32 via `'ae32'`.
+
+### Reduced resolution failed, and the cause was a sentence
+
+Third resolution rendered flat blue — no horizon, no gradient. The log named it:
+
+    PRE_RENDER: frame=1920x1080 request=[-64,-36 768x432] downsample=1/3,1/3
+      result_rect=[0,0 640x360]
+    SMART_RENDER_HOST: output=640x360 rowbytes=5120
+      frame=1920x1080 origin=0,0
+
+**`frame` and `output` were in different units.** `primaryRayDirection` divides the
+destination pixel by `view.widthPx`, so `px` ran 0..639 over a denominator of 1920 and
+the render covered the top-left third of the picture. On a sky whose top third is
+empty that is a uniform blue rectangle, which reads as a dead renderer rather than as
+a framing error — the same disguise the black frame wore in the previous entry.
+
+**The wrong number came from a comment asserting the opposite of the truth.**
+`Mistytune.cpp` carried, directly above the assignment:
+
+> `in_data->width/height` are the layer's size at the current downsample
+
+They are not. They are full resolution and do not shrink: the 1/3 render reported
+`in_data->width == 1920` while AE's own `result_rect` was 640x360. Everything else at
+render time — the output world, the request rect, `output_origin_x/y` — is in
+downsampled pixels, so that one full-resolution number described a different picture
+than everything it sat beside.
+
+**The fix.** `downsampledExtent()` in `AEBridge.h` scales the layer into the buffer's
+units, and pre-render stores that. At Third the frame is 640x360 against a 640x360
+buffer, and the whole picture renders. Verified in AE at Third and Quarter.
+
+**The field of view is still not scaled by the downsample**, which the old comment got
+right and is worth keeping right: only the RATIO of buffer to frame reaches the ray
+maths, so scaling both together holds the camera still. That is what makes a proxy
+render a smaller picture of the same view instead of a zoom.
+
+### What the new tests do and do not cover
+
+`tests/unit/TestCamera.cpp` — four cases: framing invariant across Full/Half/Third/
+Quarter, the frame as the real denominator, the ROI origin, and the CUDA band offset.
+44 unit tests now, all green, plus the 11 ctest suites.
+
+**It would not have caught this bug, and its header says so.** The bad number lived in
+AE glue that tier 1 cannot reach; `primaryRayDirection` was correct before the fix and
+is correct after it. What the file guards is the opposite mistake — "fixing" the field
+of view by multiplying it with the downsample factor — and it records the contract the
+glue has to satisfy in a place a compiler checks.
+
+The lesson is the same one the previous entry ends on, one level up: **a comment
+asserting a host's behaviour is a claim, and an unverified claim next to an assignment
+is more dangerous than no comment, because it stops the next reader from checking.**
+Both defects in this file's history were found by a render, not by a reading.
+
+### Phase 1, against PLAN.md's exit criterion
+
+| | |
+| --- | --- |
+| installs into AE | yes |
+| renders correctly at 8 / 16 / 32 bpc | yes, all three observed in host |
+| renders correctly at reduced resolution | yes, Third and Quarter |
+| `EffectFlags.cmake` static_assert passes | yes |
+| `build.ps1 -Test` green | yes — 44 unit, 11 ctest |
+| the log names the GPU device AE handed us | **with an asterisk** |
+
+**The asterisk.** AE hands us no device: `what_gpu=NONE` on every frame observed, so
+`PF_Cmd_SMART_RENDER_GPU` is never called. The log names the device *we* opened, and
+the frame is rendered on it through `renderCudaToHost()` inside the ordinary CPU
+command. The criterion's intent — a GPU pixel in the host, provably on the GPU — is
+met at 20 ms a frame against 1.16 s on the CPU. Its letter is not, and no amount of
+work in this effect can meet the letter until AE is persuaded to offer a device.
+
+**Phase 1 is closed. Phase 2 is next.**
+
+### Carried into Phase 2, unchanged from the last entry
+
+- **`PF_Cmd_SMART_RENDER_GPU` is dead code** and its one-launch-for-all-samples hazard
+  is still unfixed AND still unreachable. It needs the chunked loop before AE is ever
+  persuaded to call it.
+- **`renderCudaToHost()` allocates and frees per band.** At 20 ms a frame the
+  `cudaMalloc` and the 33 MB copy back are a measurable fraction of the total. A
+  persistent device buffer is the obvious next win and is the same allocation
+  progressive accumulation needs.
+- **Nothing is cached between renders.** Exposure and AgX Tonemap are pure post
+  transforms and currently cost a full re-render.
+- **`fillCameraFromComp()` is still a stub** returning a fixed matrix.
+- **The `--` classifier readout still draws a 0..1 slider** instead of a text-only row.
+- **A non-zero `output_origin` has still never been driven in the host.** Every render
+  to date logs `origin=0,0`, including the one where AE expanded the request to
+  [-192,-108 2304x1296] and still asked for the full frame. The path is covered by
+  unit tests and by the CUDA band split; it is not covered by a host.
+- **`src/engine/AutoSolveGate.{h,cpp}` and its test are out of the build but on disk.**
+  They should be deleted.
+
+---
+
 ## 2026-09-26 — Phase 1 exit criterion FAILED on first contact with After Effects
 
 The effect was installed into AE 2026 (26.2.1) and asked to render for the first

@@ -29,10 +29,18 @@ add_executable(plugin_tests
     # Ordered contours out of a matte: the front half of pareidolia.
     unit/TestContour.cpp
 
+    # The frame/buffer/origin contract. Written after a reduced-resolution render
+    # in AE came back flat blue; see the file's own header on why it could not have
+    # caught that, and what it does guard instead.
+    unit/TestCamera.cpp
+
     unit/TestFramework.h
 )
 
-target_link_libraries(plugin_tests PRIVATE plugin_engine)
+# plugin_kernel for Shading.h, which TestCamera.cpp calls directly. It carries
+# plugin_engine transitively and pulls in no AE header and no CUDA header on the
+# host, which is what keeps this tier runnable anywhere.
+target_link_libraries(plugin_tests PRIVATE plugin_kernel)
 
 add_test(NAME unit COMMAND plugin_tests)
 

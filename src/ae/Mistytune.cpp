@@ -236,24 +236,33 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
     data->view.exposureEV = static_cast<float>(values.v[kMistytuneExposureEV]);
     data->view.agxTonemap = values.v[kMistytuneAgxTonemap] > 0.5;
 
-    // THE CAMERA'S FRAME IS THE LAYER, NOT THE REQUESTED RECT.
+    // THE CAMERA'S FRAME IS THE LAYER, NOT THE REQUESTED RECT -- IN DOWNSAMPLED PIXELS.
     //
-    // in_data->width/height are the layer's size at the current downsample, which is
-    // the whole picture the lens sees. THE REQUESTED RECT IS NOT THAT: AE asks for
-    // whatever area it needs and the buffer it hands back is a third size again --
-    // measured on a plain 1920x1080 comp, the request was [-192,-108 2304x1296] while
-    // the output world was 1920x1080.
+    // The layer is the whole picture the lens sees. THE REQUESTED RECT IS NOT THAT: AE
+    // asks for whatever area it needs and the buffer it hands back is a third size
+    // again -- measured on a plain 1920x1080 comp, the request was [-192,-108
+    // 2304x1296] while the output world was 1920x1080. Storing the REQUEST size here
+    // was a framing bug: every ray got divided by a denominator 20% too large, so the
+    // field of view silently widened and the image slid off centre.
     //
-    // Storing the REQUEST size here was a framing bug: every ray got divided by a
-    // denominator 20% too large, so the field of view silently widened and the image
-    // slid off centre. The buffer's own offset within the frame is read at render
-    // time, where AE fills it in -- see smartRender.
+    // STORING in_data->width/height RAW WAS THE SECOND HALF OF THE SAME MISTAKE, and
+    // the comment that used to sit here asserted the opposite -- that they were
+    // already downsampled. They are not. A 1/3 render logged frame=1920x1080 against
+    // AE's own result_rect of 640x360, and since primaryRayDirection divides the
+    // destination pixel by this frame, px ran 0..639 over a denominator of 1920: every
+    // reduced-resolution render drew the top-left third of the sky, which on a sky
+    // whose top third is empty is a flat blue frame and reads as a dead renderer.
     //
     // THE FIELD OF VIEW IS STILL NOT SCALED BY THE DOWNSAMPLE, and that part was
     // always right: a smaller buffer of the same view is exactly what a proxy render
-    // is, and scaling the FOV would zoom the image instead.
-    data->view.widthPx  = in_data->width;
-    data->view.heightPx = in_data->height;
+    // is, and scaling the FOV would zoom the image instead. Scaling the frame WITH the
+    // buffer is what holds the FOV fixed -- the ray maths divides one by the other, so
+    // only their ratio is a camera property, and the ratio does not move.
+    //
+    // The buffer's own offset within the frame arrives in the same downsampled units
+    // and is read at render time, where AE fills it in -- see smartRender.
+    data->view.widthPx  = downsampledExtent(in_data->width,  in_data->downsample_x);
+    data->view.heightPx = downsampledExtent(in_data->height, in_data->downsample_y);
 
     const PF_LRect& req = extra->input->output_request.rect;
 

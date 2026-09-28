@@ -57,6 +57,23 @@ inline float downsampleY(const PF_InData* in_data) {
     return static_cast<float>(in_data->downsample_y.num) / in_data->downsample_y.den;
 }
 
+// A full-resolution extent, in the units the destination buffer is measured in.
+//
+// IN_DATA->WIDTH/HEIGHT ARE FULL RESOLUTION AND DO NOT SHRINK. Measured in AE 2026:
+// a 1/3 render of a 1920x1080 layer reported in_data->width == 1920 while the buffer
+// AE handed back was 640x360. Everything else at render time -- the output world, the
+// request rect, output_origin_x/y -- is in downsampled pixels, so a full-resolution
+// number mixed in with them describes a different picture than the rest.
+//
+// ROUNDED UP, because a layer must not lose its last row or column at reduced
+// resolution. On the sizes AE actually uses the division is exact; the rounding only
+// decides a sub-pixel case, and losing the edge is the worse of the two.
+inline int downsampledExtent(A_long fullRes, const PF_RationalScale& scale) {
+    if (scale.den <= 0 || scale.num <= 0) return static_cast<int>(fullRes);
+    const A_long num = fullRes * scale.num;
+    return static_cast<int>((num + scale.den - 1) / scale.den);
+}
+
 // ---------------------------------------------------------------------------
 // Pixel formats
 // ---------------------------------------------------------------------------

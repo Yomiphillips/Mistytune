@@ -250,6 +250,14 @@ struct ViewParams {
     // while writing a smaller buffer scales every ray by the ratio, so the effective
     // field of view changes and the image slides off centre -- which reads as a
     // broken camera rather than as a units mistake.
+    //
+    // IN THE DESTINATION BUFFER'S OWN UNITS, WHICH UNDER AE MEANS DOWNSAMPLED PIXELS.
+    // "Full frame" is about extent, not about resolution: at Third the whole picture
+    // the lens sees is 640x360 and these hold 640x360. A full-resolution number here
+    // beside a downsampled buffer is the same framing bug wearing different clothes,
+    // and it is the one that shipped -- every reduced-resolution render drew the
+    // top-left third of the picture until 2026-09-28. The camera is unharmed by the
+    // scaling because only the RATIO of buffer to frame reaches the ray maths.
     int32_t widthPx  = 1920;
     int32_t heightPx = 1080;
 
