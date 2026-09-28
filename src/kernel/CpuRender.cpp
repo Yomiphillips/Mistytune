@@ -19,10 +19,83 @@
 #include "Shading.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <thread>
 #include <vector>
 
+// ---------------------------------------------------------------------------
+// The renderer itself, as generated C++ source
+// ---------------------------------------------------------------------------
+//
+// THE SAME .slang THE CUDA PATH COMPILES, through `-target cpp`. RenderLib.slang is
+// one file; Render.slang and RenderCpu.slang are two entry points over it, and they
+// differ only in their names because slangc marks entry points `extern "C"` and both
+// generated objects end up in this one library. See Render.slang's header.
+//
+// INSIDE A NAMESPACE, so the generated helpers -- `clamp_0`, `dot_1`, `Vector` --
+// cannot collide with anything in this file or in Shading.h. The entry point itself
+// escapes the namespace because `extern "C"` ignores namespaces, which is exactly
+// why it needed its own name in the first place.
+//
+// <cmath> AND <cstdint> ARE INCLUDED ABOVE, AT GLOBAL SCOPE, DELIBERATELY. The
+// prelude includes them, and a standard header first seen from inside a namespace
+// puts the entire C library in that namespace. Pulling them in first makes the
+// prelude's own includes no-ops.
+namespace mistytune_cpu_backend {
+#include "slang/generated/RenderCpu.cpp"
+}
+
+// RenderRequest -> the generated structs, member by member. The SAME template the
+// CUDA path uses; only the vector constructors below differ.
+#include "SlangBridge.h"
+
 namespace plugin::kernel {
+
+// ---------------------------------------------------------------------------
+// The seam Shading.h declares
+// ---------------------------------------------------------------------------
+//
+// THE TWIN OF THE ONE IN Mistytune.cu, and the resemblance is the point: if these two
+// ever stop agreeing, slang.cpuParity is what says so, and tests/golden/ is what
+// stops a CPU reference certifying a GPU render it no longer matches.
+MT_RENDER Vec3 mistytuneTrace(const RenderRequest& req, Vec3 ro, Vec3 rd,
+                              unsigned int seed) {
+    namespace be = mistytune_cpu_backend;
+
+    struct CpuVectors {
+        static be::Vector<float, 2> v2(float x, float y) {
+            be::Vector<float, 2> v; v.x = x; v.y = y; return v;
+        }
+        static be::Vector<float, 3> v3(float x, float y, float z) {
+            be::Vector<float, 3> v; v.x = x; v.y = y; v.z = z; return v;
+        }
+        static be::Vector<int32_t, 3> i3(int x, int y, int z) {
+            be::Vector<int32_t, 3> v; v.x = x; v.y = y; v.z = z; return v;
+        }
+    };
+
+    be::Scene_0      scene{};
+    be::PhaseInput_0 phase{};
+    fillSlangScene<CpuVectors>(req, scene, phase);
+
+    be::StructuredBuffer<float> bounds;
+    bounds.data  = nullptr;
+    bounds.count = 0;
+
+    be::StructuredBuffer<be::Vector<float, 2>> drift;
+    drift.data = reinterpret_cast<be::Vector<float, 2>*>(
+                     const_cast<void*>(req.driftBuffer));
+    drift.count = static_cast<size_t>(cloud::kDriftKnots);
+
+    const be::Vector<float, 3> radiance =
+        be::renderSample_0(&scene, &phase, bounds, drift,
+                           CpuVectors::v3(ro.x, ro.y, ro.z),
+                           CpuVectors::v3(rd.x, rd.y, rd.z),
+                           seed);
+
+    return vec3(radiance.x, radiance.y, radiance.z);
+}
 
 namespace {
 
@@ -100,6 +173,16 @@ void renderCpu(const RenderRequest& req, int threads, int rowBegin, int rowEnd) 
     // A LOCAL COPY OF THE REQUEST, because the accumulator pointer belongs to this
     // call and the caller's struct is const. The workers capture this one.
     RenderRequest work = req;
+
+    // The derived half of the request, exactly as renderCuda does it and for the
+    // same reason: no caller can forget, because no caller is asked.
+    //
+    // THE DRIFT BUFFER IS THE TABLE ITSELF HERE. There is no device to cross, so the
+    // kernel reads `work.drift.xz` in place -- which is why that array is interleaved
+    // and eight-byte aligned rather than two tidy parallel ones. See IceField.h.
+    deriveRenderInputs(work);
+    work.driftBuffer = work.drift.xz;
+
     const bool split = req.samplesAlreadyDone > 0 || req.sampleCount < req.quality.samplesPerPixel;
     if (split) {
         const int pitchPx = req.dest.pitchPx > 0 ? req.dest.pitchPx : req.dest.widthPx;

@@ -8,12 +8,61 @@
 # Target name is deliberately generic, so the build scripts need no edit when the
 # plugin is renamed.
 
+# ---------------------------------------------------------------------------
+# The renderer, from ONE Slang source to both backends
+# ---------------------------------------------------------------------------
+#
+# PLAN.md's central bet, and this is where it reaches the shipping binary.
+# RenderLib.slang is the renderer; Render.slang and RenderCpu.slang are two entry
+# points over it, compiled to CUDA and to C++ respectively, and included as SOURCE by
+# Mistytune.cu and CpuRender.cpp so each can call into it.
+#
+# TWO FILES FOR ONE RENDERER because slangc marks entry points `extern "C"` and both
+# objects land in this library -- identical names would be one symbol and the link
+# would fail. See Render.slang's header; CpuParity.slang hit it first.
+#
+# THE TRAILING ARGUMENTS ARE THE #include'd SOURCES AND A MISSING ONE IS A STALE
+# COMMITTED ARTIFACT. CMake cannot see through an #include, so leaving a name out
+# means editing that file regenerates nothing, the build succeeds, the tests pass,
+# and what ships is the old maths. slang.regenerates is the backstop.
+set(SLANG_DIR       "${CMAKE_CURRENT_SOURCE_DIR}/slang")
+set(SLANG_GENERATED "${SLANG_DIR}/generated")
+
+set(PLUGIN_SLANG_RENDER_DEPS
+    "${SLANG_DIR}/RenderLib.slang"
+    "${SLANG_DIR}/BounceLib.slang"
+    "${SLANG_DIR}/TransportLib.slang"
+    "${SLANG_DIR}/GeneratorLib.slang"
+    "${SLANG_DIR}/PhaseLib.slang"
+    "${SLANG_DIR}/SkyLib.slang"
+    "${SLANG_DIR}/Rng.slang")
+
+slang_generate("${SLANG_DIR}/Render.slang"
+               "${SLANG_GENERATED}/Render.cu"
+               "../prelude/slang-cuda-prelude.h"
+               ${PLUGIN_SLANG_RENDER_DEPS})
+
+slang_generate_cpp("${SLANG_DIR}/RenderCpu.slang"
+                   "${SLANG_GENERATED}/RenderCpu.cpp"
+                   "../prelude/slang-cpp-prelude.h"
+                   ${PLUGIN_SLANG_RENDER_DEPS})
+
 set(PLUGIN_KERNEL_SOURCES
     RenderRequest.h     # what the renderer is told
     Shading.h           # the per-pixel maths, compiled for BOTH paths
+    SlangBridge.h       # RenderRequest -> the kernel's structs, written ONCE
     KernelApi.h         # the only thing the host calls
     CpuRender.cpp       # the CPU loop around Shading.h
+
+    # Generated, committed, and #included as source rather than compiled on their
+    # own -- see HEADER_FILE_ONLY below. Listed here so the custom commands that
+    # regenerate them are attached to this target and run before it builds.
+    "${SLANG_GENERATED}/RenderCpu.cpp"
 )
+
+if(PLUGIN_CUDA_FOUND)
+    list(APPEND PLUGIN_KERNEL_SOURCES "${SLANG_GENERATED}/Render.cu")
+endif()
 
 if(PLUGIN_CUDA_FOUND)
     # Mistytune.cu supplies cudaAvailable(), deviceDescription(), renderCuda() and
@@ -26,6 +75,16 @@ else()
 endif()
 
 add_library(plugin_kernel STATIC ${PLUGIN_KERNEL_SOURCES})
+
+# NEITHER GENERATED FILE IS ITS OWN TRANSLATION UNIT. Both are #included as source --
+# Render.cu by Mistytune.cu, RenderCpu.cpp by CpuRender.cpp -- because slangc emits
+# everything below an entry point `static`, so a separately compiled object would
+# expose only the compute kernel and not the function a pixel needs to call.
+#
+# Compiling them as well would define `renderRays` and `cpuRenderRays` twice.
+set_source_files_properties("${SLANG_GENERATED}/Render.cu"
+                            "${SLANG_GENERATED}/RenderCpu.cpp"
+                            PROPERTIES HEADER_FILE_ONLY ON)
 
 target_include_directories(plugin_kernel PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 

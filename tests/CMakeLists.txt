@@ -26,6 +26,11 @@ add_executable(plugin_tests
     # calls the difference between a plugin people use and one they abandon.
     unit/TestFieldCache.cpp
 
+    # The shear integral and the majorant. ZeroShearGivesZeroDrift is the one that
+    # matters: the frame-of-reference bug it catches renders a plausible sky rather
+    # than an error, and was found by looking at a picture.
+    unit/TestIceField.cpp
+
     # Ordered contours out of a matte: the front half of pareidolia.
     unit/TestContour.cpp
 
@@ -49,3 +54,8 @@ add_test(NAME unit COMMAND plugin_tests)
 # still guards on it, so a build configured without the CLI degrades to skipping
 # these rather than failing to configure.
 add_subdirectory(golden)
+
+# Tier 1b: Slang's math against CUDA's, bitwise. Guards the premise the Slang port
+# rests on -- see tests/slang/MathParityMain.cu, and PROGRESS.md for the measurement
+# that made the decision.
+add_subdirectory(slang)

@@ -272,3 +272,50 @@ PL_TEST(NoCameraGivesZeroFov) {
     PL_CHECK_NEAR(verticalFovFromPlane(0.0, 1080.0), 0.0, 1e-9);
     PL_CHECK_NEAR(verticalFovFromPlane(-1.0, 1080.0), 0.0, 1e-9);
 }
+
+// ---------------------------------------------------------------------------
+// Where the ray STARTS, which is a different question from where it points
+// ---------------------------------------------------------------------------
+
+// THE OBSERVER IS AT observerAltitude, WHATEVER THE COMP CAMERA SAYS.
+//
+// CameraConvert drops the translation on purpose -- AE's world is comp pixels with an
+// arbitrary origin and this one is metres, and there is no conversion without a
+// scene-scale parameter that does not exist yet. So elements 3, 7 and 11 are
+// guaranteed zero, and a primaryRayOrigin that trusted them put the camera at
+// ALTITUDE ZERO in After Effects instead of at the observer's two metres.
+//
+// THAT SHIPPED, AND NO RENDER COULD HAVE SHOWN IT: two metres against a cloud base of
+// six kilometres moves nothing a person can see. It is exactly the class of error
+// this file exists for -- the one that renders a completely plausible picture.
+PL_TEST(TheRayStartsAtTheObserverNotAtTheMatrix) {
+    cloud::ViewParams view;
+    view.observerAltitude = 2.0f;
+
+    const Vec3 def = primaryRayOrigin(view);
+    PL_CHECK_NEAR(def.x, 0.0, 1e-6);
+    PL_CHECK_NEAR(def.y, 2.0, 1e-6);
+    PL_CHECK_NEAR(def.z, 0.0, 1e-6);
+
+    // A comp camera parked a long way from the origin, converted exactly as
+    // src/ae/AEBridge.h converts it. The origin must not move.
+    double moved[16];
+    aeMatrix(moved, 1, 0, 0,  0, 1, 0,  0, 0, 1,  960.0, -540.0, -2666.0);
+
+    cloud::ViewParams fromComp;
+    fromComp.observerAltitude = 2.0f;
+    fromComp.cameraFromComp   = true;
+    cameraToWorldFromAE(moved, fromComp.cameraToWorld);
+
+    const Vec3 got = primaryRayOrigin(fromComp);
+    PL_CHECK_NEAR(got.x, 0.0, 1e-6);
+    PL_CHECK_NEAR(got.y, 2.0, 1e-6);
+    PL_CHECK_NEAR(got.z, 0.0, 1e-6);
+}
+
+// And the altitude is the one the parameter carries, not a constant.
+PL_TEST(ObserverAltitudeReachesTheRayOrigin) {
+    cloud::ViewParams high;
+    high.observerAltitude = 3500.0f;
+    PL_CHECK_NEAR(primaryRayOrigin(high).y, 3500.0, 1e-3);
+}

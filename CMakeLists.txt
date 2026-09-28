@@ -174,6 +174,11 @@ include(cmake/AESDK.cmake)
 # plugin and a green test run -- it just gets the CPU fallback.
 include(cmake/Cuda.cmake)
 
+# Slang. Optional in a stronger sense than CUDA is: the GENERATED CUDA IS COMMITTED,
+# so Slang is needed to regenerate a kernel after editing its .slang source and never
+# to build one. A clone with no Slang builds the same bits that ship.
+include(cmake/Slang.cmake)
+
 # Engine and tests build with or without the AE SDK and with or without CUDA --
 # see cmake/AESDK.cmake. That is the whole point of the layout: the parameter
 # model, the cache policy and the feature extraction are the parts worth testing,

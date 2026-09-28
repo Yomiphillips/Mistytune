@@ -22,6 +22,17 @@ dist/
 # permitted. Download separately and point AE_SDK_ROOT at it.
 sdk/
 
+# The Slang toolchain. NOT committed: 147 MB of prebuilt binaries, and a binary in
+# git is a binary in git forever -- the same rule dist/ is under. It is a pinned,
+# reproducible download rather than something anyone edits, so the repo carries the
+# VERSION and the fetch instructions instead of the bytes.
+#
+# Get it with:  cmake -P cmake/FetchSlang.cmake
+# or point PLUGIN_SLANG_ROOT at an existing install. cmake/Slang.cmake finds either,
+# and a machine with neither still configures, builds and tests -- it just compiles
+# the checked-in generated CUDA instead of regenerating it.
+tools/slang/
+
 # NotchLC writes this into whatever the working directory happens to be when its
 # codec component loads -- so it reappears after being deleted, and it is always
 # empty. Nothing to do with this project.

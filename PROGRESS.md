@@ -4,6 +4,1608 @@ Tracked against `PLAN.md`. Newest first.
 
 ---
 
+## 2026-09-28 — THERE IS A CLOUD. The Slang transport reaches the pixel, both backends render it byte-identically, and the first picture was a featureless sheet for a reason worth the entry.
+
+`Render.slang` landed and `renderPixel`'s one line changed. What comes out of the CLI is
+cirrus: discrete fallstreaks with real perspective, backlit forward scatter, aerial
+perspective into the horizon. The golden references are re-blessed, deliberately, and
+the placeholder sky PLAN.md's Phase 2 exists to delete is gone.
+
+### The seam, which is four lines and was the whole design question
+
+`renderPixel` had to stay ONE function -- it is what makes a golden image taken on the
+CPU a check on the GPU -- and the generated code cannot be called from it directly,
+because the two targets emit different symbols and both emit them `static`.
+
+| | |
+| --- | --- |
+| `Shading.h` | declares `mistytuneTrace`, calls it, knows nothing about either backend |
+| `Mistytune.cu` | `#include`s the generated `Render.cu`, defines `mistytuneTrace` |
+| `CpuRender.cpp` | `#include`s the generated `RenderCpu.cpp`, defines the same |
+| `SlangBridge.h` | RenderRequest to the kernel's structs, ONE template, both backends |
+
+`Render.slang` and `RenderCpu.slang` are two entry points over one `RenderLib.slang`,
+and they exist separately only because slangc marks entry points `extern "C"` and both
+objects land in `plugin_kernel`. `SkyLib` and `BounceLib` were split out of their
+harnesses the same way `GeneratorLib` and `PhaseLib` already were.
+
+**The marshalling is a template, not two copies.** Slang's suffixing gives every
+host-visible field `_0` on both targets, so the two backends differ only in their vector
+type -- which is now a three-function policy class handed to `fillSlangScene`. Two copies
+of forty lines of field assignment is exactly how one backend picks up a new parameter
+and the other does not.
+
+### THE TWO BACKENDS RENDER THE SAME PICTURE, BYTE FOR BYTE
+
+    golden.gpu.midday   max 0 (at 0,0), mean 0.0000
+    golden.gpu.sunset   max 0 (at 0,0), mean 0.0000
+    golden.gpu.horizon  max 0 (at 0,0), mean 0.0000
+
+Through the ice generator, the ratio tracker, thirty-two bounces and the atmosphere --
+not the analytic sky this comparison used to be about. `slang.cpuParity` measured the
+two backends agreeing to 1.13e-06 on transmittance and said nothing about a whole
+render; this is the whole render, and 8-bit quantisation absorbs the difference
+completely.
+
+**It holds because the RNG is bitwise identical and is asserted to be.** A 1e-06
+difference in a density value can flip a delta-tracking branch, and a flipped branch is
+a different path, not a slightly different one. The paths do not diverge because the
+draws do not.
+
+### THE FIRST RENDER WAS A FEATURELESS HORIZONTALLY BANDED SHEET
+
+It looked like a transport bug. It was a frame of reference.
+
+`buildDriftTable` integrated the ABSOLUTE wind. A generating cell is not nailed to the
+ground -- it is carried by the wind at its own altitude, 34 m/s in the default profile --
+so a streak drawn from the absolute integral is placed **88 km from its own head** for
+2.6 km of fall. Every streak then overlaps every other one and the sky is a sheet.
+
+The integral is relative to the generating level, and the bulk motion goes where it
+belongs: `cellDriftAt`, which moves the cells themselves. `proto/index.html` reaches the
+same conclusion in nearly the same words, which is the point of having kept it.
+
+**The second bug was in the same function and was quieter.** The habit fall speeds were
+invented rather than taken from the prototype: Column at 0.60 m/s against the
+prototype's 1.0, which is a 67% error in the divisor of the shear integral. Fall speed
+against the shear IS the streak shape. `proto/`'s `HABIT_FALL` is now copied value for
+value, because the prototype is what passed the Phase 0 look verdict and is therefore
+the reference rather than a starting point.
+
+**BOTH WERE FOUND BY LOOKING AT A PICTURE, WHICH IS NOT A METHOD.** So
+`tests/unit/TestIceField.cpp` is twelve tests over the shear integral, the fall speeds,
+the bearing convention and the majorant, none of which need a GPU or a render.
+`ZeroShearGivesZeroDrift` is the one that matters: a wind that is the same at every
+level has no shear in it, so the streak hangs straight down and every knot is zero.
+Verified to go red -- reintroducing the absolute integral fails it fourteen times.
+
+### The majorant is sound and 18x loose, and that is now measured rather than assumed
+
+`slang.generator` gained the check that joins the two tiers: the HOST's structural
+majorant against the KERNEL's own sampled peak, for the same parameters.
+
+    host structural majorant 0.005616   per metre
+    sampled peak             0.00030649 per metre
+    slack                    18.32x
+
+`tests/unit/` can check that the arithmetic is what it claims; only a GPU can check that
+the claim is true. Neither subsumes the other, and the sampled peak is a floor rather
+than the truth -- 16 depths by 512x512 will miss the real maximum between samples, so it
+catches a badly wrong bound and cannot certify a marginally wrong one.
+
+**The looseness is nearly all the 9x cell bound and the fbm bound**, neither of which is
+tightenable without a different argument. Null-collision tracking is unbiased for any
+majorant at or above the peak and silently wrong below it, so loose costs steps and
+tight-but-wrong costs correctness. **This is the next performance task and it is worth
+real time**: 18x the steps is 18x the density evaluations, and a density evaluation is a
+four-octave fbm.
+
+### ...WHICH HAD ALREADY INVALIDATED THE TDR BUDGET, SILENTLY
+
+The GPU band budget was 32M pixel-samples, chosen to keep a launch near a quarter second
+against a display-driver timeout of about two. It was calibrated at **5 ns** per
+pixel-sample, on the analytic sky.
+
+    1920x1080 at 64 spp    12.37 s    =  93 ns per pixel-sample
+
+**So the same constant had gone from 0.16 s a band to 3.0 s -- fifty per cent PAST the
+timeout, and a TDR reset kills the CUDA context and takes After Effects with it.** The
+constant did not change. The thing it was measuring did.
+
+It is `kernel::kGpuPixelSampleBudget` now, one named constant beside the measurement,
+used by both call sites that had a copy of the literal. 2M pixel-samples is 0.19 s on
+this card: a tenfold margin, and still inside the timeout on a card four times slower.
+The sample-split crossover moves from 1041 samples per pixel to 68.
+
+### A generated field was renamed by an edit to a different file, again
+
+The third occurrence, and the one that finally became a test.
+
+`Environment.radiance` generated as `radiance_0` in `Bounce.cu` and as `radiance_2` in
+`Render.cu`, because `SkyLib` joined the translation unit. `TraceResult.radiance` moved
+from `_1` to `_3` the same way. Nothing about either struct changed.
+
+A compile error is the lucky case: two fields of the same TYPE swapping suffixes between
+two structs still compiles, and each then names the other struct's field.
+
+So `Environment.radiance` is `uniformRadiance`, `Environment.mode` is `envMode`, and
+`TraceResult.radiance` / `steps` are `pathRadiance` / `trackingSteps` -- and
+**`slang.fieldNames` now fails the build if any host-visible struct field in any
+generated source is not `_0`.** That is a property of the output, so it is checked
+mechanically instead of remembered. Verified to go red: a corrupted copy reports
+`Render.cu: Environment_0.uniformRadiance_2`.
+
+**Its first version passed while testing nothing**, because `;` is CMake's list separator
+and a C struct body is nothing but semicolons -- `foreach(... IN LISTS ...)` was splitting
+every struct at its first field. The injected-corruption check is the only reason that
+was noticed.
+
+### What it costs, at 1920x1080 on an RTX 2070 SUPER
+
+| samples | time |
+| --- | --- |
+| 1 | 0.47 s |
+| 8 | 1.73 s |
+| 32 | 6.26 s |
+| 64 | 12.37 s |
+
+The default is 1 sample, so a first look in AE is about a third of a second a frame.
+PLAN.md's Phase 2 exit asks for this number to be written down because it is what
+answers the minimum-GPU and Draft-interactivity questions -- and it is measured against
+a majorant 18x looser than it needs to be, so it is a ceiling rather than a verdict.
+
+22 ctest suites.
+
+### IT RENDERS IN AFTER EFFECTS, and the log settled three open questions
+
+Run in AE 2026 at 32 bpc, 12 samples, a comp camera, Quarter and Full resolution.
+
+    PRE_RENDER: frame=480x270 request=[-48,-27 576x324] downsample=1/4,1/4 samples=12
+      result_rect=[0,0 480x270]
+      camera raw: err=0 distanceToPlane=3555.3 plane=1920x1080
+      camera: from the comp, vertical fov 17.3 deg
+    SMART_RENDER_HOST: rendered 480x270 on the GPU in 0.01 s (270 rows per band)
+    ...
+    SMART_RENDER_HOST: rendered 1920x1080 on the GPU in 1.86 s (91 rows per band)
+
+**REDUCED RESOLUTION IS NOW EXERCISED AND IT IS CORRECT.** It has been on the "never
+tested" list since the effect first loaded. AE asked for a 576x324 rect at 1/4, handed
+back a 480x270 world, and the frame, the origin and the result rect all agree. The
+camera is unharmed by the scaling because only the RATIO of buffer to frame reaches the
+ray maths, which is what CloudParams.h has always claimed and nothing had checked.
+
+**THE NEW TDR BUDGET IS DOING EXACTLY WHAT IT WAS SIZED TO DO.** 91 rows per band at
+1920 wide and 12 samples is 2.1M pixel-samples, and the whole frame is 1.86 s across
+twelve bands -- about 0.155 s each, an order of magnitude inside the two-second display
+driver timeout. Under the old 32M constant that frame would have been ONE band of three
+seconds, which is the reset this change was made to avoid.
+
+**AND THE CAMERA IS REAL, WHICH THIS ENTRY FIRST CLAIMED IT WAS NOT.** 17.3 degrees is
+what a 1080 plane at 3555.3 implies, so the conversion, the plane maths and the flags
+are all live. See the corrected note below.
+
+### ...AND IT FOUND A BUG NO RENDER COULD HAVE SHOWN
+
+`primaryRayOrigin` is new in this change, and its first version read the camera-to-world
+translation whenever `cameraFromComp` was set. That looks obviously right and is
+obviously wrong here: `CameraConvert.h` ZEROES elements 3, 7 and 11 deliberately, with a
+paragraph explaining that AE's world is comp pixels against an arbitrary origin while
+this one is metres, and that the conversion needs a scene-scale parameter which does not
+exist yet.
+
+**So in After Effects the camera sat at altitude ZERO rather than at the observer's two
+metres.** Against a cloud base of 6.4 km that moves nothing a person can see, in any
+scene, at any exposure -- and the AE log does not print a ray origin. It was found by
+reading the camera path to check a DIFFERENT claim in this entry.
+
+The origin is `observerAltitude` unconditionally now, and
+`TheRayStartsAtTheObserverNotAtTheMatrix` pins it with a comp camera parked at
+(960, -540, -2666) converted exactly as `AEBridge.h` converts it. Verified to go red.
+
+**The real cost of the old version was not the two metres.** It was that Phase 3 adds
+the translation to `CameraConvert` for a camera that can fly, and this would have
+started consuming pixels as metres the moment it did -- silently, in a function nobody
+would have thought to re-read.
+
+24 unit tests over the camera and the ice field; 22 ctest suites.
+
+### Still not done, and the next things
+
+- **8 and 16 bpc are still unexercised.** The host run above was 32 bpc throughout, so
+  the two integer depths -- and in particular 16-bit's 0..32768 channel range, which is
+  not 65535 and is the classic AE trap -- have never been through the real transport on
+  either engine.
+- **`PF_Cmd_SMART_RENDER_GPU` is still dead code.** AE reports `what_gpu=NONE` on every
+  frame of the host run, so the card is reached only through `renderCudaToHost` inside
+  the ordinary CPU smart render. That path works and is what most GPU-using AE plugins
+  do; the sample-split loop behind the GPU command remains unreachable and therefore
+  unverified.
+- **The majorant, per above.** The largest single performance win available.
+- **No denoiser.** 1024 samples still shows grain, and OIDN is the Phase 2 item that
+  answers it. The install-bulk question PLAN.md defers is still deferred.
+- **No progressive display.** A frame is rendered to its full sample count before AE sees
+  anything.
+- **The camera position is still unmapped, and I wrote the opposite here first.** This
+  entry originally said "the camera is still the stub", carried forward from an older
+  entry without checking. It is false: `fillCameraFromComp()` calls
+  `AEGP_GetEffectCameraMatrix`, converts through `CameraConvert.h` and works -- the host
+  log says `camera: from the comp, vertical fov 17.3 deg`, which checks out against a
+  1080 plane at distance 3555. What is genuinely absent is the POSITION: CameraConvert
+  zeroes the translation on purpose, because AE's world is comp pixels with an arbitrary
+  origin and this one is metres. Flying the camera wants a real pixels-per-metre
+  parameter and is Phase 3.
+- **The single-scatter albedo is a constant**, not a parameter, because adding a field to
+  `FieldParams` trips the fingerprint tripwire and wants hashing in the same change. That
+  belongs with the Phase 3 parameter work.
+- **`Sky.slang` is still the Phase 1 analytic atmosphere**, now doing a second job as the
+  environment and as the sun's own transmittance at a scattering point. The Bruneton
+  precompute replaces eight-step quadrature with two texture fetches and can be checked
+  against what is there now.
+
+---
+
+## 2026-09-28 — ONE KERNEL SOURCE IS PROVED TO BE ONE. The CUDA and C++ backends agree to 1e-6, and the two structs are different sizes.
+
+`PLAN.md`'s central bet is the transport written once and compiled to every target, and
+`renderPixel` being a single function serving both engines is what makes a golden image
+taken on the CPU a meaningful check on the GPU. **Nothing checked that the two backends
+actually compute the same thing.** `slang.cpuParity` now does.
+
+### The result
+
+    RNG, 65536 draws
+      differing 0 of 65536, worst absolute 0
+      identical, as integer arithmetic must be
+
+    Ratio-tracked transmittance through the ice field, 65536 rays
+      mean   GPU 0.97926634   CPU 0.97926634   difference 4.52e-09
+      per ray: differing 6540 of 65536, worst absolute 1.13e-06
+
+**The RNG is bitwise identical and is asserted to be.** PCG is integer arithmetic and one
+float multiply — there is no libm in it and no room for a backend to differ, so this is
+the one comparison that demands equality rather than closeness. Every determinism
+guarantee in the project rests on it, and it isolates the generator from everything built
+on top: if it fails, nothing below it means anything.
+
+**Transmittance agrees to 1.13e-06 in the worst single ray**, against `tests/golden/`'s
+own tolerance of 2/255. That is about 250x of margin, which is what makes a CPU reference
+worth having rather than merely defensible.
+
+**Bitwise was never the claim for that half and the test does not ask for it.**
+`slang.mathParity` established that Slang's CUDA output calls the same functions as
+hand-written CUDA; it established nothing about the HOST compiler's libm matching the
+device's, and for exp and the trig functions it will not. The bound is per-ray, not on
+the mean — two backends whose errors cancelled in the mean while individual rays
+disagreed would still ruin a golden image, because a golden image is compared pixel by
+pixel.
+
+It also carries a vacuity check: if the ray missed the cloud both sides would return 1.0
+and agree perfectly while testing nothing, so the mean transmittance is asserted to be
+neither 1 nor 0.
+
+### THE TWO BACKENDS' STRUCTS ARE DIFFERENT SIZES, AND THE FIRST ATTEMPT MEMCPY'd THEM
+
+    Medium_0 is 96 bytes on the CPU backend and 112 on the CUDA one
+
+The CUDA target emits `float3`; the C++ target emits `Vector<float,3>`. They need not
+agree on size or alignment and here they do not, by 16 bytes.
+
+The first version of this test `memcpy`'d one into the other. **Every CPU ray came back
+1.0 — which reads as "the ray missed the cloud", not as a marshalling bug**, and the
+failure printed as a 0.338 disagreement that looked like a maths divergence. The fix is
+member-by-member marshalling, and the test now prints the size mismatch when it sees one
+so the next reader is told rather than left to find it.
+
+**THIS IS A CONSTRAINT ON THE PRODUCTION PATH, NOT A TEST DETAIL.** The host will hold
+one set of parameters and must marshal them into both backends' structs. Member by
+member is the only safe way, and `sizeof` is not a shortcut available here.
+
+### Why the CPU entry points have different names
+
+slangc marks entry points `SLANG_PRELUDE_EXPORT`, which expands through `extern "C"`. So
+the CUDA `transmittanceTrial` and a C++ `transmittanceTrial` are the same symbol and a
+binary holding both will not link — and wrapping one in a namespace does not help,
+because `extern "C"` ignores namespaces, which is the point of it.
+
+So `CpuParity.slang` declares `cpu*` entry points over **the same library**. That is not
+a weaker test than compiling one file twice: an entry point is a few lines of
+marshalling, and what parity is claimed about is `transmittance`, `densityAt`,
+`iceDensity` and `randFloat` — identical source text on both sides.
+
+The phase functions have no arm here for the same linkage reason one level down: their
+CUDA counterpart lives in `Phase.cu`, which cannot share a translation unit with
+`Transport.cu` because both declare an `rngTrial`. Little is lost — transmittance through
+the ice medium already runs exp, the fbm, the gradient noise and the PCG hashes, which is
+where two libms would diverge if they were going to.
+
+### The arrangement extended, not bypassed
+
+`slang_generate_cpp()` mirrors `slang_generate()`: same `-fp-mode`, generated into the
+source tree, committed, and compiled with no toolchain present. The CPU prelude and its
+three transitive headers are vendored beside the CUDA one, and
+`SlangRewriteInclude.cmake` now rewrites either.
+
+**`slang.regenerates` covers the C++ artifact too**, and that mattered more than it looks:
+a stale CPU kernel is worse than a stale GPU one, because `tests/golden/` takes its
+references from the CPU. A reference blessed from maths the source no longer contains
+would certify every GPU render against the wrong picture. Seven generated sources are now
+checked.
+
+### Next: the pixel
+
+Everything the production path needs is now proved. What remains is `Render.slang` — a
+camera ray, the bounce loop, the ice medium, the environment — compiled to both targets
+and called by the same `renderPixel`. **That is the step that puts a cloud in After
+Effects**, and it is the largest single change so far.
+
+**THE SHAPE IT SHOULD TAKE, so the next person does not re-derive it.**
+
+`renderPixel()` in `Shading.h` must stay ONE function. It is included by both
+`Mistytune.cu` and `CpuRender.cpp`, and CpuRender's own header is emphatic that it is
+"not a second renderer" — that shared function is what makes a golden image taken on the
+CPU a check on the GPU. So the generated code cannot be called directly from it: the
+CUDA and C++ backends emit different symbols, and both emit them `static` to their
+translation unit.
+
+The seam that preserves it is a per-target shim, one line of indirection:
+
+| | |
+| --- | --- |
+| `Mistytune.cu` | `#include` the generated `Render.cu`, define `mistytuneTrace(...)` calling it |
+| `CpuRender.cpp` | `#include` the generated `Render.cpp`, define the same `mistytuneTrace` |
+| `Shading.h` | calls `mistytuneTrace` and knows nothing about either backend |
+
+`renderPixel` then changes by one line — `skyRadiance(req.field, dir)` becomes the trace
+— and everything around it (the frame-pixel seeding, the accumulator, the output
+transform, the channel order) is untouched. All of that is carefully reasoned and none
+of it should be reimplemented inside a shader.
+
+**Two things already measured that this step must respect:**
+
+- **Marshal `RenderRequest` into the Slang structs MEMBER BY MEMBER.** `Medium_0` is 96
+  bytes on one backend and 112 on the other. A `memcpy` compiles, runs, and renders a
+  wrong picture that looks like a missed ray.
+- **Keep new host-visible field names unique across the whole kernel**, or slangc's
+  suffixes shift under an unrelated include.
+
+**And the golden images get re-blessed, deliberately.** The picture genuinely changes —
+this is the placeholder sky that PLAN.md's Phase 2 exists to delete. Re-blessing is an
+act to perform on purpose and to record here, not a side effect to absorb quietly. Bless
+them only once the CLI render has been looked at and is the intended picture, because a
+reference blessed from a wrong render certifies that wrong render forever.
+
+21 ctest suites.
+
+---
+
+## 2026-09-28 — The transport marches real cirrus, and the majorant grid LOSES on it. Plus a naming hazard that renamed a field in a struct nobody touched.
+
+The grid is wired to the ice generator: `GeneratorLib.slang` split out, `Medium` gained
+`mode 2`, and `buildIceGrid` fills a grid from the structural bound. The measurement the
+last two entries said did not exist now exists, and it does not say what was expected.
+
+### THE GRID COSTS STEPS ON CIRRUS. 16x16x16 cells, 1582 with cloud in them:
+
+| ray | majorant | transmittance | steps | vs global |
+| --- | --- | --- | --- | --- |
+| vertical | global | 0.978028 | 2.4 | — |
+| | 16^3 grid | 0.977887 | 16.2 | **0.1x** |
+| slant 20 deg | global | 0.964692 | 3.1 | — |
+| | 16^3 grid | 0.964656 | 16.4 | **0.2x** |
+
+Ten times slower, and the reason is arithmetic rather than a bug. A global majorant
+costs `majorant * pathLength` steps; here that is 9.4e-4 per metre over 1500 m, **under
+one expected collision per ray**. The grid cannot beat that, because it pays a
+**traversal step per cell crossed whatever the density is** — 16 cells deep is 16 steps
+before a single collision is sampled.
+
+**So the grid pays for DYNAMIC RANGE, not for density.** It wins 25x on mode 1 — a
+background with a hard core, which is a cumulus — because there the global majorant sits
+far above the typical density. Thin cirrus spread through 1500 m is nearly uniform where
+it exists, so the global majorant is already close to tight and there is nothing to
+recover.
+
+**AND IT QUALIFIES THE CLAIM THAT THE GRID IS A CORRECTNESS REQUIREMENT.** That claim
+came from a majorant forced 100x loose by hand. With a sound structural majorant this
+field runs at **2.4 steps against a cap of 1024** — nowhere near it. For this generator
+the grid is an optimisation that does not currently pay, not a fix for a live defect. It
+stays, because the convective generators of Phase 3 and 4 are exactly the
+high-dynamic-range case it was built for, and because it is proved correct either way.
+
+### A FIELD IN A STRUCT NOBODY TOUCHED WAS SILENTLY RENAMED
+
+The sharpest trap in this entry, and it will recur.
+
+slangc disambiguates identifiers with an index assigned across the **entire translation
+unit**: the first `cellSize` it emits becomes `cellSize_0`, the second `cellSize_1`. Host
+code binds to those exact names.
+
+`TransportLib` started including `GeneratorLib`, whose `GeneratorInput` has a `cellSize`.
+`MajorantGrid.cellSize_0` therefore became `cellSize_1`, and every host call site stopped
+compiling. **Nothing about `MajorantGrid` changed. An unrelated include renamed a field
+in it.**
+
+**A COMPILE ERROR IS THE LUCKY CASE AND IS NOT GUARANTEED.** Two fields of the same type
+swapping suffixes would still compile and would read the wrong memory — silently, in
+generated code nobody reads. The mitigation is cheap and now applied: **host-visible
+field names are kept unique across the whole kernel**, so the collision cannot arise.
+`MajorantGrid.cellSize` is now `cellExtent`.
+
+This matters well beyond the tests. `src/ae/` and `src/cli/` will bind to these structs
+when the transport reaches the production path, and a rename there is a wrong picture
+rather than a build failure.
+
+### The Lib split, and the one honest difference from the other two
+
+`GeneratorLib.slang` holds the generator; `Generator.slang` is the harness. Without it,
+`TransportLib` would inherit five test kernels.
+
+**Unlike the RNG and Phase/Transport splits, this one is NOT byte-inert**, because the
+structural-bound functions sat below `densityColumn` and `densityPlane` in the original
+file and slangc emits in declaration order. Gathering the library together permutes the
+output. Checked properly rather than waved through: the generated file emits **exactly
+the same 15 functions**, so the diff is a permutation and not a change.
+
+### The layering question, decided
+
+`TransportLib` includes `GeneratorLib`, so the transport knows what an ice cloud is. The
+clean alternative — a generic over a density interface, which Slang supports and which
+would cost nothing at runtime — is **named in the file rather than taken**, for two
+reasons: PLAN.md's premise is one kernel source per target, so every density ends up in
+one translation unit regardless, and `mode` is already the seam a second generator lands
+behind. The point at which the generic earns its complexity is **a second consumer** of
+the transport wanting a different density set — an OFX host, or a bake tool.
+
+### The CPU arm is de-risked, and needs one thing vendored
+
+`-target cpp` was recorded as "viable but not built" and was spiked on a much smaller
+file. Re-run against the current transport, buffers and all: it emits cleanly, with entry
+points as `name_Thread(ComputeThreadVaryingInput*, void*, void*)`.
+
+It needs `slang-cpp-prelude.h` vendored beside the CUDA one, and
+`SlangRewriteInclude.cmake` extended to rewrite either — both mechanical, and the same
+pattern already in place.
+
+**That is the critical path to a pixel in After Effects**, because `renderPixel` is one
+function serving both engines and forking it is what the whole golden-image strategy
+rests on not doing.
+
+### Next, and it is one thing
+
+**`Render.slang` and the production path.** A camera ray, the bounce loop, the ice
+medium, the environment — compiled to CUDA for the GPU and to C++ for the CPU, called by
+the same `renderPixel`. Then the golden images are re-blessed, deliberately, because the
+picture genuinely changes.
+
+20 ctest suites.
+
+---
+
+## 2026-09-28 — Sampled majorant bounds DELETE cirrus. The fix is a structural bound, and it is sound in all 512 cells.
+
+The previous entry ended by naming the blocker for wiring the majorant grid to the ice
+generator: `iceDensity` has no closed-form maximum over a box, so its bounds must be
+sampled, and that needs "a safety margin chosen against a measurement of how badly
+sampling can miss". **The measurement was taken and it does not justify a margin. It
+rules the approach out.**
+
+### The measurement, and it is not close
+
+Per-cell maxima over an 8x8x8 grid on the real ice field, coarse sampling against a
+24^3 reference, 293 cells occupied:
+
+| samples per axis | worst miss | mean miss | cells underestimated |
+| --- | --- | --- | --- |
+| 2 | **infinite** | 16.584 | 100% |
+| 3 | **infinite** | 8.042 | 100% |
+| 4 | **infinite** | 4.074 | 100% |
+| 6 | **infinite** | 2.252 | 99% |
+| 8 | **infinite** | 1.691 | 99% |
+
+**Infinite means the coarse pass found NOTHING in a cell the reference says is
+occupied**, and it happens at every resolution tried. Cirrus is thin filaments in mostly
+clear air — the structure the generator exists to produce, and the structure that defeats
+point sampling. Even an 8^3 pass, 512 evaluations per cell, underestimates 99% of them.
+
+**A SAMPLED BOUND OF ZERO IS THE WORST FAILURE AVAILABLE HERE, AND IT IS WORSE THAN
+"SLIGHTLY THIN".** `TransportLib` treats a zero bound as proof there is nothing to
+collide with: the cell is crossed in one step with no random number drawn. That is where
+most of the grid's speed comes from, and it means a wrongly-zero cell is not thinned, it
+is **deleted**. A safety factor cannot rescue it either — any multiple of zero is zero.
+
+So the honest conclusion is that the previous entry asked for the wrong thing. There is
+no margin to choose.
+
+### The structural bound, which is sound by construction rather than by sampling
+
+`iceDensity` is a product, and each factor can be bounded over a box on its own:
+
+| factor | bounded by |
+| --- | --- |
+| `subl` | `exp(-k*depth)` falls with depth, so its max is at the box's SHALLOWEST depth |
+| `head` | a smoothstep rising with depth, max at the DEEPEST |
+| `tail` | a smoothstep falling with depth, max at the SHALLOWEST |
+| `detail` | `1 + amount*1.8*fbm`, and `|fbm| <= 1.5` analytically for gradients in [-1,1]^3 |
+| `cellField` | a sum of localised blobs, each maximised at the point of the box nearest its centre |
+
+The product of the maxima bounds the maximum of the product. **It is looser than the
+truth — the factors do not peak at the same point — and that is the right trade:
+looseness costs steps, unsoundness costs correctness, and only one of those is
+recoverable.**
+
+Two details that are not incidental. The drift over a cell's depth range is taken as a
+**box over the knots it spans, not from its endpoints**, because a veering wind means
+`driftAt` is not monotonic in depth and endpoint sampling would miss the excursion. And
+`cellField`'s blob distance is the **per-axis distance outside the box**, which is zero
+on an axis where the centre lies within the box's span — the standard point-to-box
+distance, and the reason a cell containing a blob centre gets that blob's full value.
+
+### Measured against the real field, in every cell
+
+    cells where the bound is BELOW the field : 0
+    slack where there is cloud   mean 6.29x   worst 509.19x
+    cells the sample found empty but the bound covers : 14
+
+**Zero violations across all 512 cells.** And the last row is the point of the whole
+entry: **14 cells that sampling called empty are covered by the structural bound** —
+precisely the cells a sampled grid would have deleted.
+
+**THIS IS AN INEQUALITY, NOT TWO IMPLEMENTATIONS AGREEING.** The bound is a different
+computation from the density, so this is not the failure mode the phase work warned about
+(two transcriptions of one paper agreeing because the same person made them). It is a
+claim about the density, checked against the density.
+
+**Verified to go red with a realistic mistake:** dropping the `detail` factor from the
+bound — forgetting that it can exceed 1 — puts **42 cells** below the field.
+
+### The cost, reported rather than hidden
+
+Mean slack 6.29x, worst 509x. The worst case is a cell whose true content is a sliver
+while the bound covers a nearby blob, and slack is exactly what `slang.transport` shows
+turning into steps. It is not asserted tightly, because a product of maxima is
+necessarily loose and pretending otherwise would make the test fail on an honest bound.
+
+**The number that would decide whether 6.29x is good enough does not exist yet**, because
+it needs the transport actually running on this field. That is the next step and it is
+now unblocked.
+
+### What is NOT done
+
+**The transport still does not evaluate `iceDensity`.** Wiring it needs `Medium` to gain
+a mode that calls the generator, which means `TransportLib` including a `GeneratorLib`
+that does not exist yet — the Lib split has not been applied to `Generator.slang` because
+nothing needed it until now. That split is mechanical and provably inert, as the other
+two were; the layering question it raises (should the transport know about ice at all, or
+should the density be a generic parameter) is worth deciding rather than defaulting into.
+
+20 ctest suites.
+
+---
+
+## 2026-09-28 — The majorant grid: the answer holds still, the cost falls 25x, and a "disabled" feature changed the render
+
+`src/kernel/slang/TransportLib.slang` gains per-cell majorants with an Amanatides-Woo
+walk, in both estimators. This was carried as a **correctness requirement rather than an
+optimisation** from two entries ago, and the reason is worth restating: null-collision
+tracking is unbiased for any majorant above the true density, and the cost is the ratio
+between them. A global majorant must cover the single densest point in the field, so one
+sharp core makes that ratio loose along **every ray that never goes near it** — and the
+iteration cap eventually turns looseness into silent bias.
+
+### mode 1 exists because a constant slab cannot show the problem
+
+The transport tests all ran against a constant medium, which is the one field for which a
+global majorant is already tight. The 3.4x error that started this had to be produced by
+forcing the majorant loose **by hand**, because mode 0 could not do it on its own.
+
+So `Medium` gained a background plus one Gaussian core — a cumulus, not a pathological
+case. **The Gaussian is chosen for a testing reason, not a physical one:** its maximum
+over an axis-aligned box has a closed form (the point of the box nearest the centre), so
+the grid bounds can be built **analytically and provably**, rather than sampled at some
+resolution and hoped about. A sampled bound can always miss a peak between samples, and
+the resulting bias looks exactly like a slightly thin cloud.
+
+### The answer holds still and the cost collapses
+
+Transmittance through the slab, 2.1M trials, swept across grid resolution:
+
+| grid | transmittance | steps | vs global |
+| --- | --- | --- | --- |
+| none (global) | 0.778808 | 101.2 | — |
+| 4x4x4 | 0.778611 | 3.9 | **25.7x** |
+| 8x8x8 | 0.778328 | 7.7 | 13.2x |
+| 16x16x16 | 0.778622 | 15.2 | 6.7x |
+| 32x32x32 | 0.778831 | 30.3 | 3.3x |
+
+**The grid is a free parameter exactly as the majorant is**, and that is the assertion.
+The step count is reported because it is the entire case for the feature: the answer is
+supposed to be identical, so a test that measured only the answer could not tell the grid
+was doing anything at all.
+
+**Most of the saving is one line.** A cell whose bound is zero is crossed in a single step
+and costs no random number — there is provably nothing to collide with. It is also the
+step that is catastrophically wrong if the bound is not a true bound, which is why the
+construction is analytic and why the control below is permanent.
+
+### THE SWEEP ABOVE IS THE BEST CASE, AND SAYING SO IS THE POINT
+
+Every row there is for a ray that never approaches the core. A ray **through** the core
+has to pay for density that is genuinely present:
+
+| grid | clear of core | through core |
+| --- | --- | --- |
+| 4x4x4 | **25.7x** | 2.1x |
+| 8x8x8 | 13.2x | 3.5x |
+| 16x16x16 | 6.7x | **3.6x** |
+| 32x32x32 | 3.3x | 2.5x |
+
+**The optimum resolution is opposite for the two rays**, and both get worse at the fine
+end because a fine grid pays traversal steps it did not pay before. So "finer is better"
+is wrong in both directions, the cost curve has an interior optimum, and 16^3 is the
+honest compromise rather than the winner of a cherry-picked row. Without the second
+column the first one reads as a universal 25x speed-up, which it is not.
+
+### Verified to go red, and the two controls catch different things
+
+**Bounds that are not bounds.** Every stored value scaled to 0.4x — still positive, still
+plausible, no longer an upper bound. Transmittance 0.904866 against 0.778808: **16% too
+much light**, correctly rejected. This control is permanent, because without it the sweep
+proves only that the grid is harmless, which is equally what a grid that silently did
+nothing would prove.
+
+**A broken walk.** `ddaAdvance` made a no-op, so the ray never leaves its first cell:
+
+| | clear of core | through core |
+| --- | --- | --- |
+| bias | +0.16 to +0.21 | **+0.94 to +0.99** |
+
+Through the core, transmittance goes from 0.000019 to 0.99 — the ray stops seeing the
+cloud at all — and every step count pins at the 1024 cap. **The through-core arm is by far
+the sharper detector**, which is the second reason it exists: a ray that never meets high
+density cannot notice a bound that is wrongly low where the density is.
+
+### A "DISABLED" FEATURE CHANGED THE RENDER, AND THE IDENTITY STILL HELD
+
+The worst thing in this entry, and it was caught by a suite whose numbers predate the
+feature.
+
+With `enabled = 0` the bound lookup already falls back to the global majorant, so it
+seemed safe to let the walk run and ignore what it found. It is not: **the walk still
+chops the ray at cell boundaries**, and every boundary costs an iteration of a loop
+capped at 1024. Against the 1x1x1 metre dummy grid a caller passes when it does not want
+one, that caps a path at about a kilometre of travel.
+
+`slang.bounce` noticed immediately — mean scattering events fell **4.21 to 2.79** and
+every capped fraction moved:
+
+| maxBounces | before | with the dummy walk |
+| --- | --- | --- |
+| 2 | 0.403963 | 0.468257 |
+| 8 | 0.805689 | 0.910538 |
+| 32 | 0.997921 | 0.999928 |
+
+**And the furnace identity held exactly throughout — `|diff|` = 0 on every row.** The
+estimator stayed perfectly self-consistent and simply answered a different question,
+which is the hardest kind of change to see. A suite that only checked internal
+consistency would have passed it.
+
+`ddaInit` now short-circuits on a disabled grid to a single cell spanning everything, and
+every number in `slang.bounce` is restored to the bit. **That is what a regression suite
+whose numbers were blessed before a feature existed is for**, and it is the third time
+this project has been saved by a test scene that predates the change it caught.
+
+### What is NOT done
+
+**The grid is not wired to the ice generator.** `iceDensity` has no closed-form maximum
+over a box, so its bounds must be sampled — and a sampled bound is exactly the
+unfalsifiable kind this entry went out of its way to avoid. That needs a safety margin
+chosen against a measurement of how badly sampling can miss, which is its own piece of
+work and is the natural next one.
+
+**SUPERSEDED BY THE ENTRY ABOVE, AND THE ASK WAS WRONG.** The measurement was taken and
+there is no margin to choose: sampling misses *whole cells* at every resolution tried, and
+a bound of zero cannot be rescued by any factor. The construction is a structural bound
+instead, sound in all 512 cells. Left here rather than rewritten, because "measure it
+before choosing the constant" was the right instinct and it is worth seeing that the
+measurement rejected the premise rather than sizing it.
+
+20 ctest suites.
+
+---
+
+## 2026-09-28 — The optical-depth parameter: no divisor fixes it, and the anomaly that justified the question was a measurement artefact.
+
+Carried from two entries ago, where the shear sweep was measured and the question was
+left open. **The decision is still not taken here** — it changes what a shipped parameter
+means. What is settled is the evidence it should be taken on, and one number that turned
+out to be an artefact of too small a domain.
+
+One test added (`slang.generator` gained a domain-mean conservation check); the generator
+itself is unchanged, and after the measurement there is no longer a reason to change it.
+
+### The structural finding, which narrows the options to two
+
+The generator divides by `streakLength` so that "a vertical path through the thickest
+part of a streak integrates to roughly the value on the slider". Measured, it holds at
+zero shear and decays about 7x across the useful shear range.
+
+The instinct is to find a better divisor — the streak's own path length instead of its
+vertical extent. **That does not work, and seeing why settles the shape of the fix.**
+
+`iceDensity` is evaluated per point and knows only its own parcel. But the quantity
+that decays is not a property of a streak at all: it is **how much of a vertical line
+lies inside any streak**, which is a property of the whole field — the tilt, the
+spacing, and how many streak families a column happens to cross. No per-point divisor
+can see that, so no closed-form normalisation can hold it fixed.
+
+Dividing by the parcel path length is in fact the wrong direction. At 8 m/s against a
+1 m/s fall speed the parcel travels 12 km sideways over 1.5 km of fall, so the path is
+about 12.1 km against a vertical extent of 1.5 km — dividing by it would make the field
+**eight times thinner** at high shear, not thicker.
+
+So the options are only: **calibrate numerically against a chosen target**, or **rename
+the parameter** so it stops promising something it cannot deliver.
+
+### Which target, and a result that was not in the original table
+
+Three candidate meanings, with the decay across the measured shear range. The
+`mean over occupied` column is arithmetic on the published numbers (mean over all
+columns, divided by the occupied fraction), not a new measurement:
+
+| wind | thickest | mean (all columns) | occupied | mean over occupied |
+| --- | --- | --- | --- | --- |
+| 0 | 0.2594 | 0.0240 | 23% | 0.104 |
+| 1 | 0.1575 | 0.0207 | 37% | 0.056 |
+| 4 | 0.0541 | 0.0125 | 49% | 0.026 |
+| 8 | 0.0376 | 0.0129 | 61% | 0.021 |
+| **decay** | **6.9x** | **1.9x** | | **4.9x** |
+
+**The domain mean is by far the most shear-stable of the three**, and that was not
+visible in the original table because the occupancy column was read as a separate fact
+rather than as the explanation. Occupancy rises from 23% to 61% while the thickest
+column falls 6.9x: the same ice is being spread over more columns, so the integral over
+the domain is nearly preserved.
+
+### THE 1.9x WAS A MEASUREMENT ARTEFACT. Measured, and it is now zero.
+
+The paragraph that stood here called the 1.9x unexplained and refused to guess. It is
+now measured, in `slang.generator`, and the answer is that **there was never anything to
+explain**: over a 40 km domain the mean is conserved under wind to better than 1%.
+
+| wind | domain mean tau | vs wind 0 |
+| --- | --- | --- |
+| 0 | 0.018965 | 1.000x |
+| 1 | 0.018834 | 0.993x |
+| 4 | 0.018941 | 0.999x |
+| 8 | 0.018923 | 0.998x |
+
+**Why the original sweep could not see it.** The cell grid spacing is
+`cellSize * kCellSpacing` = 880 m, so the 4000 m window held about 4.5 cells per axis —
+roughly 20 cells, of which a third are occupied. A mean over ~7 cells is decided by
+which ones happen to be in frame. Worse, the drift reaches 12 km at 8 m/s, so each wind
+speed was sampling a **different patch of the field**: the comparison was between small
+independent samples, not between one region displaced.
+
+This is the same lesson as the green `determinism.gpuBands` from an earlier entry, one
+tier up — **a measurement can only show what its domain is big enough to resolve**, and
+a number read off too small a window is not a weak result, it is a wrong one.
+
+The theory was right and now has evidence: wind reaches `iceDensity` only through
+`source = p.xz - driftAt(depth)`, a pure horizontal displacement, and sublimation, head,
+tail and the streak-length normalisation all key off vertical depth, which wind does not
+change. Displacing a homogeneous field cannot change its mean. **The generator has no
+bug here**, and the `max(detail, 0)` clamp I named as the suspect is exonerated.
+
+**It also invalidates the 4.9x in the table above**, which was arithmetic on those same
+noisy means. With the domain mean conserved, the mean over occupied columns must fall
+exactly as occupancy rises — 23% to 61%, so **2.65x, not 4.9x**. That figure still rests
+on occupancy measured in the narrow window, and occupancy is a far better-behaved
+statistic than a mean of maxima, but it wants re-measuring wide before anything is built
+on it.
+
+### What the measurement changes: THE GENERATOR IS RIGHT, THE LABEL IS WRONG
+
+With the domain mean proved conserved, the decay in the other two measures stops looking
+like a defect and starts looking like the physics. **Shear really does spread cirrus
+thinner** — the same ice over more sky — and a renderer whose streaks got no thinner as
+the shear slider came up would be the one with the bug.
+
+So this was never a normalisation to repair. The generator conserves what it should
+conserve. What is wrong is that a control governing **total ice** is labelled with a
+quantity that is read **down a single column**, and those two only coincide at zero
+shear.
+
+### The recommendation, not taken
+
+**Calibrate, against the mean over occupied columns.** It is the quantity the
+literature's 0.1–0.7 for cirrus actually describes — a property of the cloud, not of a
+scene diluted with clear sky — which was the whole reason for having a physical
+parameter rather than a tuned constant. At zero shear it already reads **0.104**, sitting
+squarely in that band, which is a good sign the units are right.
+
+**Not the domain mean, despite it being the stable one.** It is stable because it is the
+total ice, and exposing it at a scale that matches the literature would need a 24x
+rescale — at which point the occupied columns reach an optical depth of about 6, which is
+not cirrus. Shear-invariance is the wrong thing to optimise for here: the invariant
+quantity and the meaningful quantity are different quantities.
+
+**And accept the residual shear dependence**, which under this target is the occupancy
+ratio and nothing else. That is physical, it is now bounded rather than mysterious, and
+documenting it beats calibrating it away.
+
+**With one hard constraint on how.** The calibration is a global measurement, so it must
+be computed **once on the CPU and passed to both engines as a scalar** — never
+recomputed per-engine. A factor derived on the GPU for the GPU path and on the CPU for
+the CPU path would have to agree bitwise or every golden image diverges, and that is a
+determinism promise this project should not take on for a convenience. It also becomes
+part of the fingerprint, since it is a function of the generator parameters.
+
+Affordability looks fine: `slang.generator` runs six full sweeps of 576 columns at 2048
+samples in 0.51 s, so one sweep is well under 100 ms, and a calibration grid can be far
+coarser than a test grid. It reruns only when generator parameters change, which the
+field cache already tracks.
+
+**The fallback is renaming**, and it is not a bad outcome — a slider called *Density* or
+*Streak Opacity* promises nothing it cannot keep. What it costs is the check against the
+literature, which is the thing that makes the parameter falsifiable.
+
+### What has to happen before this is decided
+
+1. ~~**Measure the 1.9x.**~~ **Done** — conserved to better than 1% over 40 km, so there
+   is no bug to hide. `slang.generator` now asserts it at 10%, which the 1.9x would have
+   failed by a mile.
+2. **Re-measure occupancy on the wide domain**, since the 2.65x above still rests on the
+   narrow window that produced the artefact in the first place.
+3. **Sweep the calibration target** against cell size, density and sublimation, not just
+   wind — a factor that is stable in shear and wild in cell size has moved the problem.
+
+None of this needs After Effects. **The decision itself is still open and is not mine to
+take**: it changes what a shipped parameter means, and PLAN.md is explicit that parameter
+identity is close to permanent once anyone else installs a build.
+
+---
+
+## 2026-09-28 — The bounce loop, proved by a furnace. A third prototype bug, and a build that could not configure without Slang.
+
+`src/kernel/slang/Bounce.slang` — multiple scattering with next-event estimation,
+Russian roulette, and the environment behind a seam. The last entry named its test in
+advance: a furnace. That is what it got, and the identity came out sharper than
+predicted.
+
+### THE FURNACE IS EXACT, NOT STATISTICAL, AND THAT WAS NOT THE PLAN
+
+Put a conservative medium — single-scatter albedo exactly 1, so scattering moves light
+and removes none — inside a closed environment of uniform radiance L. Every point in
+every direction must see exactly L. Nothing about the phase function, the density, the
+path length or the majorant can change it.
+
+The intention was to check that as a mean over many paths. It turns out to be checkable
+**per path**, which is far stronger. With an ISOTROPIC phase the sampler's weight is
+exactly `1.0f` — the pdf and the phase are the same expression, so the division is
+`x/x`. With albedo also exactly 1, throughput stays exactly `1.0f`, roulette's survival
+probability is exactly 1 and never fires, and every path returns either L or zero. So
+
+    the shortfall below L  ==  the fraction of paths that hit the bounce cap
+
+is an identity about individual paths, not an average. Measured, 1.05M paths through a
+1000 m slab at optical depth 2.5:
+
+| maxBounces | measured | capped fraction | shortfall | \|difference\| |
+| --- | --- | --- | --- | --- |
+| 1 | 0.287177 | 0.712823 | 0.712823 | **0** |
+| 4 | 0.587816 | 0.412184 | 0.412184 | **0** |
+| 16 | 0.957218 | 0.042782 | 0.042782 | **0** |
+| 32 | 0.997921 | 0.002079 | 0.002079 | **0** |
+| 64 | 0.999995 | 0.000005 | 0.000005 | **0** |
+| 128 | 1.000000 | 0.000000 | 0.000000 | **0** |
+
+Zero at every budget, which is why the assertion is at 1e-6 rather than a Monte Carlo
+band. **Any leak anywhere in the loop breaks it immediately.**
+
+**A measured answer to a parameter default, incidentally.** The mean path has 4.21
+scattering events at this optical depth, 16 bounces loses 4.3% of the energy, 32 loses
+0.2% and 64 loses 5e-6. The prototype's default of 32 is defensible on numbers now
+rather than on taste, and **the budget is a quality setting with a known cost**, not a
+safety limit.
+
+### The droplet furnace, where the tolerance was set by measurement rather than caution
+
+The isotropic case cannot reach the Draine lobe or the mixture sampler — it has g = 0,
+so the interesting machinery is bypassed. The second furnace uses the real
+Jendersie-d'Eon phase and gives up exactness to gain that coverage.
+
+**IT LOOKED LIKE A REAL LEAK AND IT WAS NOISE, WHICH IS WORTH RECORDING BECAUSE THE
+FIRST READING WAS WRONG.** At 1.05M paths the shortfall sat at 1e-4 to 6e-4 with zero
+capped paths — consistent in size with the 0.9997 mean sample weight the previous entry
+reports from `slang.phase`, and therefore easy to believe. At 16.8M paths:
+
+| microns | measured | capped | shortfall |
+| --- | --- | --- | --- |
+| 5 | 0.999934 | 0 | 6.6e-05 |
+| 20 | 0.999999 | 0 | 1.0e-06 |
+| 50 | 0.999965 | 0 | 3.5e-05 |
+
+Every residual is within one standard error of zero (about 8.5e-5 at this count).
+
+**That is a result about the sampler and not just a tolerance.** A mean weight of
+0.9997 per event, over the 1.7 events these paths average, would show a shortfall of
+5.1e-4 — six standard errors above what is measured. So this test **positively excludes
+a per-event deficit of that size**, which means `slang.phase`'s 0.9997 was its own Monte
+Carlo floor rather than a bias in the sampler. Two tiers measuring one quantity, and
+the second is an order of magnitude tighter.
+
+The bound is 5e-4: about 7x the observed residual, tight enough that a real 3e-4
+per-event leak fails it, loose enough not to flake.
+
+### Russian roulette is a free parameter, with the control that makes the check mean something
+
+Roulette trades variance for speed and must not move the mean. Absorbing medium (albedo
+0.7), 128-bounce budget:
+
+| | measured | mean events |
+| --- | --- | --- |
+| roulette on | 0.487059 | 2.67 |
+| roulette off | 0.487134 | 4.20 |
+
+Difference 7.5e-5. **The event count is the control and without it the test is
+worthless** — two runs doing the same thing would agree perfectly and prove nothing. It
+is asserted, not just printed.
+
+This cannot be folded into the furnace: at albedo 1 the survival probability is exactly
+1 and roulette never fires, which is the same property that makes the furnace exact.
+
+### Next-event estimation against a closed form
+
+Environment black, sun a delta light, budget 1 — so the only thing measured is one
+next-event estimate, and a constant slab has an analytic answer for it:
+
+    L = albedo * phase(mu) * E * exp(-tau) * (1 - exp(-tau (1-mu)/mu)) / (1-mu)
+
+derived in the test's own header. Every factor is a different piece of code — the
+free-flight distribution, the ratio-tracked shadow, the phase evaluation, the albedo —
+and the majorant appears in none of them.
+
+| mu | measured | analytic | error |
+| --- | --- | --- | --- |
+| 0.90 | 0.01267505 | 0.01267413 | +0.007% |
+| 0.70 | 0.01144448 | 0.01145265 | −0.071% |
+| 0.50 | 0.00957134 | 0.00959348 | −0.231% |
+
+and with the real droplet phase at 20 microns, −0.071%. The majorant swept 1x to 100x
+at mu = 0.7 moves it between −0.071% and +0.181% with no trend.
+
+**`phase(mu)` IS READ OFF THE GPU, NOT REIMPLEMENTED IN C++.** Writing the
+Jendersie-d'Eon fit again host-side to check the Slang one against would be a reference
+implementation of exactly the kind this project does not have — two transcriptions of
+one paper agreeing proves only that the same person made them. `phaseValueTrial` and
+`phaseParamsTrial` exist so nothing is transcribed twice.
+
+### THE THIRD BUG INHERITED FROM THE PROTOTYPE, AND IT IS A ONE-LINE REFLEX
+
+`proto/index.html` starts every shadow ray one metre along the sun direction:
+
+    cloudTransmittance(scatterPoint + uSunDir * 1.0, uSunDir)
+
+That is the reflex every surface ray tracer teaches, because a ray leaving a triangle
+will otherwise hit the triangle it left. **There is no surface here.** A null-collision
+medium has nothing to self-intersect: the shadow ray starts at a point in a volume and
+the estimator integrates from zero. The offset buys nothing at all, and it **skips one
+metre of medium**, so every shadow returns too much light by about `exp(sigma * offset)`.
+
+Swept, mu = 0.7, and compared against that prediction rather than merely shown to exist:
+
+| offset | measured | vs offset 0 | exp(sigma·d) |
+| --- | --- | --- | --- |
+| 0 m | 0.01144448 | 1.0000x | 1.0000x |
+| 1 m | 0.01147190 | **1.0024x** | 1.0025x |
+| 10 m | 0.01173403 | 1.0253x | 1.0253x |
+| 50 m | 0.01295020 | 1.1316x | 1.1331x |
+
+**So the prototype's offset is +0.24% of light at every scattering event of every
+path**, in this thin cirrus. It is not noise and it does not average away. The number
+scales with density: the same one metre in a cumulus at sigma 0.05 would be **+5%**.
+
+The 50 m row falls *short* of the formula, which is the formula's limit and not the
+code's: for a scatter point within `offset` of the slab top the shadow origin lands
+outside the medium, the formula would demand a transmittance above 1, and the estimator
+correctly returns exactly 1. Asserted to 10 m for that reason.
+
+**Three prototype bugs in three days, none of them visible to a look-based verdict** —
+a sampler clamp mismatch that brightened clouds, an iteration cap that thinned them,
+and now a shadow epsilon that brightens them again. Phase 0 was the right gate for the
+question it asked and could not have caught any of these.
+
+### Verified to go red, three ways, and the third one is the architecture
+
+A green test proves nothing until it can fail.
+
+**1. The prototype's g-clamp mismatch, restored.** `sampleHG` clamps to 0.95 while the
+derived parameters stay at 0.999 — the exact bug the previous entry found.
+
+| | `slang.phase`, per event | `slang.bounce` furnace, compounded |
+| --- | --- | --- |
+| 5 microns | weight 1.019 | **+3.4%** over 1.81 events |
+| 20 microns | weight 1.089 | **+16.6%** |
+| 50 microns | weight 1.123 | **+24.2%** |
+
+The furnace measures the compounded consequence, which is the number that reaches a
+render. **The isotropic furnace stayed green throughout**, correctly — at g = 0 the
+clamp cannot bite — which is exactly why both configurations exist.
+
+**2. Roulette without the compensating divide.** The mean moved by −2.2% and the event
+control still showed 2.61 against 4.20, so the failure is attributable. The isotropic
+furnace again stayed green, because roulette never fires there.
+
+**3. THE COMPLEMENTARITY CLAIM ITSELF, WHICH IS THE ONE WORTH THE TROUBLE.**
+`Bounce.slang`'s header asserts that the furnace is *structurally blind* to a path that
+escapes too early — because in a furnace every escape returns L, so a premature escape
+returns the right answer for the wrong reason. That is a claim about what a test cannot
+do, and this project's history says an unverified claim is worse than none.
+
+Starving `sampleFreeFlight`'s iteration cap from 1024 to 64 reproduces the previous
+entry's bug class. Result:
+
+| | |
+| --- | --- |
+| furnace, every budget | **`\|diff\|` = 0, measured 1.000000 at 128 bounces** |
+| next-event, majorant 20x | −4.9% |
+| next-event, majorant 100x | **−73.2%** |
+| `slang.transport` | escape fraction wrong by +0.44 |
+
+**The furnace is blind to it, exactly as claimed, and the majorant sweep is not.** That
+is why the sweep lives on the next-event test rather than the furnace, and why neither
+tier subsumes the other. Measured rather than reasoned.
+
+### The refactor the include model forced, and it is provably inert
+
+Slang 2026.18.3 has no `[export]`, so the previous entry duplicated the PCG generator
+into `Phase.slang` and `Transport.slang` and called it "the lesser evil". **The bounce
+loop ended that**, by needing both files in one translation unit — where two copies is
+not duplication but a redefinition error. So the RNG moved to `Rng.slang`.
+
+**A second collision, and this one is structural rather than incidental.** An `#include`
+drags in the including file's ENTRY POINTS too, and both files declared an `rngTrial`
+kernel. So the rule from here on:
+
+| | |
+| --- | --- |
+| `XLib.slang` | functions and nothing else |
+| `X.slang` | a harness that includes it and adds the entry points its test needs |
+
+`PhaseLib.slang` and `TransportLib.slang` now hold the libraries; `Phase.slang` and
+`Transport.slang` are the harnesses. **That is also the shape PLAN.md's "one kernel
+source" requires** — the production kernel will include several Libs and declare exactly
+one entry point, and it must not inherit five test kernels on the way.
+
+**VERIFIED INERT BY BYTE COMPARISON, NOT BY READING.** The generated sources are
+untracked, so `git diff` cannot answer this. Instead the pre-refactor `.slang` files
+were reconstructed with the definitions substituted back in at the exact point the
+`#include` now sits, and both were generated:
+
+    Phase     : IDENTICAL to the pre-refactor generation (8363 bytes)
+    Transport : IDENTICAL to the pre-refactor generation (6362 bytes)
+
+Declaration order is why the include sits where the definition did rather than at the
+top of the file — slangc emits symbols in declaration order, and moving it would have
+turned a provably inert refactor into a diff nobody could read.
+
+### THE BUILD COULD NOT CONFIGURE ON A MACHINE WITH CUDA AND NO SLANG
+
+Found by testing the arrangement's own central claim, and it is the most serious thing
+in this entry.
+
+`cmake/Slang.cmake` `return()`s early in both the configurations it is written for —
+`PLUGIN_ENABLE_SLANG=OFF`, and slangc not found — and **defined `slang_generate` at the
+bottom, after both returns.** `tests/slang/CMakeLists.txt` calls it unconditionally:
+
+    CMake Error at tests/slang/CMakeLists.txt:37 (slang_generate):
+      Unknown CMake command "slang_generate"
+
+So a fresh clone or a CI runner with CUDA and no Slang **could not configure**, let
+alone build from the committed CUDA. That is precisely the scenario the committed
+artifacts exist for, and the previous entry recorded it as verified both ways.
+
+**WHY IT SURVIVED BEING "VERIFIED".** `tests/slang/CMakeLists.txt` returns early when
+CUDA is absent, so the call is never reached on a machine with neither toolchain. It
+needs CUDA *and* no Slang to bite — which is CI and a fresh clone, and is never the
+machine doing the work. A check run on the development machine cannot see it.
+
+The fix is the definition moved above the returns; it already no-ops internally on
+`PLUGIN_SLANG_FOUND`, so nothing else about the arrangement changes. **Verified
+properly this time:** a clean build directory configured with
+`-DPLUGIN_ENABLE_SLANG=OFF`, built with no `Slang -> CUDA` step at all, and **19/19
+ctest suites green from the committed CUDA**.
+
+### A staleness hole the refactor opened, closed with it
+
+`slang_generate` listed only the top-level `.slang` as a dependency. Once files share
+code by `#include`, CMake cannot see through it — so **editing `Rng.slang` would have
+left every generated `.cu` exactly as it was**: build succeeds, tests pass, and what
+ships is the old maths. The worst failure this file can have, because the committed
+artifact is the thing that ships.
+
+The function now takes the included sources as trailing arguments and **refuses rather
+than warns** on a path that does not exist, since a typo silently reintroduces the
+problem the argument exists to prevent. Verified: editing `PhaseLib.slang` regenerated
+both `Phase.cu` and `Bounce.cu`.
+
+`add_custom_command`'s `DEPFILE` would remove the chance of a wrong list entirely, and
+is Ninja/Makefile only — this project uses the Visual Studio generator. Recorded in the
+function rather than left as a footgun.
+
+### `slang.regenerates` DOES NOT EXIST
+
+Three separate comments — in `cmake/Slang.cmake` twice and in
+`cmake/SlangRewriteInclude.cmake` — promise that "the slang.regenerates test fails if
+this file and its .slang source have drifted apart", and one of them points at a
+`slang_generated_source()` function. **Neither exists anywhere in the repository.**
+
+So the staleness of a committed generated file was guarded by nothing but the build's own
+dependency rule, which is exactly what the section above had to repair. The comments are
+the same failure this project keeps rediscovering: **a claim written down once and then
+trusted.**
+
+### …so it was built, and it catches the hole the section above could only patch
+
+`cmake/SlangCheckRegenerated.cmake`, wired as `slang.regenerates`. It regenerates every
+committed `.cu` into a temporary directory, applies the same prelude rewrite, and
+compares. **It skips rather than fails without Slang** — the artifact exists and every
+other suite compiles it, and failing here would make Slang mandatory, which is the one
+thing this arrangement exists to avoid.
+
+**WHAT IT ACTUALLY GUARDS IS THE FIX ABOVE, AND THAT IS THE POINT.** The explicit
+`#include` dependency list is hand-written, and the failure mode of a hand-written list
+is a forgotten name. So the two work as a pair: the list makes the build regenerate, and
+this notices when the list has stopped being right.
+
+**Verified to go red, twice, and the second one is the real scenario.** A stray line
+appended to `generated/Phase.cu` is caught and named while the other five stay green.
+Then the genuine case — `PhaseLib.slang` dropped from `Phase.slang`'s dependency list and
+a real constant changed:
+
+    Slang -> CUDA: .../Bounce.slang        <- regenerated, it lists PhaseLib
+    (Phase.slang absent)                   <- did NOT, its list is now wrong
+    --- build exit: 0 ---
+
+    Phase: STALE -- Phase.cu does not match Phase.slang
+
+**The build exits 0 and says nothing.** Two generated kernels compiled from one edited
+source, now disagreeing about a constant, and only this test notices.
+
+*(A first attempt at that check was confounded and is worth the line: editing the
+CMakeLists to remove the dependency also dirties the custom command, so the rule re-runs
+and Phase regenerates anyway. The hole only shows when the dependency list was already
+wrong at the previous configure — which is exactly how it would happen in real life.)*
+
+20 ctest suites.
+
+### Next
+
+- ~~**The majorant grid**, still a correctness requirement rather than an optimisation,
+  and now with a second test that would see it: the next-event sweep above.~~ **Done** —
+  see the entry above. The answer holds still across grid resolutions and the cost falls
+  up to 25x. Not yet wired to the ice generator, which needs sampled bounds.
+- ~~**The optical-depth-versus-shear decision**, still open from two entries ago.~~ The
+  evidence is now in and **the decision is still open**: the anomaly that motivated it
+  turned out to be a measurement artefact, and the generator has no bug. See the entry
+  above for the recommendation.
+- **The atmosphere behind the `Environment` seam**, which is what makes
+  `includeSunDisc` live and turns the double-counting hazard from a wired-up argument
+  into something a test can reach.
+
+---
+
+## 2026-09-28 — The Slang bet, settled by measurement. It is a GO, with one condition.
+
+PLAN.md asks for the transport written once in Slang and compiled to PTX for CUDA and
+Metal for macOS, and says plainly that **the decision point comes before any generator
+is written, not after six**. Nothing had tested it. Slang was not installed, not
+vendored, and had no build wiring.
+
+Spiked against Slang **2026.18.3** (windows-x86_64), downloaded to a scratch directory
+rather than the repo, because a bet that fails should leave nothing behind.
+
+### What was measured, in the order it mattered
+
+**1. All three targets emit.** `-target cuda`, `-target ptx`, `-target metal` all
+produced output from one source.
+
+**2. The CUDA output is ORDINARY CUDA, which was the real worry.**
+
+    extern "C" __global__ void computeMain(SkyParams_0 params_0,
+                                           RWStructuredBuffer<float3> output_0,
+                                           int width_0)
+
+Parameters by value as ordinary kernel arguments, CUDA's own `float3`/`make_float3`,
+no Slang-specific uniform blob to marshal. `RenderRequest` can be passed the way
+`Mistytune.cu` passes it today, and the launch shim, the band split, the abort check
+and the accumulator all survive unchanged. The .cu stays what its own header says it
+is: a launch shim.
+
+**3. IT COMPILES UNDER THIS PROJECT'S DETERMINISM FLAGS**, exit 0, with
+`--fmad=false --prec-div=true --prec-sqrt=true -std=c++17`. That is the reason to take
+CUDA SOURCE rather than PTX: nvcc still applies our flags. Emitting PTX would put
+contraction and division precision beyond our control, and those flags are exactly what
+tests/golden/ exists to protect.
+
+Cost: Slang's prelude uses CUDA 13's deprecated `longlong4`/`ulonglong4`/`double4`, so
+the build needs `-diag-suppress 1444` and `/wd4996`. Noise today; a build break the day
+anyone adds `/WX`.
+
+**4. THE NUMBERS ARE BIT-IDENTICAL.** Every transcendental the renderer actually calls
+-- counted out of Shading.h as expf x16, sqrtf x5, cosf x3, sinf x2, tanf, rsqrtf,
+exp2f -- evaluated through Slang and through hand-written CUDA over **44,001 inputs**,
+compared as raw bit patterns:
+
+    exp  0 differing    sqrt 0 differing    cos  0 differing    sin 0 differing
+    tan  0 differing    rsqrt 0 differing   exp2 0 differing
+
+**That is the result the bet turned on, and it is stronger than "close enough".** A
+faithful Slang port of the transport reproduces the CPU reference BY CONSTRUCTION,
+because the primitives are literally the same functions. The port did not have to be
+written to find that out -- which also means a divergence found later is a transcription
+error, not a Slang problem, and that is a much easier thing to debug.
+
+### THE CONDITION, AND IT IS NOT A FORMALITY
+
+`-fp-mode fast` must never be passed. Slang's backend then emits
+`SLANG_CUDA_ENABLE_FAST_MATH=1` and the prelude redirects to the approximate `__expf`
+family. Measured, same 44,001 inputs:
+
+| | differing | worst absolute difference |
+| --- | --- | --- |
+| exp | 36,886 | **4.12e11** |
+| tan | 43,688 | 2812 |
+| cos | 42,465 | 9.9e-06 |
+| sin | 42,496 | 9.3e-06 |
+
+sqrt, rsqrt and exp2 stay precise -- they have no fast intrinsic to redirect to -- which
+is what makes this dangerous rather than obvious: **the flag breaks some functions and
+not others**, so a render with it on looks nearly right and the golden tests would catch
+it only where exp happens to dominate.
+
+It is off by default. It needs to be off *on purpose*, which means a build that asserts
+it rather than a comment asking for it.
+
+### The verdict
+
+**GO.** The integration friction is low, the determinism story is intact, and the
+alternative -- PLAN.md's macro shim -- buys nothing that this does not, while costing
+the Metal path in Phase 5.
+
+### The arrangement that was built on the back of it
+
+**THE GENERATED CUDA IS COMMITTED. SLANG IS NEEDED TO REGENERATE IT, NEVER TO BUILD.**
+
+That is the decision, and the obvious alternative -- run slangc as a build step -- is
+what most projects do and is wrong here. A shader compiler decides the bits in every
+golden image, so making it a build dependency means every machine needs the right
+VERSION of it or the golden suite fails for reasons unrelated to the change being
+tested. It also means CI, a fresh clone, and anyone fixing a typo in the host code all
+need a 147 MB download.
+
+Committing the generated .cu costs a file in review and buys builds that work with no
+toolchain, a diff that SHOWS what a shader edit did to the generated code, and a bisect
+that compiles at every commit.
+
+| | |
+| --- | --- |
+| `cmake/FetchSlang.cmake` | standalone fetch, version and SHA256 pinned. NOT part of configure -- a configure that reaches the network fails in CI and on an aeroplane, for a tool most builds do not need. |
+| `cmake/Slang.cmake` | optional discovery, mirroring `Cuda.cmake`. Reports the version, because a compiler upgrade is a change to the output bits. |
+| `cmake/SlangRewriteInclude.cmake` | makes the output portable enough to commit |
+| `src/kernel/slang/prelude/` | the vendored prelude, Apache-2.0 WITH LLVM-exception -- the licence written for exactly this, a support header emitted into someone else's build output |
+| `tests/slang/` | the parity test, permanent |
+| `tools/slang/` | gitignored; 147 MB of prebuilt binaries is not a thing to put in git |
+
+**TWO THINGS LEAKED THE GENERATING MACHINE INTO THE OUTPUT**, and both had to go or
+the committed file differs per developer and the staleness check fails for everyone
+except whoever last regenerated it:
+
+- `#line` directives carrying absolute source paths -- killed with
+  `-line-directive-mode none`.
+- The prelude `#include`, which slangc writes as an absolute path to wherever the
+  toolchain lives -- rewritten to a relative one, and the rewrite REFUSES rather than
+  passing silently if slangc's output shape ever changes. A generated file that
+  compiles only on the machine that made it is the worst kind of build bug, because it
+  reproduces for nobody who could fix it.
+
+**`slang.mathParity` is permanent, and verified to go red.** Regenerating with
+`-fp-mode fast` fails it with the exact signature its own diagnostic predicts -- exp
+and the trig functions moved, sqrt/rsqrt/exp2 did not. It needs CUDA but NOT Slang,
+because it compiles the COMMITTED artifact: it guards what ships rather than what
+generates it, and so it also catches a regeneration made with the wrong flags and
+committed by accident.
+
+14 ctest suites. The whole arrangement was verified both ways -- configured and tested
+green with Slang absent, then again with it present and regenerating.
+
+**One CMake trap worth the line it costs.** `set(PLUGIN_SLANGC "")` as tidy
+initialisation made the search appear to fail on a machine with slangc sitting exactly
+where the hint pointed: `find_program` writes a CACHE entry and a normal variable of
+the same name shadows it. Also, `find_program` does not normalise a hint containing
+"..".
+
+### The port, done and proved bit-exact
+
+`src/kernel/slang/Sky.slang` is `skyRadiance()` and its helpers -- the ray-sphere
+algebra, the quadratic marches, the sun optical depth, the ground and the sun disc --
+transcribed from Shading.h.
+
+**A TRANSCRIPTION, NOT A REWRITE, AND THE EXPRESSION STRUCTURE IS PRESERVED EVEN WHERE
+IT LOOKS REDUNDANT.** Floating-point addition is not associative, so every tidy-looking
+reassociation is a chance to be off by a bit.
+
+`slang.skyParity` runs both versions **on the same GPU, in the same build, under the
+same nvcc flags**, over 14,449 directions -- 0.1-degree elevation steps through the
+horizon band at eight azimuths, plus a ring of near-misses around the sun's limb. So
+nothing it reports can be blamed on CPU-versus-GPU or on a flag.
+
+    14449 directions, 0 differing channels of 43347 -- identical
+
+First run, no debugging. That is what slang.mathParity buys: with the primitives
+proved identical, a faithful transcription is bit-exact or it is mistyped, and there
+is no third possibility to investigate.
+
+**Verified to go red, with the exact mistake the file warns about.** Changing
+`sumR * betaR * phaseR` to `sumR * (betaR * phaseR)` -- a pure reassociation, the kind
+of "harmless tidy-up" a future editor makes without thinking -- moves **6,435 of 43,347
+channels**. Worst absolute difference **4.77e-07**, at 1.9 degrees elevation: in the
+horizon band, where the hard cases were always going to be.
+
+**That 4.77e-07 is the case for comparing bitwise.** It is orders of magnitude below
+anything tests/golden/ could see at 2/255. This tier catches what that tier cannot,
+which is the only reason to have it.
+
+### What was DELIBERATELY not done: the production kernel still uses Shading.h
+
+The obvious next move is to point the shipping GPU path at the Slang sky. It was not
+made, and the reason is structural rather than caution.
+
+`renderPixel()` is ONE function serving both engines -- that is the arrangement that
+makes a golden image taken on the CPU a meaningful check on the GPU, and CpuRender.cpp
+is emphatic that it is "not a second renderer". Switching only the GPU's sky to Slang
+means forking `renderPixel`, which buys nothing for a **placeholder sky that Phase 2
+deletes** and costs the property the whole test strategy rests on.
+
+The value of this work was never migrating the placeholder. It is that **the real
+transport gets written in Slang**, with the pipeline proved and guarded before a line
+of it exists -- which is exactly what PLAN.md means by deciding before any generator is
+written. Both paths switch together when the transport lands and the CPU reference
+starts consuming the `cpp` target.
+
+`Sky.slang` is not dead code in the meantime: `slang.skyParity` fails the moment it and
+Shading.h drift apart, so it stays honest without being shipped.
+
+### The CPU arm, established as viable but not built
+
+Slang's `-target cpp` emits a callable entry point taking `ComputeThreadVaryingInput`
+-- two uint3s -- so CpuRender.cpp can call the SAME generated maths per pixel. That is
+what closes the loop to genuinely one source for CUDA, C++ and (Phase 5) Metal.
+
+`[export]` is not available in 2026.18.3, so plain-function libraries are out and the
+entry point has to be a kernel in every target. That is a shape constraint on the port,
+not a blocker.
+
+### The transport starts: phase functions, and a REAL BUG INHERITED FROM THE PROTOTYPE
+
+`src/kernel/slang/Phase.slang` -- Henyey-Greenstein, the Draine lobe, the
+Jendersie-d'Eon mixture, the ice placeholder, and the importance sampler for all of
+them. Ported from `proto/index.html`.
+
+**THE VERIFICATION HAD TO CHANGE SHAPE, AND THAT TURNED OUT TO BE THE POINT.**
+
+The sky port could be proved bitwise because Shading.h was a target to diff against.
+The transport has no C++ twin -- its reference is a GLSL shader in a browser -- so a
+transcription error here cannot be caught by comparison. It has to be caught by the
+identities a correct phase function obeys:
+
+1. **A phase function integrates to 1 over the sphere.** Quadrature, 4.2M points.
+2. **The mean returned sample weight is that same integral.** `samplePhaseDir` returns
+   phase/pdf, and the expectation of phase/pdf over the pdf is exactly the integral --
+   so a sampler drawing from anything other than its stated pdf shows up here while
+   the quadrature stays perfect.
+
+Identity 2 is the one that earns its keep, and it immediately failed.
+
+    microns     integral  mean weight
+        5.0     1.000014     1.018845
+       12.0     1.000075     1.066672
+       50.0     1.000406     1.123231
+
+The phase functions normalised perfectly. The sampler did not agree with its own pdf,
+and **the error grew smoothly with droplet diameter** -- which is what named the cause.
+
+**`sampleHG` clamps g to +-0.95; the pdf evaluates `hg()` at the UNCLAMPED g.** For
+every droplet diameter the Jendersie-d'Eon fit is valid for, `hgG` runs from 0.971 at
+5 microns to 0.998 at 50 -- so the clamp ALWAYS bites, the sampler always draws from a
+broader lobe than the pdf claims, and the discrepancy tracks hgG's approach to 1
+exactly as measured.
+
+**This bug is in the prototype**, in the same shape, and it survived the Phase 0 look
+verdict because it does not look like a bug. Throughput is multiplied by 2-12% too
+much at every scattering event, compounding across a thirty-bounce budget -- roughly
+1.9x too much light after ten bounces at 50 microns. It renders as a cloud that is too
+bright and too flat, which reads as a lighting choice.
+
+**The fix is one bound where the parameters are DERIVED**, so the sampler and the pdf
+cannot be handed different numbers; `sampleHG` clamps to the same constant, which makes
+it a no-op for anything derived and still guards a hand-set value. Raised to 0.999 from
+0.95 while doing it: HG sampling is exact for any |g| < 1, and 0.95 was discarding most
+of the forward peak the fit exists to describe.
+
+    after: mean weight 0.9997 at every diameter, against an integral of 1.0000
+
+**Max weight is 1.65-1.84**, bounded, matching the prototype's own predicted "around
+1.8" -- so the firefly mechanism its comments describe is not present.
+
+### The ice placeholder, measured rather than assumed
+
+`phaseIce` adds a 22-degree halo on top of an already-normalised mixture, so it does
+not conserve energy. Everyone knew that; nobody had the number.
+
+    integral 1.051092  -- the halo invents 5.1% extra light
+    mean weight 1.051514, max 2.1551
+
+The mean weight matches the integral to 4e-4, so **the ice sampler is self-consistent
+even though the function is not normalised** -- which is the right state for a
+placeholder and is now asserted rather than hoped. The test bounds the excess instead
+of demanding 1, so it catches a halo that gets dramatically brighter without pretending
+Phase 4's work is already done.
+
+16 ctest suites.
+
+### Null-collision transport, and a SECOND bug the identities caught
+
+`src/kernel/slang/Transport.slang` -- delta-tracked free flight and ratio-tracked
+transmittance, with the medium behind a seam so the ice generator can land there next.
+
+**THE MAJORANT SWEEP IS THE TEST.** Null-collision tracking's whole promise is that
+the majorant -- any upper bound on density -- is a free parameter: it changes how long
+the estimator takes and nothing about the answer. So the check is not "is this
+number plausible", it is:
+
+1. In a constant-density slab, transmittance equals `exp(-sigma * d)` exactly.
+2. The free-flight distance is exponentially distributed with rate sigma.
+3. **Neither answer moves when the majorant does.**
+
+Checking one majorant would have passed. Sweeping it is what made the check mean
+anything -- and it failed at 100x.
+
+    1000 m slab, optical depth 2.5, analytic exp(-tau) = 0.082085
+
+      majorant     measured (before)
+        1x sigma    0.082292
+       20x sigma    0.082124
+      100x sigma    0.276252      <- 3.4x too much light
+
+**THE ITERATION CAP WAS A CORRECTNESS LIMIT WEARING A SAFETY NET'S CLOTHES.** The
+expected number of steps is `majorant * pathLength`, every one a null collision when
+the majorant is loose. The prototype's 128 was too low by a factor of eight: hitting
+the cap `break`s and returns the PARTIAL product, with the not-yet-accumulated
+attenuation simply missing.
+
+The free-flight loop had the same defect in the opposite direction -- 0.28% of rays
+escaped that should have scattered, biasing towards a THINNER cloud. **The two do not
+cancel.**
+
+Raised to 1024, which covers about 400x sigma at that thickness. After:
+
+      100x sigma    0.082087   against analytic 0.082085
+
+**This is the second bug inherited from the prototype in two days, and both were
+invisible to a look-based verdict.** A too-bright cloud reads as a lighting choice; a
+too-thin one reads as a density slider set low. Neither would ever have been found by
+comparing pictures, which is what Phase 0 was for and is exactly what Phase 0 could
+not do.
+
+**Why it only shows with a loose majorant** -- and therefore why it will show in
+practice: a global majorant has to cover the single densest point in the field, so one
+sharp peak makes the ratio loose EVERYWHERE ELSE. That is the ordinary case for a
+cumulus with a hard core, not a pathological one.
+
+**THE REAL FIX IS LOCAL MAJORANTS** -- a coarse grid of per-cell bounds instead of one
+global number -- which is the standard performance fix for the same reason it is the
+correctness fix: it keeps the ratio near 1 everywhere, so the cap is never approached.
+Raising the cap converts a silent bias into a visible slowdown, which is the right way
+round, but it is a holding action. **The majorant grid is now a Phase 2 requirement
+rather than an optimisation.**
+
+### The RNG is duplicated, and pinned by test
+
+Slang 2026.18.3 has no `[export]`, so a shared module would be pulled in by `#include`
+and each generated .cu would carry its own copy regardless. The PCG generator is
+therefore stated in both `Phase.slang` and `Transport.slang`. If those ever disagree,
+every determinism guarantee in the project goes with them -- so both expose an
+`rngTrial` entry point and the test pins one against the other.
+
+17 ctest suites.
+
+### The generator, and a THIRD thing the prototype could not have survived
+
+`src/kernel/slang/Generator.slang` -- `cellField`, `driftAt`, `iceDensity`,
+`gradientNoise`, `fbm`.
+
+**THE HASHES ARE NOW INTEGER, AND THAT IS A CORRECTNESS CHANGE.**
+
+The prototype uses `fract(sin(p) * 43758.5453123)`, the classic GLSL sin-hash. Fine in
+a browser, on one GPU, for a look verdict. Measured sensitivity to a ONE-ULP change in
+its input:
+
+| grid coord | hash(x) | hash(x + 1 ulp) | difference |
+| --- | --- | --- | --- |
+| 17.3 | 0.325256 | 0.326319 | 0.001064 |
+| 128.0 | 0.561327 | 0.098675 | 0.462652 |
+| 1024.0 | 0.809906 | 0.084025 | **0.725881** |
+| 65536.0 | 0.777520 | 0.086796 | 0.690725 |
+
+At a grid coordinate of 1024 a single last-bit change moves the hash from 0.81 to
+0.08. The function is chaotic in its lowest input bit -- which is what a hash should
+be, and exactly what makes it unusable here.
+
+**PLAN.md's premise is one source compiled to CUDA AND METAL.** `sin()` of a large
+argument is where vendors differ, because it is argument reduction rather than the
+core polynomial, and they will differ by an ULP somewhere. Amplified by 43758 and
+wrapped by `fract`, that ULP becomes a different number entirely: the cells land in
+different places and **the same comp renders a different cloud on Mac and Windows**.
+tests/golden/'s own header names cross-platform float divergence as the thing that
+tier exists to catch; this would have defeated it at the first hurdle.
+
+**The fix is free**, because every hash input here is an integer lattice coordinate --
+`floor(g)` in cellField, `floor(p)` in gradientNoise. PCG2D/PCG3D are exactly
+reproducible on every platform by construction, cost about the same, and are of better
+statistical quality. The noise realisation changes; the STRUCTURE the Phase 0 verdict
+was about -- discrete cells, jittered slots, the spacing that leaves clear lanes --
+is preserved exactly.
+
+### The optical-depth parameter is a LOW-SHEAR claim, now measured
+
+The generator divides by streak length so that "a vertical path through the thickest
+part of a streak integrates to roughly the value on the slider" -- which is what makes
+the parameter checkable against the literature's 0.1 to 0.7 for cirrus.
+
+The first run of the test measured 0.038 against a parameter of 0.45 and looked like a
+port bug. It is not. **The normalisation divides by a VERTICAL extent, and a fallstreak
+is not vertical.** At 8 m/s of wind against a 1 m/s fall speed a parcel drifts 12 km
+sideways over 1.5 km of fall, so a vertical column crosses many streaks and spends most
+of its length in the clear lanes between them.
+
+Swept, at parameter 0.45:
+
+    wind    shear     thickest         mean   occupied
+     0.0      0.0       0.2594       0.0240        23%
+     1.0      1.0       0.1575       0.0207        37%
+     4.0      4.0       0.0541       0.0125        49%
+     8.0      8.0       0.0376       0.0129        61%
+
+So the claim holds where it is made -- at zero shear, 0.26 against 0.45, within the
+"roughly" it promises -- and **decays by about 7x across the useful shear range**. The
+test asserts it only at zero shear and reports the decay, rather than failing for
+something that is not a bug.
+
+**This matters for the UI, not just the test.** A parameter labelled "optical depth"
+that delivers a seventh of its value once the shear slider is up is a parameter that
+has quietly stopped meaning anything -- and shear is the hero control of this
+generator. Either the normalisation should follow the streak's own path length rather
+than its vertical extent, or the parameter should be renamed. **That is a design
+decision, recorded here rather than silently patched.**
+
+Also measured, because slang.transport needs it: **peak density 3.06e-4 per metre**,
+at 141 m below the generating level. That is the floor a majorant estimator has to
+clear, and the transport work shows what it costs to be much above it.
+
+18 ctest suites.
+
+### Next
+
+- **The bounce loop**: multiple scattering with next-event estimation. Its identity is
+  a FURNACE TEST -- a conservative medium (albedo 1) inside a uniform source must
+  return exactly the source. That catches an energy leak in multiple scattering the
+  way the majorant sweep catches one in the tracker.
+- **The majorant grid**, now a correctness requirement rather than an optimisation.
+- **The optical-depth-versus-shear decision** above.
+
+---
+
 ## 2026-09-28 — The 3D camera is real; the field cache is NOT worth wiring yet
 
 ### `fillCameraFromComp()` is no longer a stub
@@ -263,10 +1865,32 @@ asserts tolerance rather than equality.
 
 ### What needs After Effects next
 
-- **A high sample count in the host.** Everything above the crossover is untested in
+- ~~**A high sample count in the host.** Everything above the crossover is untested in
   AE: whether the progress bar moves, whether cancel is responsive, and whether the
-  driver timeout is genuinely avoided at 2048+ samples.
-- **A Region of Interest**, still the only way to drive a non-zero `output_origin`.
+  driver timeout is genuinely avoided at 2048+ samples.~~ **Driven, and it passed** —
+  see the correction below.
+- ~~**A Region of Interest**, still the only way to drive a non-zero `output_origin`.~~
+  **Driven in the same session**, and it found the defect this entry opens with.
+
+**CORRECTED 2026-09-28, from `%TEMP%\mistytune.log` rather than from memory.** Both
+bullets were done in the session immediately after this entry was written, and neither
+was struck — the same stale-claim pattern this file keeps rediscovering, this time by
+leaving a finished item on a to-do list:
+
+| | |
+| --- | --- |
+| 1920x1080 @ 1045 spp | 9.17 s, 16 rows per band |
+| 555x576 @ 2048 spp | 3.48 s, 29 rows per band |
+| **1920x1080 @ 2048 spp** | **17.58 s, 16 rows per band, no driver reset** |
+
+17.58 s against a display-driver timeout of about two seconds is the launch split doing
+exactly the job it was built for. **Cancel is responsive mid-frame**, not merely
+between frames:
+
+    aborted at row 500 of 576, sample 241 of 241, after 0.30 s
+
+**What the log cannot answer, and so remains open:** whether the progress bar visibly
+moves during that 17 s. That is an eyeball check and nothing else can make it.
 
 ---
 

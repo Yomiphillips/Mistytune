@@ -28,6 +28,13 @@ add_library(plugin_engine STATIC
     # piece of host arithmetic whose errors render a convincing wrong picture.
     CameraConvert.h
 
+    # The host's half of the ice generator: the shear integral that IS the
+    # fallstreak hook, the habit fall speeds, and a majorant that is sound by
+    # construction rather than by sampling. All of it a pure function of the
+    # parameters, which is why it is here and not in the kernel.
+    IceField.h
+    IceField.cpp
+
     # 2D primitives for the contour tracer. What is left of the rigid-body
     # engine's Hull.h once the hull builder went with the solver.
     Geometry.h

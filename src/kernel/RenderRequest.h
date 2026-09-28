@@ -13,6 +13,7 @@
 // file inside it.
 
 #include "../engine/CloudParams.h"
+#include "../engine/IceField.h"
 
 namespace plugin::kernel {
 
@@ -53,6 +54,62 @@ struct RenderRequest {
     cloud::FieldParams   field;
     cloud::ViewParams    view;
     cloud::QualityParams quality;
+
+    // -----------------------------------------------------------------------
+    // WHAT THE HOST DERIVED FROM `field`, BECAUSE THE KERNEL CANNOT
+    // -----------------------------------------------------------------------
+    //
+    // Each of these is a pure function of the parameters above -- no pixel, no
+    // sample, no ray in any of them -- so working them out on the GPU would be the
+    // same answer recomputed a few billion times a frame. src/engine/IceField.h owns
+    // the arithmetic and tests/unit/ checks it without a card.
+    //
+    // NOBODY HAS TO REMEMBER TO FILL THEM IN. deriveRenderInputs() in KernelApi.h is
+    // called by renderCpu, renderCuda and renderCudaToHost on their own copy of the
+    // request, so a caller that leaves them zero still renders correctly. They are
+    // in the struct rather than in a side channel because the kernel reads them and
+    // the kernel is handed exactly this.
+    //
+    // A DERIVED VALUE IS NOT A PARAMETER and none of this is hashed: FieldCache keys
+    // on FieldParams, and these move only when it does.
+
+    // The shear profile integrated into horizontal displacement, 33 knots. This is
+    // the hook -- see IceField.h, where the integral is argued for at length.
+    cloud::DriftTable drift;
+
+    // WHERE THE KERNEL READS THAT TABLE FROM, which is not always the field above.
+    //
+    // Host memory on the CPU path -- it points straight at `drift.xz` -- and DEVICE
+    // memory on the CUDA one, because a kernel cannot dereference a host pointer and
+    // taking the address of a kernel parameter spills 264 bytes per thread. The
+    // render entry points set it; a caller never does.
+    //
+    // The same rule the accumulator and the destination live under, for the same
+    // reason: this file describes a render, and where its memory lives is part of
+    // the description rather than something the kernel should have to guess.
+    const void* driftBuffer = nullptr;
+
+    // A sound upper bound on the medium's density per metre, resolved from
+    // quality.densityMajorant when the user pinned one and derived structurally
+    // otherwise. NEVER sampled from the field: see IceField.h on why a bound that is
+    // merely usually right is worse than a loose one.
+    cloud::Real densityMajorant = 0.0f;
+
+    // The crystal's terminal velocity, m/s -- the habit's own speed times the
+    // artist's multiplier, floored so it cannot divide by zero.
+    cloud::Real fallSpeed = 0.0f;
+
+    // Where the generating level itself has drifted to by field.timeSeconds. The
+    // streaks hang off the cells, so moving the cells moves the whole sky as one
+    // thing rather than as a pattern crawling through a fixed window.
+    cloud::Real cellDriftX = 0.0f;
+    cloud::Real cellDriftZ = 0.0f;
+
+    // THE REASON ALL FIVE ARE HERE RATHER THAN COMPUTED WHERE THEY ARE USED: the
+    // marshalling into the kernel's structs runs ON THE DEVICE, inside renderPixel,
+    // and src/engine/ is host code. A device function cannot call iceFallSpeed(), so
+    // the answer has to arrive as data. That is not a limitation worth working
+    // around -- it is the same reason the drift table is a table.
 
     // WHICH SAMPLES THIS LAUNCH IS RESPONSIBLE FOR, as a half-open range into the
     // frame's total sample budget.

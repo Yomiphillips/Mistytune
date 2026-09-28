@@ -454,7 +454,7 @@ PF_Err smartRenderGpu(PF_InData* in_data, PF_OutData* out_data,
     // rows, and why the chunks here are correspondingly smaller.
     const int totalSamples = data.quality.samplesPerPixel > 0 ? data.quality.samplesPerPixel : 1;
     const int samplesPerChunk = kernel::samplesPerLaunch(
-        32 * 1024 * 1024,
+        kernel::kGpuPixelSampleBudget,
         static_cast<long long>(output->width) * output->height,
         totalSamples);
 
@@ -627,11 +627,17 @@ PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
     // apart and one number cannot serve both.
     //
     //   CPU  256K pixel-samples is a few tenths of a second (measured ~1.7 us each).
-    //   GPU   32M pixel-samples is about the same wall time (measured ~5 ns each),
-    //         and staying near a quarter second is what keeps every launch clear of
-    //         the Windows display-driver timeout, which kills the whole context
-    //         rather than just the launch.
-    const long long kBandBudget = useGpu ? (32 * 1024 * 1024) : (256 * 1024);
+    //   GPU  see kGpuPixelSampleBudget in KernelApi.h, which carries the measurement
+    //        and the reason it is what it is. Staying near a quarter second is what
+    //        keeps every launch clear of the Windows display-driver timeout, which
+    //        kills the whole context rather than just the launch.
+    //
+    // THE GPU FIGURE WAS A LITERAL HERE AND IN ONE OTHER PLACE, AND IT WENT STALE.
+    // It was calibrated against the Phase 1 analytic sky at 5 ns a pixel-sample; the
+    // real transport costs 93, so the same constant went from 0.16 s a band to 3.0 s
+    // -- past the timeout, with nothing to say so. It is one named constant now,
+    // beside the measurement that sets it.
+    const long long kBandBudget = useGpu ? kernel::kGpuPixelSampleBudget : (256 * 1024);
     const long long perRow =
         static_cast<long long>(output->width) * data.quality.samplesPerPixel;
 

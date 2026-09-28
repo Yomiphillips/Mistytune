@@ -31,8 +31,27 @@
 
 #if defined(__CUDACC__)
     #define MT_DEVICE __host__ __device__ inline
+
+    // DEVICE ONLY, AND THE DISTINCTION IS FORCED BY slangc RATHER THAN CHOSEN.
+    //
+    // The generated CUDA marks every function `static __device__` -- there is no
+    // host arm of it at all -- so anything that calls into the kernel cannot itself
+    // be `__host__ __device__`. nvcc rejects that outright rather than letting the
+    // host arm dangle, which is the correct failure and is how this was found.
+    //
+    // Only the two functions that reach the transport carry it. Everything else in
+    // this header stays callable from the host, because tests/slang/SkyParityMain.cu
+    // and tests/unit/TestCamera.cpp call the camera and the sky directly and that is
+    // how those suites work without a GPU.
+    //
+    // NOTHING CALLS renderPixel FROM THE HOST IN A .cu. Mistytune.cu reaches it only
+    // through mistytuneKernel, which is `__global__`; the CPU reference is compiled
+    // by the host compiler, where this expands to plain `inline` and the whole
+    // question does not arise.
+    #define MT_RENDER __device__ inline
 #else
     #define MT_DEVICE inline
+    #define MT_RENDER inline
     #include <cmath>
 #endif
 
@@ -633,6 +652,68 @@ MT_DEVICE float unitFloat(unsigned int h) {
 }
 
 // ---------------------------------------------------------------------------
+// The seam to the Slang kernel
+// ---------------------------------------------------------------------------
+
+// Linear radiance for one ray, traced through the medium and the atmosphere.
+//
+// ===========================================================================
+// DECLARED HERE AND DEFINED BY WHICHEVER BACKEND INCLUDES THIS HEADER. That
+// indirection is one line and it is what keeps renderPixel ONE FUNCTION.
+//
+// The transport is written once, in Slang, and compiled to CUDA and to C++. Those
+// two compilations emit DIFFERENT SYMBOLS -- different struct layouts, different
+// vector types, and both `static` to their own translation unit -- so this header,
+// which is included by both, cannot name either of them. What it can do is call a
+// function of its own and let the including file supply it:
+//
+//     Mistytune.cu   includes the generated Render.cu,    then defines this
+//     CpuRender.cpp  includes the generated RenderCpu.cpp, then defines this
+//
+// Both definitions are four lines of marshalling over src/kernel/SlangBridge.h,
+// which is itself written once. Nothing about the renderer exists twice.
+//
+// A TU THAT NEVER CALLS renderPixel NEEDS NO DEFINITION, which is why
+// tests/unit/TestCamera.cpp and tests/slang/SkyParityMain.cu still include this
+// header and link: an inline function that is not called is not odr-used.
+// ===========================================================================
+MT_RENDER Vec3 mistytuneTrace(const RenderRequest& req, Vec3 ro, Vec3 rd,
+                              unsigned int seed);
+
+// Where a camera ray starts, in world space.
+//
+// +Y IS ALTITUDE IN METRES and the ground plane is y = 0, which is the convention
+// the atmosphere, the slab and the generator all share. A camera 2 m up is at
+// (0, 2, 0).
+//
+// ===========================================================================
+// THE MATRIX TRANSLATION IS NOT READ, AND READING IT IS A BUG THIS FUNCTION
+// ALREADY SHIPPED ONCE.
+//
+// The first version took elements 3, 7 and 11 whenever `cameraFromComp` was set,
+// on the reasonable-sounding grounds that a real comp camera knows where it is.
+// It does not, HERE: src/engine/CameraConvert.h zeroes those three deliberately,
+// and says why at length. AE's world is comp PIXELS with an arbitrary origin and
+// this one is METRES; there is no conversion between them without a scene-scale
+// parameter, which does not exist and must not be invented in a shading header.
+//
+// So in After Effects that branch read three guaranteed zeros and put the camera
+// at ALTITUDE ZERO rather than at observerAltitude. Two metres against a cloud
+// base of six kilometres is invisible -- which is the entire problem with it.
+// Nothing in a render would ever have shown it, and the next person to add the
+// translation to CameraConvert for Phase 3 would have found this silently
+// consuming pixels as metres.
+//
+// WHEN THE CAMERA IS ALLOWED TO FLY, it arrives as a real pixels-per-metre
+// parameter and it arrives in ONE place. Until then the observer is where
+// ViewParams says the observer is, and the comp camera contributes orientation
+// and field of view only -- which is all a sky at infinity can use anyway.
+// ===========================================================================
+MT_DEVICE Vec3 primaryRayOrigin(const cloud::ViewParams& view) {
+    return vec3(0.0f, view.observerAltitude, 0.0f);
+}
+
+// ---------------------------------------------------------------------------
 // One pixel, start to finish
 // ---------------------------------------------------------------------------
 
@@ -643,7 +724,7 @@ MT_DEVICE float unitFloat(unsigned int h) {
 // DESTINATION. Two buffers because the denoiser needs the linear one and the host
 // needs the display one, and because the accumulator has to survive between
 // launches while the destination is handed back to AE every time.
-MT_DEVICE void renderPixel(const RenderRequest& req, int px, int py) {
+MT_RENDER void renderPixel(const RenderRequest& req, int px, int py) {
     if (px < 0 || py < 0 || px >= req.dest.widthPx || py >= req.dest.heightPx) return;
 
     Vec3 sum = vec3(0.0f, 0.0f, 0.0f);
@@ -668,6 +749,10 @@ MT_DEVICE void renderPixel(const RenderRequest& req, int px, int py) {
     const int frameX = px + req.view.originX;
     const int frameY = py + req.view.originY;
 
+    // Loop-invariant, so it is lifted out by hand rather than left to the optimiser
+    // to notice across a call boundary.
+    const Vec3 origin = primaryRayOrigin(req.view);
+
     for (int s = 0; s < req.sampleCount; ++s) {
         const int sampleIndex = req.firstSample + s;
         const unsigned int h = hashPixelSample(frameX, frameY, sampleIndex, req.field.seed);
@@ -680,7 +765,13 @@ MT_DEVICE void renderPixel(const RenderRequest& req, int px, int py) {
         const float jy = unitFloat(h * 0x9e3779b9u + 0x632be59bu) - 0.5f;
 
         const Vec3 dir = primaryRayDirection(req.view, px, py, jx, jy);
-        sum = sum + skyRadiance(req.field, dir);
+
+        // THE ONE LINE. It used to be `skyRadiance(req.field, dir)` -- an analytic
+        // sky and nothing in front of it, which is what Phase 1 was for. Everything
+        // around it is unchanged: the frame-pixel seeding, the accumulator, the
+        // output transform and the channel order are all still here, and all still
+        // shared between the two backends.
+        sum = sum + mistytuneTrace(req, origin, dir, h);
     }
 
     // PROGRESSIVE ACCUMULATION, weighted by the counts rather than by a running

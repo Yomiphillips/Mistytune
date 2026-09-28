@@ -30,6 +30,30 @@
 #include <cstdio>
 #include <cstring>
 
+// ---------------------------------------------------------------------------
+// The renderer itself, as generated CUDA source
+// ---------------------------------------------------------------------------
+//
+// INCLUDED AS SOURCE, NOT LINKED, and that is what lets this file call into it.
+//
+// slangc emits every function below an entry point `static` to the translation unit,
+// so `renderSample_0` has internal linkage and is unreachable from anywhere else. A
+// separate object file would expose only `renderRays`, the compute entry point --
+// which is a whole kernel launch, not a function a pixel can call.
+//
+// Including it here also means nvcc sees the transport and renderPixel together and
+// can inline across the seam, which is the difference between a call per sample and
+// no call at all.
+//
+// COMMITTED, AND SLANG IS NEEDED ONLY TO REGENERATE IT. See cmake/Slang.cmake for
+// why a shader compiler is not a build dependency of this project, and
+// slang.regenerates for the test that stops the committed file drifting.
+#include "slang/generated/Render.cu"
+
+// RenderRequest -> the generated structs, member by member. AFTER the generated
+// source, because it names those structs; after Shading.h, because it uses Vec3.
+#include "SlangBridge.h"
+
 namespace plugin::kernel {
 
 namespace {
@@ -134,7 +158,70 @@ struct DeviceScratch {
 thread_local DeviceScratch g_dest;
 thread_local DeviceScratch g_accum;
 
+// The drift table, uploaded once per launch.
+//
+// A THIRD BUFFER FOR 264 BYTES, WHICH LOOKS LIKE OVERKILL AND IS NOT. The table has
+// to be memory the kernel can dereference as an array of float2, and there are only
+// three ways to give it that:
+//
+//   * pass it inside RenderRequest and take its address in the kernel -- which
+//     materialises a per-thread copy of all 264 bytes in local memory, on every
+//     thread of every launch;
+//   * a __constant__ array -- which is per-module state, so two frames in flight
+//     under multi-frame rendering would overwrite each other's shear profile;
+//   * a device buffer, which is this.
+//
+// The upload is 264 bytes against a path trace, and the allocation happens once per
+// thread because DeviceScratch is grow-only.
+thread_local DeviceScratch g_drift;
+
 } // namespace
+
+// ---------------------------------------------------------------------------
+// The seam Shading.h declares
+// ---------------------------------------------------------------------------
+
+// ONE RAY THROUGH THE SLANG KERNEL. Four lines, and three of them are marshalling.
+//
+// `__host__ __device__` through MT_DEVICE, because renderPixel is compiled for both
+// and this has to follow it. The host arm is never called on this path -- CpuRender
+// has its own definition over the C++ backend -- but nvcc still needs it to exist
+// for the host compilation of Shading.h.
+MT_RENDER Vec3 mistytuneTrace(const RenderRequest& req, Vec3 ro, Vec3 rd,
+                              unsigned int seed) {
+    // The backend's vector constructors, handed to the shared marshalling in
+    // SlangBridge.h. This is the entire difference between the two backends.
+    struct CudaVectors {
+        static __host__ __device__ float2 v2(float x, float y) { return make_float2(x, y); }
+        static __host__ __device__ float3 v3(float x, float y, float z) {
+            return make_float3(x, y, z);
+        }
+        static __host__ __device__ int3 i3(int x, int y, int z) { return make_int3(x, y, z); }
+    };
+
+    Scene_0      scene{};
+    PhaseInput_0 phase{};
+    fillSlangScene<CudaVectors>(req, scene, phase);
+
+    // THE MAJORANT GRID IS OFF, so gridBound() returns the medium's own majorant
+    // without ever indexing this -- see SlangBridge.h for the measurement behind
+    // that. It is still given a valid empty descriptor rather than left as stack
+    // rubbish, because "never read" is a property of today's code.
+    StructuredBuffer<float> bounds;
+    bounds.data  = nullptr;
+    bounds.count = 0;
+
+    StructuredBuffer<float2> drift;
+    drift.data  = static_cast<float2*>(const_cast<void*>(req.driftBuffer));
+    drift.count = static_cast<size_t>(cloud::kDriftKnots);
+
+    const float3 radiance = renderSample_0(&scene, &phase, bounds, drift,
+                                           make_float3(ro.x, ro.y, ro.z),
+                                           make_float3(rd.x, rd.y, rd.z),
+                                           seed);
+
+    return vec3(radiance.x, radiance.y, radiance.z);
+}
 
 // The kernel. ONE PIXEL PER THREAD, with the bounds check that every AE GPU
 // kernel needs: the grid is rounded up to whole blocks, so the last block runs
@@ -199,6 +286,32 @@ bool renderCuda(const RenderRequest& req) {
     if (!cudaAvailable()) return false;
     if (!req.dest.data || req.dest.widthPx <= 0 || req.dest.heightPx <= 0) return false;
 
+    // ---------------------------------------------------------------------
+    // The derived half of the request, and the one buffer it needs on the device
+    // ---------------------------------------------------------------------
+    //
+    // DONE HERE RATHER THAN ASKED OF THE CALLER. Three call sites today -- the
+    // effect, the CLI and the golden tests -- and the failure mode of a caller that
+    // forgets is a majorant of zero, which renders a clear sky rather than an error.
+    //
+    // A LOCAL COPY, because the caller's struct is const and this fills in five
+    // fields and a pointer. renderCudaToHost calls straight through to here, so the
+    // derivation happens exactly once per launch either way.
+    RenderRequest work = req;
+    deriveRenderInputs(work);
+
+    void* driftDev = g_drift.reserve(sizeof(work.drift.xz));
+    if (!driftDev) return false;   // reserve() has already set the error
+
+    const cudaError_t driftErr = cudaMemcpy(driftDev, work.drift.xz,
+                                            sizeof(work.drift.xz),
+                                            cudaMemcpyHostToDevice);
+    if (driftErr != cudaSuccess) {
+        setError("drift table upload", driftErr);
+        return false;
+    }
+    work.driftBuffer = driftDev;
+
     const dim3 block(kBlockX, kBlockY, 1);
     const dim3 grid(static_cast<unsigned>(divideRoundUp(req.dest.widthPx,  kBlockX)),
                     static_cast<unsigned>(divideRoundUp(req.dest.heightPx, kBlockY)),
@@ -210,7 +323,7 @@ bool renderCuda(const RenderRequest& req) {
     // which is inside the 4 KB constant-bank limit for kernel parameters -- so it
     // needs no device allocation, no copy, and no lifetime to manage. That is much
     // of the reason RenderRequest is built the way it is.
-    mistytuneKernel<<<grid, block>>>(req);
+    mistytuneKernel<<<grid, block>>>(work);   // the derived copy, not the caller's
 
     // PEEK, NOT GET: cudaGetLastError CLEARS the error, and the caller is about to
     // ask for it. This checks that the launch was accepted -- an invalid
