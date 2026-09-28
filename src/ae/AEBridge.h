@@ -32,6 +32,7 @@
 
 #include "CameraConvert.h"
 #include "CloudParams.h"
+#include "OutputConvert.h"
 #include "RenderRequest.h"
 
 #include <cmath>
@@ -145,50 +146,63 @@ inline kernel::Surface toSurface(PF_EffectWorld* world, PF_PixelFormat format) {
     return s;
 }
 
-// ---------------------------------------------------------------------------
-// The output transfer curve
-// ---------------------------------------------------------------------------
+// An integer world as an engine ImageView, for the output conversion.
+//
+// THE CONVERSION ITSELF IS IN src/engine/OutputConvert.h AND THIS IS THE WHOLE OF THE
+// AE-SPECIFIC PART OF IT. That split is why the 0..32768 rule, the sRGB curve and the
+// "alpha never gets the curve" rule are all unit-tested now rather than being three
+// things that could only be checked by rendering in the host and looking.
+//
+// ONLY THE INTEGER FORMATS REACH THIS. 32 bpc float is what the renderer already works
+// in, so the effect writes straight into AE's buffer through toSurface() above and
+// builds no staging buffer at all.
+inline ImageView toImageView(PF_EffectWorld* world, PF_PixelFormat format) {
+    ImageView v;
+    v.data     = world->data;
+    v.width    = world->width;
+    v.height   = world->height;
+    v.rowBytes = world->rowbytes;
 
-// ===========================================================================
-// AE'S INTEGER WORLDS ARE DISPLAY-REFERRED. ITS FLOAT WORLD IS LINEAR.
-//
-// This is the single most important host convention for anything that RENDERS
-// light rather than filtering someone else's pixels, and getting it wrong does not
-// look like a colour-management mistake -- it looks like the renderer is broken.
-//
-//   PF_PixelFormat_ARGB128 (32 bpc float)   linear. Write radiance straight in.
-//   PF_PixelFormat_ARGB64  (16 bpc, 0..32768)
-//   PF_PixelFormat_ARGB32  (8 bpc, 0..255)  the project working space, which is
-//                                           display-encoded -- sRGB by default.
-//
-// WHAT IT LOOKS LIKE WHEN YOU SKIP IT. Multiplying linear radiance by 255 and
-// storing it applies no curve at all, so everything below mid-grey collapses
-// towards black and only values above 1.0 survive. Measured on the Phase 1 sky: the
-// ground landed at 18/255 where it should be 74, and the zenith at 106 where it
-// should be 169. The one thing still clearly visible was the sun disc, which is
-// brighter than 1.0 and clips to white.
-//
-// The symptom is therefore "the effect renders black with a bit of sun in it", and
-// nothing about that points at a missing transfer curve.
-//
-// SRGB RATHER THAN THE PROJECT'S ACTUAL WORKING SPACE, and that is a stopgap with a
-// date on it. AE can be told to work in Rec.709, Rec.2020 or a linear space, and the
-// honest answer reads the project's colour settings and uses them. sRGB is the
-// default working space and therefore right far more often than linear is, which is
-// what makes it worth doing now rather than at the same time as the real thing.
-// ===========================================================================
-
-// The sRGB opto-electronic transfer function (IEC 61966-2-1).
-//
-// THE LINEAR SEGMENT NEAR ZERO IS NOT OPTIONAL. A pure 1/2.4 power curve has an
-// infinite slope at the origin, which turns sensor and sampling noise in the
-// darkest values into visible speckle -- and a path tracer's darkest values are
-// exactly where its noise lives.
-inline float encodeSrgb(float linear) {
-    if (linear <= 0.0f)        return 0.0f;
-    if (linear <= 0.0031308f)  return linear * 12.92f;
-    return 1.055f * std::pow(linear, 1.0f / 2.4f) - 0.055f;
+    // =======================================================================
+    // THE FALLBACK IS THE NARROWEST FORMAT, NOT THE WIDEST, AND THAT IS THE WHOLE
+    // DIFFERENCE BETWEEN A WRONG PICTURE AND CORRUPTING THE HOST.
+    //
+    // This function is only ever reached on the NON-DIRECT path, which is 8 or 16 bpc --
+    // 32 bpc float returns before it, because the renderer already works in that format
+    // and writes into AE's buffer through toSurface(). So an unrecognised format here is
+    // something narrow, and guessing wide is not a conservative guess:
+    //
+    //   ARGB32F writes 16 bytes per pixel. An 8 bpc pixel is 4.
+    //
+    // That is a four-times overrun of every row of a world AE allocated and still owns,
+    // across the whole frame. It would not present as a wrong picture; it would present
+    // as After Effects crashing somewhere else entirely, later, in a way no part of this
+    // plugin appears in.
+    //
+    // ARGB8 under-writes instead. Four bytes into an eight-byte pixel is a visibly wrong
+    // picture in a buffer we were given, which is recoverable and diagnosable -- and the
+    // loop this replaced fell back exactly that way, with `sixteen ? ... : 8-bit`.
+    //
+    // A FIRST VERSION OF THIS FUNCTION DEFAULTED TO ARGB32F. It was caught by reading an
+    // AE log to check a different claim -- the log reported format 842229089, which is
+    // the fourcc 'ae32', PF_PixelFormat_ARGB128 -- and noticing that the value reaching
+    // the switch was one the switch had no case for and would have mapped to sixteen
+    // bytes had it ever arrived here.
+    // =======================================================================
+    switch (format) {
+        case PF_PixelFormat_ARGB64: v.format = PixelFormat::ARGB16; break;
+        case PF_PixelFormat_ARGB32: v.format = PixelFormat::ARGB8;  break;
+        default:                    v.format = PixelFormat::ARGB8;  break;
+    }
+    return v;
 }
+
+
+// THE OUTPUT TRANSFER CURVE AND THE QUANTISER HAVE MOVED to
+// src/engine/OutputConvert.h, which this file includes. They were here, and they
+// were the last part of the render path that could only be checked by rendering in
+// After Effects and looking at the result -- three quiet host conventions with no
+// test between them. Nothing in either is AE-specific, so nothing kept them here.
 
 // ---------------------------------------------------------------------------
 // The camera
@@ -209,9 +223,16 @@ inline float encodeSrgb(float linear) {
 // that distinction into the view hash, so a comp that later gains a camera
 // re-renders even if the default matrix happened to match.
 //
-// PHASE 1 STUB. The real implementation lands in Phase 2 alongside progressive
-// accumulation; it is stubbed rather than omitted so that the flag, the parameter
-// and the hash are all already in place and the change is one function body.
+// NOT A STUB ANY MORE, AND THIS COMMENT SAID IT WAS FOR ONE ENTRY LONGER THAN IT WAS
+// TRUE. It calls AEGP_GetEffectCameraMatrix below and converts through
+// src/engine/CameraConvert.h; the AE 2026 host log reports `vertical fov 17.3 deg`,
+// which checks out against a 1080 plane at distance 3555.
+//
+// WHAT IS STILL ABSENT IS THE POSITION, which is a different thing and is easy to read
+// this as covering. CameraConvert zeroes the translation deliberately: AE's world is
+// comp pixels against an arbitrary origin and this one is metres, so flying the camera
+// needs a real pixels-per-metre parameter. Phase 3. The ray origin is observerAltitude
+// unconditionally, which TheRayStartsAtTheObserverNotAtTheMatrix pins.
 inline void fillCameraFromComp(PF_InData* in_data, cloud::ViewParams& view) {
     view.cameraFromComp = false;
 

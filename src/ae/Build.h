@@ -43,6 +43,9 @@
 // 0.1 -- Phase 1. The scaffolding is Mistytune's, the parameter model is real,
 // and the renderer is a placeholder analytic sky proving the plumbing. Nothing
 // has been handed to anyone, so the parameter layout is still free to change.
+// MINOR STAYS AT 3: out_flags, out_flags2 and the parameter list are untouched. The
+// output conversion moved into src/engine/OutputConvert.h and toImageView's fallback
+// narrowed, both of which are internal to the render path.
 #define PLUGIN_MAJOR 0
 #define PLUGIN_MINOR 3
-#define PLUGIN_BUILD 4
+#define PLUGIN_BUILD 6

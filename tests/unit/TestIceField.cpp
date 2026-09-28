@@ -267,7 +267,7 @@ PL_TEST(MajorantIsAlwaysPositive) {
     PL_CHECK(std::isfinite(iceMajorant(ice)));
 }
 
-// The bound tracks the factors it is built from, which is what makes it a bound on
+/// The bound tracks the factors it is built from, which is what makes it a bound on
 // THIS field rather than a constant that happens to be large enough today.
 PL_TEST(MajorantTracksItsFactors) {
     const IceParams base;
@@ -287,12 +287,231 @@ PL_TEST(MajorantTracksItsFactors) {
     detailed.detailAmount = base.detailAmount * Real(2);
     PL_CHECK(iceMajorant(detailed) > b);
 
-    // A longer streak spreads the same optical depth over more metres, so the density
-    // per metre falls. That is what makes `opticalDepth` mean optical depth.
+    // ---------------------------------------------------------------------
+    // A LONGER STREAK IS NO LONGER EXACTLY HALF, AND THE REASON IS THE POINT.
+    //
+    // Spreading the same optical depth over twice the metres halves the density per
+    // metre -- that is what makes `opticalDepth` mean optical depth, and it used to be
+    // the whole of this relation.
+    //
+    // depthFactorBound() now moves with the length as well. The head opens over
+    // kHeadFraction of the streak, so doubling the streak doubles the depth at which
+    // it finishes opening -- and by then sublimation has eaten more of the crystal. So
+    // the depth factor FALLS, and the majorant falls by more than half.
+    //
+    // Asserted through depthFactorBound() rather than against a blessed number,
+    // because the relation is the claim and the number is a consequence of it.
+    // ---------------------------------------------------------------------
     IceParams longer = base;
     longer.streakLength = base.streakLength * Real(2);
-    PL_CHECK_NEAR(iceMajorant(longer), b * 0.5, b * 1e-4);
+
+    const Real depthRatio = depthFactorBound(longer) / depthFactorBound(base);
+    PL_CHECK(depthRatio < Real(1));
+    PL_CHECK_NEAR(iceMajorant(longer), b * 0.5 * depthRatio, b * 1e-4);
 }
+
+// ---------------------------------------------------------------------------
+// The cell-overlap bound: four blobs, not nine
+// ---------------------------------------------------------------------------
+
+// NINE IS SOUND AND 2.76x TOO BIG, and the cost is paid in tracking steps -- every one
+// of which is a four-octave fbm. The header derives four; this checks the arithmetic
+// landed between the two numbers that bracket it.
+//
+// THE LOWER BRACKET IS NOT COSMETIC. A single blob at its own centre is exactly one, so
+// a bound below one would be below the field, and that is the failure that renders a
+// thinner cloud rather than an error.
+PL_TEST(TheCellOverlapBoundIsFourBlobsNotNine) {
+    const Real bound = cellOverlapBound();
+
+    PL_CHECK(bound >= Real(1));
+    PL_CHECK(bound < Real(9));
+
+    // Four blobs is the ceiling of the count argument, so the bound cannot exceed it
+    // however the distances fall out.
+    PL_CHECK(bound <= Real(4));
+
+    // And it is not so tight that it has stopped being the four-slot bound: two blobs
+    // can reach 1.83 between them, so anything at or below that would mean the second
+    // axis had been lost somewhere.
+    PL_CHECK(bound > Real(2));
+}
+
+// THE WORST CASE, COMPUTED HERE INSTEAD OF THERE.
+//
+// A point on a slot corner has four cells able to sit at (0.1, 0.1) from it in grid
+// units -- the closest the jitter inset allows from each of the four slots that share
+// the corner. That configuration is what the scan is looking for, so building it
+// independently and checking the bound covers it is the one test that would catch a
+// scan that searched the wrong square.
+//
+// THE SMOOTHSTEP IS REPLICATED RATHER THAN CALLED, deliberately: a helper shared with
+// the implementation would agree with it by construction and prove nothing.
+PL_TEST(TheCellOverlapBoundCoversTheWorstCornerItself) {
+    const Real inset = (Real(1) - kCellJitter) / Real(2);
+
+    // Distance in CELL-SIZES from the corner to each of the four nearest cells.
+    const Real d = std::sqrt(inset * inset + inset * inset) * kCellSpacing;
+
+    // smoothstep(kBlobFar, kBlobNear, d), written out.
+    const Real t     = (d - kBlobFar) / (kBlobNear - kBlobFar);
+    const Real clamp = t < Real(0) ? Real(0) : (t > Real(1) ? Real(1) : t);
+    const Real blob  = clamp * clamp * (Real(3) - Real(2) * clamp);
+
+    const Real corner = Real(4) * blob;
+
+    PL_CHECK(corner > Real(3));                 // it really is the dense configuration
+    PL_CHECK(cellOverlapBound() >= corner);     // ...and the bound covers it
+
+    // The scan should land ON it rather than merely above it -- the Lipschitz slack is
+    // 0.0054 at the shipping resolution, so anything looser than a percent would mean
+    // the search had missed the maximum it is supposed to find.
+    PL_CHECK_NEAR(cellOverlapBound(), corner, corner * 0.01);
+}
+
+// WHAT SEPARATES A CERTIFIED SCAN FROM A SAMPLE: refining it may only LOWER the answer.
+//
+// The scan plus its Lipschitz slack is an upper bound on the true maximum, so a finer
+// scan -- which is a better estimate of that same maximum -- cannot exceed the coarser
+// one's certified value. If it did, the slack would be wrong, and a slack that is wrong
+// is a majorant below the field.
+PL_TEST(RefiningTheCellScanDoesNotRaiseTheBound) {
+    const Real shipping = cellOverlapBound();
+
+    PL_CHECK(cellOverlapBound(1024) <= shipping);
+    PL_CHECK(cellOverlapBound(4096) <= shipping);
+
+    // And a far coarser scan is still a bound, because the slack grows as the scan
+    // thins. THIS IS THE DIRECTION THAT MATTERS: a coarse scan must over-report, never
+    // under-report.
+    PL_CHECK(cellOverlapBound(8) >= cellOverlapBound(4096));
+}
+
+// A DEGENERATE RESOLUTION FALLS BACK TO SOUND RATHER THAN TO CLEVER. Zero steps is not
+// a scan, so there is nothing to certify and the trivial nine-slot bound is the answer.
+PL_TEST(AnEmptyCellScanFallsBackToTheTrivialBound) {
+    PL_CHECK_EQ(cellOverlapBound(0) == Real(9), 1);
+    PL_CHECK_EQ(cellOverlapBound(-1) == Real(9), 1);
+}
+
+// ---------------------------------------------------------------------------
+// The depth factors
+// ---------------------------------------------------------------------------
+
+// THREE FACTORS EACH BOUNDED BY ONE, WHOSE PRODUCT IS NOWHERE NEAR ONE.
+//
+// `head` rises from zero at the generating level and `sublimation` falls from one
+// there, so they are never both large. Bounding each separately is what the old
+// majorant did, and the slack is what this measures.
+PL_TEST(TheDepthFactorsCannotAllBeOne) {
+    const IceParams ice;
+    const Real f = depthFactorBound(ice);
+
+    PL_CHECK(f > Real(0));
+    PL_CHECK(f < Real(1));
+
+    // On the defaults the head finishes opening at 8% of 2600 m, by which point
+    // sublimation at 0.55 per km has taken about 11%. So the peak is near 0.89 -- close
+    // enough to one that it is worth stating the bound is real and not a rounding.
+    PL_CHECK(f > Real(0.8));
+    PL_CHECK(f < Real(0.95));
+}
+
+// The same certified-refinement property as the cell scan, and for the same reason: a
+// partition of monotone factors over-reports, so refining it may only lower the answer.
+PL_TEST(RefiningTheDepthScanDoesNotRaiseIt) {
+    const IceParams ice;
+
+    PL_CHECK(depthFactorBound(ice, 4096) <= depthFactorBound(ice));
+    PL_CHECK(depthFactorBound(ice, 4) >= depthFactorBound(ice, 4096));
+}
+
+// A STRONGER SUBLIMATION RATE LOWERS THE BOUND, because the head has to finish opening
+// before the product can be large, and by then more of the crystal is gone.
+PL_TEST(SublimationLowersTheDepthFactor) {
+    IceParams dry;
+    dry.sublimationRate = Real(3);
+
+    IceParams wet;
+    wet.sublimationRate = Real(0.1);
+
+    PL_CHECK(depthFactorBound(dry) < depthFactorBound(wet));
+    PL_CHECK(depthFactorBound(wet) < Real(1));
+}
+
+// ===========================================================================
+// THE HOLE THIS CLOSED, AND IT WAS OPEN.
+//
+// The old bound omitted sublimation entirely, on the argument that exp of a negative is
+// at most one. That argument holds only while the RATE is positive -- and AE lets an
+// expression drive any slider past its range, which the tests above already rely on
+// being true for the other parameters.
+//
+// At a negative rate exp(-rate * depth / 1000) GROWS with depth: 4.2x at the default
+// streak length and a rate of -1. So the majorant was not merely loose there, it was
+// BELOW the field it was supposed to bound, and the render would have been quietly thin
+// with nothing saying so.
+//
+// The fix is to evaluate the factor rather than assert it, and this is what pins it.
+// ===========================================================================
+PL_TEST(ANegativeSublimationRateStillBounds) {
+    IceParams ice;
+    ice.sublimationRate = Real(-1);
+
+    const Real f = depthFactorBound(ice);
+
+    // It must now exceed one, which the old "each factor is at most one" never allowed.
+    PL_CHECK(f > Real(1));
+
+    // AND IT MUST COVER THE DEEPEST POINT THE PRODUCT IS STILL ALIVE AT, computed here
+    // independently. The tail closes at the bottom of the streak, so take the depth
+    // where it is still fully open -- kTailFraction of the way down -- where the head
+    // has long since opened and sublimation has been growing all the way.
+    const Real depth = kTailFraction * ice.streakLength;
+    const Real truth = std::exp(-ice.sublimationRate * depth / Real(1000));
+
+    PL_CHECK(f >= truth);
+
+    // ...and the majorant built on it stays finite and positive, because a bound that
+    // is right and infinite is no more usable than one that is wrong.
+    PL_CHECK(iceMajorant(ice) > Real(0));
+    PL_CHECK(std::isfinite(iceMajorant(ice)));
+}
+
+// ---------------------------------------------------------------------------
+// What the two bounds bought
+// ---------------------------------------------------------------------------
+
+// THE WHOLE POINT OF THE CHANGE, ASSERTED RATHER THAN RECORDED IN A COMMENT.
+//
+// The old majorant was nine blobs times the detail bound times the optical depth over
+// the streak length, with the three depth factors bounded by one each. Both survivors
+// of that formula are still here, so the old number can be rebuilt exactly and the
+// ratio checked.
+//
+// EXPECTED COST IN STEPS IS majorant * PATH LENGTH, so this ratio is the ratio of
+// density evaluations, and a density evaluation is a four-octave fbm. It is not a
+// cosmetic tightening.
+PL_TEST(TheTightenedMajorantIsWellBelowTheOldOne) {
+    const IceParams ice;
+
+    const Real detailMax = Real(1) + Real(1.8) * ice.detailAmount * kFbmBound;
+    const Real oldBound  = Real(9) * ice.cellStrength * detailMax
+                         * ice.opticalDepth / ice.streakLength;
+
+    const Real now = iceMajorant(ice);
+
+    PL_CHECK(now < oldBound);
+
+    // 2.76x from the cell count and about 1.12x from the depth factors. Bracketed
+    // rather than pinned to a digit, because the exact value follows from constants
+    // this test does not own -- but a cut far outside this range means one of the two
+    // bounds stopped contributing.
+    const Real gain = oldBound / now;
+    PL_CHECK(gain > Real(2.5));
+    PL_CHECK(gain < Real(3.5));
+}
+
 
 // ---------------------------------------------------------------------------
 // The bulk drift

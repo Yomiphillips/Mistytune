@@ -54,6 +54,11 @@ void printUsage() {
         "  --sun-az <deg>   sun azimuth (default 135)\n"
         "  --turbidity <t>  Linke turbidity (default 2.2)\n"
         "  --ev <stops>     exposure (default 0)\n"
+        "  --linear         write LINEAR radiance instead of display-referred sRGB.\n"
+        "                   The default encodes, because AE with Working Space None\n"
+        "                   applies no transform of its own and proto/index.html --\n"
+        "                   which passed the Phase 0 look verdict -- encodes too.\n"
+        "                   Use this for a colour-managed project or an HDR bake.\n"
         "  --agx            enable the AgX tonemap (default off)\n"
         "  --pitch <deg>    camera pitch, + is up (default 0, looking at the horizon;\n"
         "                   the effect's own default camera is +12)\n"
@@ -66,6 +71,13 @@ void printUsage() {
         "                   the FRAME; the buffer becomes w x h at origin x,y.\n"
         "  --compare-at <x> <y>  compare the render against the region of <ref>\n"
         "                   at x,y instead of against the whole file.\n"
+        "  --majorant <v>   pin the density majorant instead of deriving it from the\n"
+        "                   field (0 = derive, the default). Null-collision tracking\n"
+        "                   is unbiased for ANY value at or above the true peak, so\n"
+        "                   a loose one must converge to the same image -- which is\n"
+        "                   what makes this the check on a tightened bound rather\n"
+        "                   than a profiling knob. BELOW the peak it renders a\n"
+        "                   thinner cloud and says nothing.\n"
         "  --sample-chunk <n>   accumulate the frame in chunks of n samples\n"
         "                   (0 = all in one). Changes the image only by the\n"
         "                   rounding of a regrouped sum.\n"
@@ -273,11 +285,13 @@ int main(int argc, char** argv) {
         else if (argIs(a, "--turbidity") && hasNext) req.field.atmosphere.turbidity    = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--ev") && hasNext)        req.view.exposureEV = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--agx"))                  req.view.agxTonemap = true;
+        else if (argIs(a, "--linear"))               req.view.encodeSrgb = false;
         else if (argIs(a, "--pitch") && hasNext)     pitchDegrees = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--seed") && hasNext)      req.field.seed = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 0));
         else if (argIs(a, "--cpu"))                  forceCpu = true;
         else if (argIs(a, "--require-gpu"))          requireGpu = true;
         else if (argIs(a, "--gpu-band-rows") && hasNext) gpuBandRows = std::atoi(argv[++i]);
+        else if (argIs(a, "--majorant") && hasNext)      req.quality.densityMajorant = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--sample-chunk") && hasNext)  sampleChunk = std::atoi(argv[++i]);
         else if (argIs(a, "--window") && i + 4 < argc) {
             windowX = std::atoi(argv[++i]);

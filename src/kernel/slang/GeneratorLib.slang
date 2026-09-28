@@ -103,6 +103,30 @@ public struct GeneratorInput
 public static const float kCellSpacing = 2.2f;
 
 // ---------------------------------------------------------------------------
+// THE JITTER WIDTH AND THE BLOB'S TWO EDGES, NAMED BECAUSE A THEOREM DEPENDS ON THEM.
+//
+// src/engine/IceField.h derives cellOverlapBound() from these three numbers and
+// kCellSpacing: at most four of the nine neighbouring slots can reach any point, and
+// those four cannot all reach their ceiling. It gets 3.26 where the trivial count gets
+// 9, and that is a 2.76x cut in tracking steps.
+//
+// IT HAS TO MIRROR THEM, because host C++ cannot include a .slang file. They were bare
+// literals here, which made the mirror a copy of a number nobody had named -- and a
+// mirrored constant that drifts does not fail to compile, it lowers a majorant below
+// the field and renders a cloud that is quietly too thin.
+//
+// SO slang.generator READS THESE BACK AND COMPARES THEM AGAINST THE HOST'S, EXACTLY.
+// Naming them is what makes that possible. MEASURED while writing that check: moving
+// the host's kCellSpacing to 2.6 -- an 18% error, far larger than a typo -- leaves the
+// bound at 2.96, which still covers everything a dense sweep of the field actually
+// finds, so sampling alone does not catch it. See cellGeometry below.
+// ---------------------------------------------------------------------------
+public static const float kCellJitter = 0.8f;
+public static const float kBlobFar    = 1.0f;   // smoothstep's far edge -- zero here
+public static const float kBlobNear   = 0.05f;  // ...and its near edge -- one here
+
+
+// ---------------------------------------------------------------------------
 // Integer hashes
 // ---------------------------------------------------------------------------
 
@@ -209,12 +233,12 @@ public float cellField(GeneratorInput g, float2 q)
             if (hash22(o, 0x9e3779b9u).x > g.cellDensity) continue;
 
             float2 jitter = hash22(o, 0u) - 0.5f;
-            float2 c = float2(o) + 0.5f + jitter * 0.8f;
+            float2 c = float2(o) + 0.5f + jitter * kCellJitter;
 
             // Measured in cell-sizes rather than grid units, so cellSize means the
             // cell and not the spacing.
             float d = length(gq - c) * kCellSpacing;
-            acc += smoothstep(1.0f, 0.05f, d);
+            acc += smoothstep(kBlobFar, kBlobNear, d);
         }
     }
 
@@ -346,14 +370,14 @@ public float cellFieldBound(GeneratorInput g, float2 q0, float2 q1)
         if (hash22(o, 0x9e3779b9u).x > g.cellDensity) continue;
 
         float2 jitter = hash22(o, 0u) - 0.5f;
-        float2 c = float2(o) + 0.5f + jitter * 0.8f;
+        float2 c = float2(o) + 0.5f + jitter * kCellJitter;
 
         // Per-axis distance from the box to the centre; zero on an axis where the
         // centre lies inside the box's span.
         float2 d = max(max(a - c, c - b), float2(0.0f, 0.0f));
         float dist = length(d) * kCellSpacing;
 
-        acc += smoothstep(1.0f, 0.05f, dist);
+        acc += smoothstep(kBlobFar, kBlobNear, dist);
     }
 
     return acc * g.cellStrength;

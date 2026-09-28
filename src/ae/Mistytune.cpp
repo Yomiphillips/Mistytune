@@ -259,6 +259,22 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
     data->view.exposureEV = static_cast<float>(values.v[kMistytuneExposureEV]);
     data->view.agxTonemap = values.v[kMistytuneAgxTonemap] > 0.5;
 
+    // ---------------------------------------------------------------------
+    // SET EXPLICITLY, THOUGH IT MATCHES THE DEFAULT, BECAUSE IT IS A DECISION.
+    //
+    // MEASURED in AE 2026 with Working Color Space None and linearisation off -- which
+    // is AE's default: the host applies NO transform to the buffer on the way to the
+    // screen, at any bit depth. So a generator has to encode its own output, and
+    // proto/index.html, which passed the Phase 0 look verdict, does exactly that.
+    //
+    // THIS IS WHERE THE PROJECT'S COLOUR SETTINGS BELONG when they are read. The SDK
+    // has AEGP_IsOCIOColorManagementUsed and AEGP_DoesViewHaveColorSpaceXform, and a
+    // colour-managed project wants this FALSE -- AE linearises the working space and
+    // applies the display transform itself, so encoding here would double-encode. Until
+    // that is wired up and verified in the host, the default configuration wins.
+    // ---------------------------------------------------------------------
+    data->view.encodeSrgb = true;
+
     // THE CAMERA'S FRAME IS THE LAYER, NOT THE REQUESTED RECT -- IN DOWNSAMPLED PIXELS.
     //
     // The layer is the whole picture the lens sees. THE REQUESTED RECT IS NOT THAT: AE
@@ -767,71 +783,27 @@ PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
 
     if (direct) return PF_Err_NONE;
 
-    // AE'S 16-BIT CHANNELS RUN 0..32768, NOT 0..65535. Using 65535 makes 16 bpc
-    // renders come out roughly half as bright -- subtle enough to survive a casual
-    // look, which is what makes it a classic first-plugin bug.
-    const bool sixteen = (format == PF_PixelFormat_ARGB64);
-    const float scale  = sixteen ? 32768.0f : 255.0f;
-    const float maxVal = scale;
-
-    for (A_long y = 0; y < output->height; ++y) {
-        const float* src = staging.data() + static_cast<size_t>(y) * output->width * 4;
-        char* dstRow = reinterpret_cast<char*>(output->data) +
-                       static_cast<ptrdiff_t>(y) * output->rowbytes;
-
-        for (A_long x = 0; x < output->width; ++x) {
-            // CLAMPED FOR THE INTEGER FORMATS, and only for them. A radiance above 1
-            // is legitimate in 32 bpc float -- it is the sun -- and clamping there
-            // would throw away the headroom that path exists to carry. Here there is
-            // nowhere to put it.
-            float a = src[x * 4 + 0];
-            float r = src[x * 4 + 1];
-            float g = src[x * 4 + 2];
-            float b = src[x * 4 + 3];
-
-            a = a < 0.0f ? 0.0f : (a > 1.0f ? 1.0f : a);
-            r = r < 0.0f ? 0.0f : (r > 1.0f ? 1.0f : r);
-            g = g < 0.0f ? 0.0f : (g > 1.0f ? 1.0f : g);
-            b = b < 0.0f ? 0.0f : (b > 1.0f ? 1.0f : b);
-
-            // ENCODED, BECAUSE THESE TWO FORMATS ARE DISPLAY-REFERRED. See the long
-            // note on encodeSrgb in AEBridge.h -- skipping this is what made the
-            // render read as black with a sun in it.
-            //
-            // COLOUR ONLY. ALPHA NEVER GETS A TRANSFER CURVE: it is coverage, not
-            // light, and encoding it makes every soft edge composite too opaque.
-            // The sky is opaque so it makes no difference to THIS picture, which is
-            // exactly why it would survive review and break the first thing that
-            // has a real alpha.
-            r = encodeSrgb(r);
-            g = encodeSrgb(g);
-            b = encodeSrgb(b);
-
-            // BUFFERS ARE PREMULTIPLIED. At alpha 1 -- which an opaque sky always has
-            // -- premultiplied and straight are the same numbers, so this is correct
-            // rather than merely convenient. A generator with genuine transparency
-            // would have to multiply, and colour above its own alpha composites as an
-            // over-bright halo on every soft edge.
-            const float av = a * scale;
-            const float rv = r * scale;
-            const float gv = g * scale;
-            const float bv = b * scale;
-
-            if (sixteen) {
-                A_u_short* p = reinterpret_cast<A_u_short*>(dstRow) + x * 4;
-                p[0] = static_cast<A_u_short>(av > maxVal ? maxVal : av + 0.5f);
-                p[1] = static_cast<A_u_short>(rv > maxVal ? maxVal : rv + 0.5f);
-                p[2] = static_cast<A_u_short>(gv > maxVal ? maxVal : gv + 0.5f);
-                p[3] = static_cast<A_u_short>(bv > maxVal ? maxVal : bv + 0.5f);
-            } else {
-                A_u_char* p = reinterpret_cast<A_u_char*>(dstRow) + x * 4;
-                p[0] = static_cast<A_u_char>(av > maxVal ? maxVal : av + 0.5f);
-                p[1] = static_cast<A_u_char>(rv > maxVal ? maxVal : rv + 0.5f);
-                p[2] = static_cast<A_u_char>(gv > maxVal ? maxVal : gv + 0.5f);
-                p[3] = static_cast<A_u_char>(bv > maxVal ? maxVal : bv + 0.5f);
-            }
-        }
+    // ONE CALL, AND THE MATHS IS IN src/engine/OutputConvert.h.
+    //
+    // THIS LOOP USED TO BE HERE, about sixty lines of it: the 0..32768 scale, the sRGB
+    // curve, the deliberate omission of that curve on alpha, and the integer clamp. All
+    // four are host conventions that fail quietly, and while they lived in this function
+    // the only instrument that had ever been pointed at them was a person rendering in
+    // After Effects and looking. PLAN.md's Phase 1 exit asks for all three bit depths to
+    // be CORRECT, which is not something looking establishes.
+    //
+    // None of it needs an AE header, so none of it stays here. tests/unit/ now exercises
+    // every format, the alpha rule and the stride in microseconds without the SDK.
+    // AND IF IT IS NEITHER OF THE TWO INTEGER FORMATS, SAY SO. toImageView falls back to
+    // the narrowest format, which keeps the write inside the buffer at the cost of a wrong
+    // picture -- and a wrong picture with nothing in the log is the expensive kind.
+    if (format != PF_PixelFormat_ARGB64 && format != PF_PixelFormat_ARGB32) {
+        diagLog("  WARNING: format %d is not one this path knows; converting it as 8 bpc. "
+                "The picture will be wrong. See toImageView in AEBridge.h.",
+                static_cast<int>(format));
     }
+
+    cloud::convertStagingFrame(staging.data(), toImageView(output, format));
 
     return PF_Err_NONE;
 }

@@ -39,6 +39,13 @@ add_executable(plugin_tests
     # caught that, and what it does guard instead.
     unit/TestCamera.cpp
 
+    # The output conversion: 8, 16 and 32 bpc, the sRGB curve and the alpha rule.
+    # PLAN.md's Phase 1 exit asks for all three bit depths to be CORRECT, and until
+    # this file existed the only instrument pointed at them was a person rendering in
+    # After Effects. See the file's own header for why looking cannot settle any of the
+    # three things in it.
+    unit/TestOutputConvert.cpp
+
     unit/TestFramework.h
 )
 

@@ -33,6 +33,19 @@ static_assert(sizeof(FieldParams) == 172,
 // cannot quietly fold camera state into the field. If someone moves a member
 // from ViewParams into FieldParams the assert above fires and this one is the
 // comment that explains why that might have been deliberate.
+// ===========================================================================
+// THIS ASSERT HAS A BLIND SPOT, AND IT IS WORTH NAMING BECAUSE THE PROJECT LEANS ON IT.
+//
+// MEASURED 2026-09-28: adding `bool encodeSrgb` to ViewParams, beside the existing
+// `bool agxTonemap`, did NOT change sizeof -- the new member landed in padding the
+// struct already carried, and the build stayed green. The field WAS hashed, in
+// FieldCache.cpp, but nothing here would have said so if it had not been.
+//
+// So a sizeof tripwire catches a field that changes the layout and misses one that fits
+// a hole. It is necessary and it is not sufficient, and the sufficient version needs
+// reflection this language does not have. The mitigation is to treat "I added a member
+// and the build stayed green" as meaning nothing, rather than as clearance.
+// ===========================================================================
 static_assert(sizeof(ViewParams) == 100,
               "ViewParams changed -- check nothing camera-side leaked into the "
               "field hash; see the note in Fingerprint.h");

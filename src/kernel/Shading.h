@@ -591,16 +591,47 @@ MT_DEVICE float agxChannel(float x) {
          - 0.00232f;
 }
 
+// The sRGB opto-electronic transfer function (IEC 61966-2-1).
+//
+// ===========================================================================
+// THE ONE COPY, AND IT IS IN THE KERNEL BECAUSE THAT IS WHERE THE OUTPUT TRANSFORM IS.
+//
+// It used to live in src/ae/AEBridge.h and then in src/engine/OutputConvert.h, applied
+// only on the 8 and 16 bpc paths -- which is what made a comp render differently at
+// different bit depths. It belongs with the exposure and the tonemap, because it is the
+// third stage of the same transform, and those are here.
+//
+// THE LINEAR SEGMENT NEAR ZERO IS NOT OPTIONAL. A pure 1/2.4 power curve has infinite
+// slope at the origin, which turns a path tracer's noise in the darkest values into
+// visible speckle -- and the darkest values are exactly where its noise lives.
+//
+// NOT CLAMPED ABOVE ONE, which is where this deliberately differs from
+// proto/index.html. The prototype clamps to 0..1 before encoding because a WebGL canvas
+// has nowhere to put more; a 32 bpc AE buffer does, and the sun is what is in it. The
+// curve extends above 1 continuously -- 4.0 encodes to 1.83 -- so the headroom survives,
+// compressed, and the integer quantiser clamps at its own end where it must.
+// ===========================================================================
+MT_DEVICE float encodeSrgbChannel(float linear) {
+    if (linear <= 0.0f)       return 0.0f;
+    if (linear <= 0.0031308f) return linear * 12.92f;
+    return 1.055f * powf(linear, 1.0f / 2.4f) - 0.055f;
+}
+
+MT_DEVICE Vec3 encodeSrgbVec(Vec3 c) {
+    return vec3(encodeSrgbChannel(c.x), encodeSrgbChannel(c.y), encodeSrgbChannel(c.z));
+}
+
 MT_DEVICE Vec3 applyOutputTransform(Vec3 radiance, const cloud::ViewParams& view) {
     // REAL EV, applied as a power of two, because that is what the unit means.
     const float gain = exp2f(view.exposureEV);
     Vec3 c = radiance * gain;
 
     if (!view.agxTonemap) {
-        // LINEAR FLOAT, UNCLAMPED, and that is the default on purpose. Values
-        // above 1.0 are the sun, and clamping them here would throw away the
-        // headroom the 32 bpc path exists to carry.
-        return c;
+        // NO TONEMAP: values above 1.0 are the sun and they stay above 1.0, because
+        // that is what "no tonemap" has to mean if the switch is worth anything. The
+        // transfer curve below is not a tonemap -- it is what makes a monitor show a
+        // linear value correctly, and skipping it renders near-black with a sun in it.
+        return view.encodeSrgb ? encodeSrgbVec(c) : c;
     }
 
     // AgX works in log2 over a fixed dynamic range before the curve.
@@ -614,7 +645,13 @@ MT_DEVICE Vec3 applyOutputTransform(Vec3 radiance, const cloud::ViewParams& view
         const float logv = clampf((log2f(v) - minEv) / span, 0.0f, 1.0f);
         ch[i] = agxChannel(logv);
     }
-    return vec3(ch[0], ch[1], ch[2]);
+
+    // AgX LANDS IN DISPLAY-REFERRED sRGB PRIMARIES, AND THE TRANSFER CURVE IS STILL
+    // OURS TO APPLY. proto/index.html says so in the same words at its own output, and
+    // it is the easy one to get wrong: AgX looks like a complete output transform and
+    // is only two thirds of one.
+    const Vec3 tonemapped = vec3(ch[0], ch[1], ch[2]);
+    return view.encodeSrgb ? encodeSrgbVec(tonemapped) : tonemapped;
 }
 
 // ---------------------------------------------------------------------------

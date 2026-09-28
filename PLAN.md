@@ -31,13 +31,51 @@ enough to keep beside the answer.
 
 Still open, and each needs an answer before the phase that consumes it:
 
-- **OIDN install bulk.** Apache-2.0, so licensing is fine. The weights are the
-  question. Measure the shipped size in Phase 2 before committing to bundling
-  them rather than fetching on first run.
-- **Whether Draft mode can be interactive at all** on the floor GPU. If it
-  cannot, the exploration loop — which the spec calls the product — needs a
-  different answer (a lower-resolution proxy field, fewer bounces, or a cached
-  light field), and that is a Phase 2 decision informed by Phase 2 numbers.
+- **OIDN install bulk — MEASURED 2026-09-28, and the question it was asking turns out
+  not to be the question.** OIDN 2.5.1, the x64 Windows package: 54 MB zipped, 79 MB
+  extracted. The weights are **not a separable file** — there is no `.tza`, no blob, no
+  weights directory. They are linked into `OpenImageDenoise_core.dll`, which is
+  **48.3 MB** on its own and is required whatever device is used.
+
+  So "bundle the weights or fetch them on first run" has no bundle-the-code-only
+  option: the minimum that works is
+
+  | | |
+  | --- | --- |
+  | `OpenImageDenoise_core.dll` | 48.3 MB — core and weights, unavoidable |
+  | `OpenImageDenoise_device_cuda.dll` | 3.1 MB |
+  | `OpenImageDenoise_device_cpu.dll` + tbb | 1.3 MB |
+  | `OpenImageDenoise.dll` | 0.2 MB — the API shim |
+  | **total** | **52.9 MB, verified to load and denoise** |
+
+  Droppable and verified droppable: the HIP device (13.8 MB), the SYCL device and its
+  runtime (9.5 MB of `sycl9.dll` and `ur_*`), and the bundled tools. A 52.9 MB set with
+  HIP and SYCL removed still enumerates every RT filter and denoises on both CPU and
+  CUDA — checked, not assumed.
+
+  **Against a 1 MB plugin that is a 53x multiplier**, so the decision is now a real
+  product decision rather than a measurement: ship ~53 MB beside a 1 MB effect, or fetch
+  on first run and carry the offline-install and corporate-proxy cases. Building OIDN
+  from source with only the RT filter and only the CPU and CUDA devices is the third
+  option and the only one that could shrink `core.dll` itself; it costs an ISPC and TBB
+  toolchain in the build.
+
+  **THE INTEGRATION MUST BE A RUNTIME-OPTIONAL LOAD EITHER WAY**, which is the part that
+  does not depend on the decision: a missing DLL has to degrade to "no denoise" rather
+  than to an effect that will not load. That is also what makes fetch-on-first-run
+  possible at all.
+
+- **Whether Draft mode can be interactive at all** on the floor GPU. Partly answered,
+  and the denoiser turns out to be the deciding term rather than a rounding error.
+  Measured on an RTX 2070 SUPER at 1920x1080: the render is **0.28 s at 1 sample** since
+  the majorant was tightened, and OIDN's RT HDR filter with albedo and normal costs
+  **30 ms on CUDA and 774 ms on the CPU**.
+
+  So on a card with a CUDA denoise the denoiser is 11% of a Draft frame and can run every
+  frame. On a machine that falls back to the CPU device it is **2.8x the entire render**,
+  and Draft would be denoiser-bound. That is the number that decides whether the CPU
+  device is offered at all, or whether no-GPU means no-denoise.
+
 
 ## Where we are starting from
 

@@ -1,6 +1,7 @@
 #include "IceField.h"
 
 #include <cmath>
+#include <limits>
 
 namespace plugin::cloud {
 
@@ -15,6 +16,35 @@ Real safeDiv(Real numerator, Real denominator, Real floorValue) {
     const Real d = denominator > floorValue ? denominator : floorValue;
     return numerator / d;
 }
+
+Real clamp01(Real t) {
+    return t < Real(0) ? Real(0) : (t > Real(1) ? Real(1) : t);
+}
+
+// smoothstep AS HLSL AND SLANG COMPUTE IT, INCLUDING THE REVERSED-EDGE CASE, because
+// cellField() depends on that case and nothing in the C++ standard library has it.
+//
+// Slang does not special-case edge0 > edge1: it evaluates saturate((x - edge0) /
+// (edge1 - edge0)) and then the cubic. So `smoothstep(1.0, 0.05, d)` -- the blob in
+// cellField() -- is ONE at the centre and falls to zero a cell away, which is the
+// opposite orientation to the head and tail smoothsteps in the same function. Writing
+// the formula out once is what keeps this file's arithmetic the kernel's arithmetic
+// instead of a paraphrase of it.
+Real smoothstepAs(Real edge0, Real edge1, Real x) {
+    const Real span = edge1 - edge0;
+
+    // A ZERO SPAN IS A STEP, and it is the limit of the cubic rather than a special
+    // case invented here: as the edges close, the ramp between them vanishes.
+    if (span == Real(0)) return x < edge0 ? Real(0) : Real(1);
+
+    const Real t = clamp01((x - edge0) / span);
+    return t * t * (Real(3) - Real(2) * t);
+}
+
+// One generating cell's contribution at distance `d`, measured IN CELL-SIZES -- the
+// units cellField() converts to before it calls smoothstep, not grid units.
+Real blobAt(Real d) { return smoothstepAs(kBlobFar, kBlobNear, d); }
+
 
 } // namespace
 
@@ -168,22 +198,169 @@ void cellDriftAt(const IceParams& ice, Real timeSeconds, Real& outX, Real& outZ)
     outZ = wz * timeSeconds;
 }
 
+// ---------------------------------------------------------------------------
+// THE GUARD ON THE THEOREM, AND IT IS A COMPILE ERROR RATHER THAN A FALLBACK.
+//
+// Four reachable slots per point rather than nine holds only while the two off-slots on
+// an axis cannot BOTH be in reach of it, and that is exactly
+//
+//     2 * (kBlobFar / kCellSpacing)  <=  1 + 2 * inset,   inset = (1 - kCellJitter)/2
+//
+// which is the inequality the header derives. Widen the jitter or narrow the spacing
+// past it and cellOverlapBound()'s whole argument stops applying.
+//
+// A RUNTIME FALLBACK TO THE TRIVIAL NINE WOULD BE THE SAFE-LOOKING CHOICE AND THE WORSE
+// ONE. It keeps rendering -- correctly, 2.76x slower -- with nothing anywhere saying
+// why, which is the failure this project spends its comments on avoiding. Breaking the
+// build names the file to re-read instead. Same argument as EffectFlags.cmake's
+// static_assert on out_flags, and the same reason it is worth a line.
+// ---------------------------------------------------------------------------
+static_assert(Real(2) * (kBlobFar / kCellSpacing) <= Real(1) + (Real(1) - kCellJitter),
+              "cellOverlapBound()'s four-slot derivation no longer holds for these "
+              "constants: two off-slots on one axis can now both be in reach of the "
+              "same point, so a blob-overlap bound has to go back to nine. See the "
+              "derivation over cellOverlapBound() in IceField.h.");
+
+Real cellOverlapBound(int steps) {
+    // Every slot in the neighbourhood cellField() sums over, each blob at its ceiling
+    // of one. Sound, free, and the number this function replaced.
+    const Real trivial = Real((2 * kCellRadius + 1) * (2 * kCellRadius + 1));
+
+    if (steps < 1) return trivial;
+
+    // See the static_assert above: `separation` is 2*inset, and the four-slot count is
+    // guaranteed at compile time rather than checked here.
+    const Real inset      = (Real(1) - kCellJitter) / Real(2);
+    const Real separation = Real(2) * inset;
+
+    // THE SCAN. `a` is the distance, along one axis, from the point to the nearest
+    // position its OWN slot's cell may occupy. The partner slot on that axis is then at
+    // `separation - a` at the closest -- which is the worst case, since the blob only
+    // decreases -- and the pair {a, separation - a} is unordered, so sweeping a over
+    // [0, separation/2] enumerates every configuration exactly once.
+    const Real span = separation * Real(0.5);
+
+    Real best = Real(0);
+    for (int ia = 0; ia <= steps; ++ia) {
+        const Real a  = span * Real(ia) / Real(steps);
+        const Real a2 = separation - a;
+
+        for (int ic = 0; ic <= steps; ++ic) {
+            const Real c  = span * Real(ic) / Real(steps);
+            const Real c2 = separation - c;
+
+            // Slot (i,j) of the four sits at per-axis distances (a or a2, c or c2), and
+            // its distance is the hypotenuse -- the point's distance to an axis-aligned
+            // box being exactly the per-axis distances combined that way.
+            const Real sum =
+                blobAt(std::sqrt(a  * a  + c  * c ) * kCellSpacing) +
+                blobAt(std::sqrt(a2 * a2 + c  * c ) * kCellSpacing) +
+                blobAt(std::sqrt(a  * a  + c2 * c2) * kCellSpacing) +
+                blobAt(std::sqrt(a2 * a2 + c2 * c2) * kCellSpacing);
+
+            if (sum > best) best = sum;
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // THE LIPSCHITZ SLACK IS WHAT MAKES THE SCAN A BOUND RATHER THAN A SAMPLE, and it
+    // is the difference between this and the sampled majorant this file refuses to use.
+    //
+    // |d/dt of t*t*(3-2t)| peaks at 1.5; t moves 1/(kBlobFar - kBlobNear) per cell-size
+    // of distance; distance moves at most kCellSpacing per grid unit of `a`, and at
+    // most 1 per unit of either leg of the hypotenuse. So each of the four terms has a
+    // slope of at most 1.5*kCellSpacing/(far - near) in `a`, and the sum four times
+    // that. The true maximum is within half a step of a scanned point on each axis, so
+    // adding that slope over half a step, once per axis, cannot under-report it.
+    //
+    // It is 0.0054 at 256 steps against an answer of 3.26 -- present for the argument's
+    // sake rather than for its size, and RefiningTheCellScanDoesNotRaiseTheBound is
+    // what shows the argument is not merely decorative.
+    // ---------------------------------------------------------------------
+    const Real slope = Real(4) * Real(1.5) * kCellSpacing / (kBlobFar - kBlobNear);
+    const Real half  = span / Real(steps) * Real(0.5);
+
+    const Real certified = best + Real(2) * slope * half;
+    return certified < trivial ? certified : trivial;
+}
+
+Real depthFactorBound(const IceParams& ice, int parts) {
+    const Real length = ice.streakLength;
+
+    // NO SLAB MEANS NO DEPTH RANGE TO SEARCH. iceDensity() returns zero for every depth
+    // outside [0, streakLength], so a non-positive length has no interior at all, and
+    // one is the bound every factor already carries.
+    if (!(length > Real(0)) || parts < 1) return Real(1);
+
+    const Real headEdge = kHeadFraction * length;
+    const Real tailEdge = kTailFraction * length;
+
+    Real best = Real(0);
+
+    for (int i = 0; i < parts; ++i) {
+        const Real d0 = length * Real(i)     / Real(parts);
+        const Real d1 = length * Real(i + 1) / Real(parts);
+
+        // THE MAXIMUM OF THE TWO ENDS, WITHOUT ASSUMING WHICH END IT IS. Every factor
+        // here is monotone in depth, so its extreme over the interval is at an end --
+        // but WHICH end flips with the sign of the sublimation rate, and AE lets an
+        // expression drive that negative. Taking both costs one comparison and removes
+        // the assumption entirely.
+        const Real s0 = std::exp(-ice.sublimationRate * d0 / Real(1000));
+        const Real s1 = std::exp(-ice.sublimationRate * d1 / Real(1000));
+        const Real subl = s0 > s1 ? s0 : s1;
+
+        const Real h0 = smoothstepAs(Real(0), headEdge, d0);
+        const Real h1 = smoothstepAs(Real(0), headEdge, d1);
+        const Real head = h0 > h1 ? h0 : h1;
+
+        const Real t0 = Real(1) - smoothstepAs(tailEdge, length, d0);
+        const Real t1 = Real(1) - smoothstepAs(tailEdge, length, d1);
+        const Real tail = t0 > t1 ? t0 : t1;
+
+        // A PRODUCT OF PER-FACTOR INTERVAL MAXIMA, which bounds the product's maximum
+        // over the interval because every factor here is non-negative. The maximum over
+        // the intervals then bounds it over the whole slab.
+        const Real product = subl * head * tail;
+        if (product > best) best = product;
+    }
+
+    // AN OVERFLOWING SUBLIMATION TERM HAS NO REPRESENTABLE BOUND, and pretending
+    // otherwise would be the one failure this whole file exists to avoid. A rate of
+    // -1000 makes exp(+2600) infinite, so the field really is unbounded in float and
+    // the honest answer is the largest one there is: it renders as empty sky, because
+    // sigma/majorant is then zero everywhere, rather than as NaN pixels. The parameter
+    // is nonsense at that point and no majorant rescues it.
+    if (!std::isfinite(best)) return std::numeric_limits<Real>::max();
+
+    return best;
+}
+
 Real iceMajorant(const IceParams& ice) {
-    // Nine slots in the 3x3 neighbourhood cellField() sums over, each contributing a
-    // smoothstep that cannot exceed 1, all scaled by cellStrength.
+    // COMPUTED ONCE, EVER. cellOverlapBound() reads the generator's geometry constants
+    // and no parameter at all, so the scan runs on first use and never again.
+    //
+    // FUNCTION-LOCAL STATIC INITIALISATION IS THREAD-SAFE in C++11 and later, and that
+    // is not incidental here: PF_OutFlag2_SUPPORTS_THREADED_RENDERING means several AE
+    // frames are inside this call at once.
+    static const Real cellOverlap = cellOverlapBound();
+
     const Real strength = ice.cellStrength > Real(0) ? ice.cellStrength : Real(0);
-    const Real cellMax  = Real(9) * strength;
+    const Real cellMax  = cellOverlap * strength;
 
     // detail = 1 + detailAmount * fbm * 1.8, and |fbm| <= kFbmBound.
     const Real amount    = ice.detailAmount > Real(0) ? ice.detailAmount : Real(0);
     const Real detailMax = Real(1) + Real(1.8) * amount * kFbmBound;
 
-    // sublimation, head and tail are each bounded by 1 and are omitted rather than
-    // multiplied in as literal ones -- see the header for why the bound is a product
-    // of per-factor maxima and why that is sound without being tight.
+    // sublimation, head and tail TOGETHER rather than each bounded by one and
+    // multiplied out. See depthFactorBound() for why that is worth a scan, and why
+    // leaving them out was not merely loose but unsound at a negative rate.
+    const Real depthMax = depthFactorBound(ice);
+
     const Real optical = ice.opticalDepth > Real(0) ? ice.opticalDepth : Real(0);
 
-    const Real bound = cellMax * detailMax * safeDiv(optical, ice.streakLength, Real(1));
+    const Real bound = cellMax * detailMax * depthMax
+                     * safeDiv(optical, ice.streakLength, Real(1));
 
     // NEVER ZERO. A majorant of zero makes every free-flight distance infinite, so the
     // tracker leaves the slab on its first step and the medium vanishes -- which reads

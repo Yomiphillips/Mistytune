@@ -594,3 +594,55 @@ extern "C" __global__ void hashTrial(RWStructuredBuffer<float> output_2, int cou
     return;
 }
 
+extern "C" __global__ void cellFieldPlane(GeneratorInput_0 g_10, float2  origin_0, float span_0, RWStructuredBuffer<float> output_3, int side_1)
+{
+    uint3  _S71 = blockIdx * blockDim + threadIdx;
+    int x_15 = int(_S71.x);
+    int y_7 = int(_S71.y);
+    bool _S72;
+    if(x_15 >= side_1)
+    {
+        _S72 = true;
+    }
+    else
+    {
+        _S72 = y_7 >= side_1;
+    }
+    if(_S72)
+    {
+        return;
+    }
+    float _S73 = float(side_1);
+    float * _S74 = (&(output_3)[y_7 * side_1 + x_15]);
+    float2  _S75 = make_float2 (origin_0.x + (float(x_15) + 0.5f) / _S73 * span_0, origin_0.y + (float(y_7) + 0.5f) / _S73 * span_0);
+    GeneratorInput_0 _S76 = g_10;
+    float _S77 = cellField_0(&_S76, _S75);
+    *_S74 = _S77;
+    return;
+}
+
+extern "C" __global__ void cellGeometry(RWStructuredBuffer<float> output_4, int count_2)
+{
+    bool _S78;
+    if(int((blockIdx * blockDim + threadIdx).x) != int(0))
+    {
+        _S78 = true;
+    }
+    else
+    {
+        _S78 = count_2 < int(6);
+    }
+    if(_S78)
+    {
+        return;
+    }
+    *(&(output_4)[int(0)]) = 2.20000004768371582f;
+    *(&(output_4)[int(1)]) = 0.80000001192092896f;
+    *(&(output_4)[int(2)]) = 1.0f;
+    *(&(output_4)[int(3)]) = 0.05000000074505806f;
+    float corner_0 = (F32_sqrt((0.01999999769032001f))) * 2.20000004768371582f;
+    *(&(output_4)[int(4)]) = 4.0f * smoothstep_0(1.0f, 0.05000000074505806f, corner_0);
+    *(&(output_4)[int(5)]) = corner_0;
+    return;
+}
+

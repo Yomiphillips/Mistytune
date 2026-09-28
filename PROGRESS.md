@@ -4,6 +4,721 @@ Tracked against `PLAN.md`. Newest first.
 
 ---
 
+## 2026-09-28 — THE OUTPUT ENCODING WAS KEYED OFF THE BIT DEPTH, WHICH IS WHY 32 AND 16 BPC RENDERED THE SAME COMP DIFFERENTLY. It belongs to the project, and now it is in one place that every path goes through.
+
+Found by rendering one frame at two bit depths in After Effects and comparing the
+screenshots. Neither looked wrong on its own, which is the whole problem.
+
+### THE MEASUREMENT
+
+    16 bpc  ==  sRGB(32 bpc)
+
+to **half a code value** on the flat ground patches, across six sampled regions. The sky
+patches deviate up to 6.6 only because the two screenshots are slightly different crops.
+
+The difference was exactly one sRGB encode, and it was **ours**, not the host's.
+
+### WHICH REFUTED THE PREMISE THE CODE WAS BUILT ON
+
+`AEBridge.h` asserted, at length: *"AE's integer worlds are display-referred. Its float
+world is linear."* Everything followed from that -- encode at 8 and 16 bpc, write linear at
+32.
+
+**If it were true the two screenshots would be IDENTICAL.** AE would encode our linear float
+for display and leave our already-encoded integers alone. They were not identical; they
+differed by exactly the encode we applied to one and not the other. So AE applied the same
+transform to both, and the project settings say which:
+
+    Color Engine          Adobe color managed
+    Working Color Space   None
+    Linearize working color space   unchecked
+
+**Working Space None means AE applies NO transform, at any depth.** It is the identity in
+both directions. The premise holds only in a colour-managed project, and it was written as
+though it held always.
+
+### AN EFFECT THAT FILTERS PIXELS NEVER MEETS THIS. ONE THAT MAKES LIGHT HAS TO CHOOSE.
+
+Whatever encoding arrives at a blur, leaves it. A generator starts from radiance and nothing
+in the destination buffer says what encoding is expected -- so it has to decide, and the
+decision is a property of the PROJECT, not of how many bits the buffer has. Bit depth and
+colour space are orthogonal in After Effects. Keying one off the other is what produced two
+renders of one comp.
+
+### THE REFERENCE THAT SETTLES WHICH ONE WAS RIGHT
+
+`proto/index.html`, line 1042, in the branch with the tonemap off:
+
+    // LINEAR, and only the sRGB transfer applied so a monitor shows it.
+
+and again after AgX, with *"AgX already lands in display-referred sRGB primaries; the
+transfer curve is still ours to apply."* The prototype is what passed the Phase 0 look
+verdict and what PLAN.md names as the reference the port is checked against. **It encodes.**
+
+So of the three output paths, one was right and two were wrong in the same direction:
+
+| path | before | after |
+| --- | --- | --- |
+| `proto/` -- the Phase 0 verdict | sRGB | -- |
+| AE 8 / 16 bpc | sRGB | sRGB |
+| AE 32 bpc | **linear** | sRGB |
+| CLI to PPM, and all three goldens | **linear** | sRGB |
+
+### THE FIX IS THAT THE ENCODE JOINS THE TRANSFORM IT IS THE THIRD STAGE OF
+
+Exposure, tonemap and transfer curve are one transform, and `applyOutputTransform` in
+`Shading.h` already held the first two. The curve is there now, behind
+`ViewParams::encodeSrgb`, and **every render path goes through that one function** -- CPU,
+CUDA, CLI, all three bit depths. `OutputConvert.h` lost its encode and is a clamp, a scale
+and a round.
+
+**IT DID NOT NEED THE OUTPUT-PASS RESTRUCTURE** the denoiser is blocked on. The encode goes
+where the exposure already is; when that whole stage is eventually lifted out of the
+per-pixel path, the three move together, which is the right grouping anyway.
+
+**AND IT REMOVES THE REASON THAT RESTRUCTURE WAS RISKY.** The entry below stopped short of
+it because `applyOutputTransform` was the identity at default settings, so a forgotten pass
+would be invisible on a default render. With the curve in it, it is the identity at NO
+settings -- forgetting it renders the visibly-under-encoded picture this entry is about. The
+silent failure mode is gone.
+
+### VERIFIED AS EXACTLY THE ENCODE AND NOTHING ELSE
+
+The goldens were still on disk, unblessed, so the change could be checked against them
+before replacing them:
+
+| scene | max residual vs sRGB(old) |
+| --- | --- |
+| midday | 0.98 codes |
+| horizon | 1.60 codes |
+| sunset | 6.00 codes |
+
+Sunset looked like a discrepancy and is not. **The worst residual sits at a pixel the OLD
+render had clipped to 0/255**, where one linear code spans 12.71 sRGB codes -- so predicting
+from an already-quantised linear image is meaningless at the floor. Measured, not argued.
+
+**WHICH IS A SECOND FINDING: THE OLD LINEAR GOLDENS WERE CRUSHING THE SHADOWS.** A linear
+8-bit PPM has almost no resolution in the darks, which is precisely what a display encoding
+exists to fix. The new references are a better regression reference and not merely a
+differently-encoded one.
+
+`--linear` was added to the CLI so the old behaviour stays reachable -- for a colour-managed
+project, and for the HDR bake when EXR lands. Checked: the default output is sRGB of the
+`--linear` output to 0.98 codes.
+
+### THE sizeof TRIPWIRE HAS A BLIND SPOT, MEASURED HERE
+
+`Fingerprint.cpp` carries `static_assert(sizeof(ViewParams) == 100)` so that adding a member
+without hashing it breaks the build. **Adding `bool encodeSrgb` beside the existing
+`bool agxTonemap` did not change sizeof** -- it landed in padding the struct already had --
+and the build stayed green.
+
+The field *was* hashed, in `FieldCache.cpp`. Nothing here would have said so if it had not
+been. A sizeof tripwire catches a member that changes the layout and misses one that fits a
+hole; it is necessary and not sufficient, and the sufficient version needs reflection this
+language does not have. Recorded in the file, because "I added a member and the build stayed
+green" has to stop reading as clearance.
+
+### CONFIRMED IN THE HOST: THE TWO DEPTHS AGREE
+
+Build 6 installed and checked in After Effects on the same comp: **32 bpc and 16 bpc now
+render the same picture**, and it is the lighter one -- the display-referred look that
+matches `proto/index.html`, not the darker under-encoded render 32 bpc used to give.
+
+So the fix is verified where it was found. The bug was a real one, the direction was the
+one this entry predicted, and the depths are pinned to stay together by
+`EveryBitDepthStoresTheSameBrightness`.
+
+**THIS ALSO CLOSES PLAN.md's PHASE 1 EXIT CRITERION** as far as anything short of 8 bpc can:
+the criterion asks the effect to render correctly at 8, 16 and 32 bpc, and two of the three
+are now confirmed in the host against each other and against the Phase 0 reference.
+
+### State
+
+91 unit tests, 22 ctest suites, all green. Goldens re-blessed, display-referred. Build 6,
+installed and confirmed in AE 2026.
+
+### Next
+
+- **Look at 8 bpc once**, which has still never run -- `'argb'` has not appeared in any log.
+  The three depths are pinned to agree by `EveryBitDepthStoresTheSameBrightness` and two of
+  them are now confirmed in the host, so this is confirmation rather than investigation.
+- **Read the project's colour settings** instead of assuming Working Space None.
+  `AEGP_IsOCIOColorManagementUsed` and `AEGP_DoesViewHaveColorSpaceXform` are in the SDK, and
+  `Mistytune.cpp` marks the line where the answer belongs. A colour-managed project wants
+  `encodeSrgb` false and today gets true, which is the one configuration this change does not
+  serve -- it was equally unserved before, differently.
+- **The output-transform lift, then OIDN.** No longer blocked on a silent failure mode.
+- **`Sky.slang` is still the Phase 1 analytic atmosphere.**
+
+---
+
+## 2026-09-28 — THE MAJORANT WIN IS CONFIRMED IN THE HOST: 1.86 s to 1.10 s on the same frame. And reading the log to check that found a buffer overrun in code written an hour earlier.
+
+An AE 2026 run of build 4, at 32 bpc, one, twelve and twenty-four samples.
+
+### 1.69x, MEASURED IN AFTER EFFECTS, AGAINST THE SAME LINE OF AN OLDER LOG
+
+The majorant entry below reported a 1.70x speedup measured through the CLI, and noted
+honestly that its old-majorant column did not reproduce an earlier CLI table and that the
+ratio rather than the seconds was the claim. **The host log settles it, because it is the
+same instrument on both sides:**
+
+    earlier entry   SMART_RENDER_HOST: rendered 1920x1080 on the GPU in 1.86 s (91 rows per band)
+    this run        SMART_RENDER_HOST: rendered 1920x1080 on the GPU in 1.10 s (91 rows per band)
+
+Same resolution, same sample count of twelve, same band size. **1.69x**, against 1.70x
+measured through the CLI at 64 samples. Two different harnesses, one number.
+
+### ...AND THE BAND BUDGET HOLDS ACROSS SAMPLE COUNTS, WHICH HAD ONLY EVER BEEN SEEN AT ONE
+
+| samples | time | rows per band | bands | per band |
+| --- | --- | --- | --- | --- |
+| 1 | 0.21 s | 1080 | 1 | 0.21 s |
+| 12 | 1.10 s | 91 | 12 | 0.092 s |
+| 24 | 2.37 s | 45 | 24 | 0.099 s |
+
+`kGpuPixelSampleBudget` is holding a launch near a tenth of a second at both split sample
+counts -- an order of magnitude inside the two-second display-driver timeout -- and it is
+adapting the row count rather than the time, which is what it was sized to do. The earlier
+log only ever showed one sample count, so the constant's behaviour ACROSS them is new.
+
+**A first look in After Effects is now 0.21 s a frame at 1920x1080**, against the third of
+a second the entry below predicted from the CLI.
+
+### The camera is right at a second zoom, which is better evidence than one
+
+    camera raw: err=0 distanceToPlane=2666.7 plane=1920x1080
+    camera: from the comp, vertical fov 22.9 deg
+
+2*atan(540/2666.7) is 22.91 degrees, and 2666.7 is AE's default comp-camera zoom for a
+1920-wide comp. The earlier log checked out at 3555.3 and 17.3 degrees. Two distinct zooms
+both converting correctly says more about `CameraConvert.h` than either alone.
+
+### WHAT THE RUN DID NOT EXERCISE, AND IT IS THE THING IT WAS RUN FOR
+
+Every frame reports `bitdepth=32`, and `format=842229089` -- which is the fourcc `'ae32'`,
+`PF_PixelFormat_ARGB128`, confirmed against `rowbytes=30720` over 1920 pixels giving exactly
+sixteen bytes each.
+
+**At 32 bpc `direct` is true and the function returns before the conversion**, so
+`convertStagingFrame` -- the code the entry below is about -- did not run once. 8 and 16 bpc
+remain unexercised in the host. The project bit depth has to be changed for that, and
+nothing about the render path reveals it.
+
+### READING THE LOG TO CHECK THAT FOUND A BUFFER OVERRUN
+
+Decoding `format=842229089` meant looking at what value actually reaches
+`toImageView`'s switch -- and noticing the switch had no case for it.
+
+Its first version, written an hour earlier in the same session:
+
+    default: v.format = PixelFormat::ARGB32F;
+
+**ARGB32F WRITES SIXTEEN BYTES PER PIXEL. AN 8 BPC PIXEL IS FOUR.** The function is only
+reached on the non-direct path, so every format arriving there is narrow, and defaulting
+wide is a four-times overrun of every row of a world After Effects allocated and still owns.
+It would not present as a wrong picture. It would present as AE crashing somewhere else,
+later, with this plugin nowhere in the stack.
+
+**THE LOOP IT REPLACED WAS SAFE HERE AND THE REFACTOR MADE IT UNSAFE.** The old code was
+`sixteen ? 16-bit : 8-bit`, so anything unrecognised under-wrote -- a wrong picture inside a
+buffer we were given, which is diagnosable. The refactor was proved bit-identical for the two
+formats that occur, and the sweep that proved it could not see this, because the fault is in
+the case where neither occurs.
+
+The fallback is `ARGB8` now, and the call site logs a warning naming the format rather than
+quietly producing a wrong picture. It cannot be unit-tested -- `toImageView` needs AE headers
+by construction, which is exactly why it is four lines and why the arithmetic it feeds is not
+in that file.
+
+**THE GENERAL LESSON IS ABOUT THE PROOF, NOT THE BUG.** "Bit-identical over 16,440
+conversions" is a true statement about the inputs that occur and says nothing about the
+inputs that do not. An exhaustive-looking sweep is still a sweep of a domain somebody chose.
+
+### 16 BPC RAN FOR REAL, AND IT BROUGHT THREE THINGS THAT HAD NEVER BEEN EXERCISED
+
+A second run, with the project depth changed part way through, so both formats appear in one
+log and the comparison is against the same comp.
+
+    bitdepth=32   format=842229089   'ae32'   rowbytes 7680 / 480 px = 16 bytes
+    bitdepth=16   format=909206881   'ae16'   rowbytes 3840 / 480 px =  8 bytes
+
+`'ae16'` is `PF_PixelFormat_ARGB64`, which `toImageView` maps to `PixelFormat::ARGB16`, and
+eight bytes a pixel is four `uint16` channels. **So `convertStagingFrame` executed in the
+host for the first time** -- at 32 bpc `direct` returns before it, which is why the run
+before this one exercised none of it.
+
+**A PADDED DESTINATION, WHICH IS THE ONE THING A UNIT TEST CANNOT ARRANGE HONESTLY.**
+
+    113 px wide, rowbytes 960, and 113 * 8 = 904 -- fifty-six bytes of padding a row
+
+`TheFrameWalkHonoursTheDestinationStride` pins exactly this with a deliberately padded
+buffer, and here it is arriving from the host unprompted. A stride derived from the width
+would have written each row 56 bytes early and the frame would have sheared diagonally.
+
+**AND THE FRAMING SURVIVED A 1/17 DOWNSAMPLE**, which is a far harsher case than the 1/4
+the earlier run used, because it does not divide:
+
+    1920 / 17 = 112.94  ->  113        1080 / 17 = 63.53  ->  64
+
+AE asked for a 135x76 rect at 1/17 and the result rect, the origin and the frame all agree.
+`TheFrameIsTheDenominator` and `ReducedResolutionKeepsTheFraming` are about this and had only
+ever been checked against divisors.
+
+**THE CONVERSION IS FREE AT THESE SIZES.** 480x270 at 24 samples is 0.16 s at 32 bpc and
+0.16 s at 16 bpc -- the staging buffer and the quantising pass do not register against the
+transport.
+
+### THE ABORT PATH FIRED FOR THE FIRST TIME, AND IT RETURNS IN THE RIGHT PLACE
+
+    aborted at row 64 of 64, sample 24 of 24, after 0.09 s
+
+PLAN.md asks for abort and progress between accumulation launches, and until now that code
+had never been seen running. **It returns from inside the band loop, before the `direct`
+check and before the conversion**, so an aborted 16 bpc frame leaves AE's world untouched
+rather than handing back a half-converted one for the host to cache. Checked against the
+code rather than inferred from the picture, because a partially-written frame is the kind of
+thing AE would cache and then show later out of context.
+
+It aborted on the last row of the last sample, which is AE cancelling a frame that had
+essentially finished -- ordinary, and not a sign the check is in the wrong place.
+
+### WHAT 16 BPC STILL HAS NOT ESTABLISHED
+
+**Whether the picture is the right BRIGHTNESS**, which is the one thing the trap is about
+and the one thing a log cannot carry. Using 65535 instead of 32768 produces a correctly
+sized, correctly strided, correctly padded, non-crashing render that is half as bright. Every
+line above would read exactly the same.
+
+What has been narrowed is how much is left to doubt: the format maps correctly, the SDK
+header for `'ae16'` says "range 0...32768" in its own comment, and
+`SixteenBitWhiteIs32768NotWhatEveryOtherHostUses` pins the arithmetic. What is unobserved is
+the composition of those two facts in the host.
+
+**The sharp test is toggling the project depth between 32 and 16 on one frame** rather than
+judging 16 bpc on its own. A 2x error is unmissable as a jump and easy to miss as a still.
+
+**8 bpc has still never run.** `'argb'` has not appeared in any log.
+
+### State
+
+89 unit tests, 22 ctest suites, all green. Plugin loads as v0.3 build 4; GPU device setup
+reports the RTX 2070 SUPER as sm_75 with 40 SMs and AE agrees it is compatible.
+`what_gpu=NONE` on every frame, so `PF_Cmd_SMART_RENDER_GPU` is still dead code and the card
+is reached through `renderCudaToHost` inside the CPU smart render.
+
+### Next, and the first one needs the host
+
+- **16 bpc BRIGHTNESS, and 8 bpc at all.** 16 bpc now renders in the host with the right
+  format, stride and padding; what is unobserved is whether it is the right brightness, which
+  is the only symptom the 0..32768 trap has. Toggle the project depth 32 to 16 on one frame --
+  a 2x error is unmissable as a jump and invisible as a still. 8 bpc has never run.
+- **The output-transform lift, then OIDN.** Unchanged, and still blocked on the reason in the
+  entry below: `applyOutputTransform` is the identity at default settings, so a forgotten
+  transform pass is invisible in AE on a default render.
+- **`Sky.slang` is still the Phase 1 analytic atmosphere.** The remaining Phase 2 kernel item,
+  and the only one that needs neither the host nor a dependency.
+
+---
+
+## 2026-09-28 — THE BIT DEPTHS ARE TESTED RATHER THAN LOOKED AT. The output conversion moved into src/engine/ and is proved bit-identical to the loop it replaced; OIDN is measured and the install-bulk question turns out not to be the question; and the denoiser stops at an architectural blocker whose failure mode is invisible at default settings.
+
+Second half of the same day. The majorant entry below is the first.
+
+### PLAN.md's OLDEST OPEN EXIT CRITERION WAS OPEN BECAUSE IT WAS UNTESTABLE WHERE IT SAT
+
+Phase 1's exit asks that the effect render **correctly at 8, 16 and 32 bpc (16-bit
+channels run 0..32768, not 65535)**. That has been on the "never exercised" list since the
+effect first loaded, and the reason it stayed there is that the conversion lived inside
+`smartRenderHost`, sixty lines into the one function in this project that cannot run
+without After Effects.
+
+**LOOKING CANNOT SETTLE ANY OF THE THREE THINGS IN IT**, which is why "run it in AE and
+check" was never going to close this row:
+
+| trap | why looking fails |
+| --- | --- |
+| 0..32768 versus 0..65535 | a factor of two in brightness, in the one bit depth nobody checks first. Reads as a grading choice |
+| a missing sRGB curve | renders near-black with a sun in it, which sends the reader to the transport |
+| encoding ALPHA with the colour | **invisible in every frame this renderer can currently produce**, because the sky is opaque and 1 encodes to 1 |
+
+So it is `src/engine/OutputConvert.h` now — the curve, the full-scale constants and the
+quantiser — and `tests/unit/TestOutputConvert.cpp` exercises all three formats, the alpha
+rule, the clamp directions and the destination stride in microseconds with no SDK and no
+host. `src/ae/Mistytune.cpp` lost sixty lines and gained one call; `AEBridge.h` kept only
+`toImageView`, which is the whole of the AE-specific part.
+
+**THERE WERE TWO COPIES OF THE 0..32768 RULE AND ONE OF THEM WAS NOT UNDER TEST.**
+`src/engine/Image.h` has had a correct `writePixel` with `kMaxChan16` since the Gravitune
+scaffolding, used by `Contour` and tested through it. The smart-render loop never called
+it — it carried its own scale, its own clamp and its own rounding. `fullScale()` reads
+Image.h's constants now, and `FullScaleMatchesTheImageFormatConstants` is what says there
+is one copy.
+
+### THE REFACTOR IS PROVED BIT-IDENTICAL, BECAUSE ITS CALLER CANNOT BE RUN
+
+Moving code out of the AE smart render has no safety net: the usual one is "run the tests
+before and after", and there were no tests. The change would otherwise rest on having read
+the old loop carefully and believing the reading.
+
+The old quantiser was
+
+    static_cast<A_u_short>(av > maxVal ? maxVal : av + 0.5f)
+
+and the new one is a plain `av + 0.5f`. **The branch was unreachable** — `a` is clamped
+into 0..1 above it and `maxVal` is the scale, so `av` never exceeds it. That is exactly the
+kind of claim that is easy to make and easy to be wrong about.
+
+So `TheConversionIsBitIdenticalToTheLoopItReplaced` transcribes the old expression verbatim
+and sweeps it against the shipping function: 4097 steps across 0..1 plus the awkward values
+— the ends, the HDR values that must clamp, the negatives that must not wrap — at both
+integer depths, in two channel arrangements so an ARGB/RGBA slip cannot hide behind four
+equal numbers. **16,440 conversions, 65,760 channels, zero disagreements.**
+
+Verified to go red: an injected 65535 reports `first: 16 bpc channel 1 of input 0 -- now
+65535, was 32768`.
+
+### ONE ASSERTION AFTER THE SWEEP, NOT ONE INSIDE IT, AND THAT IS A LESSON FROM WATCHING IT
+
+The first version asserted per comparison. The injected 65535 made it print **sixteen
+thousand FAIL lines**, which buried the two tests that actually named the bug and truncated
+the run's own output. A sweep should say what disagreed once, with enough of the first
+mismatch to act on. Fourteen failures instead of sixteen thousand, and the one line above
+is the whole diagnosis.
+
+### AND ONE TEST FAILED BECAUSE THE TEST WAS WRONG, TWICE OVER
+
+`TheCurveIsLinearNearZeroAndContinuousAtTheJoin` failed on first run at 1e-9 and 1e-6, and
+`encodeSrgb` was right both times.
+
+- **It is deliberately `float`, not `Scalar`.** The rest of `src/engine/` computes in
+  double; this quantises a float buffer the kernel wrote, and widening it would change
+  which integer a value near a rounding boundary lands on — moving every 8 and 16 bpc pixel
+  AE has ever been handed, silently, for nothing. So it has to be tested at float
+  tolerances, and 12.92f times 0.001f carries about 2e-9.
+- **THE SRGB CURVE IS GENUINELY DISCONTINUOUS AT ITS BREAKPOINT, BY SPECIFICATION.** IEC
+  61966-2-1 publishes 12.92 and 0.0031308, both rounded; the pair that actually joins is
+  12.9232102 and 0.00313066844. Measured across the published breakpoint:
+
+      below   0.0404499360
+      above   0.0404511778
+      jump    1.24e-06, which is 0.0003 of an 8-bit code
+
+  Asserting the jump is zero would be asserting the standard is something it is not. The
+  check is for a jump orders larger than that, which is what a wrong breakpoint or slope
+  gives — and it gained a second assertion, because continuity alone does not pin the
+  breakpoint: a curve linear all the way to 0.1 is continuous with itself and visibly wrong
+  in the darks.
+
+### A COMMENT THAT HAD BEEN FALSE FOR AN ENTIRE ENTRY
+
+`fillCameraFromComp` in `AEBridge.h` was headed **"PHASE 1 STUB. The real implementation
+lands in Phase 2"**. It calls `AEGP_GetEffectCameraMatrix` at line 232 and the host log in
+the entry below reports `vertical fov 17.3 deg`, which checks out against a 1080 plane at
+3555. The comment is the same stale claim that entry had to correct in itself, left in the
+file that the correction was about.
+
+Rewritten to say what is actually absent, which is the POSITION — `CameraConvert` zeroes the
+translation on purpose because AE's world is comp pixels against an arbitrary origin. That
+distinction is easy to read a "stub" label as covering.
+
+### OIDN, MEASURED — AND THE OPEN QUESTION WAS ASKING THE WRONG THING
+
+PLAN.md deferred this as "the weights are the question. Measure the shipped size in Phase 2
+before committing to bundling them rather than fetching on first run."
+
+**There is no separable weights file.** No `.tza`, no blob, no weights directory. They are
+linked into `OpenImageDenoise_core.dll`, which is **48.3 MB** and is required whatever
+device is used. So there is no bundle-the-code-only option to choose.
+
+    minimum working set, verified to load and denoise      52.9 MB
+      OpenImageDenoise_core.dll                            48.3    core + weights
+      OpenImageDenoise_device_cuda.dll                       3.1
+      OpenImageDenoise_device_cpu.dll + tbb                  1.3
+      OpenImageDenoise.dll                                   0.2
+    dropped, and verified droppable
+      OpenImageDenoise_device_hip.dll                       13.8
+      SYCL device + sycl9.dll + ur_*                         9.5
+      bundled tools and docs                                 4.4
+
+Checked rather than assumed: with HIP and SYCL absent the set still enumerates every RT
+filter and denoises on both devices. **Against a 0.98 MB plugin that is a 53x multiplier**,
+so what is left is a product decision, not a measurement — ship it, fetch it, or build from
+source with only the RT filter and only the CPU and CUDA devices, which is the one route
+that could shrink `core.dll` itself and costs an ISPC and TBB toolchain in the build.
+
+### ...AND THE DENOISE COST DECIDES SOMETHING ELSE PLAN.md HAD OPEN
+
+RT HDR with albedo and normal, 1920x1080, RTX 2070 SUPER:
+
+| device | per frame |
+| --- | --- |
+| CUDA | **30.1 ms** |
+| CPU | **773.8 ms** |
+
+The render is 0.28 s at 1 sample since the majorant was tightened. So on a card the
+denoiser is 11% of a Draft frame and can run every frame; **on the CPU device it is 2.8x
+the entire render** and Draft would be denoiser-bound. That is the number that decides
+whether the CPU device is offered at all, or whether no-GPU means no-denoise.
+
+### WHERE THE DENOISER STOPPED, AND IT IS A BLOCKER RATHER THAN A BUDGET
+
+`applyOutputTransform` — real EV and optional AgX — is called **inside `renderPixel`**, so
+`req.dest` holds exposed, possibly tonemapped values and not linear radiance. OIDN's HDR
+filter wants linear. Denoising what is in that buffer today is wrong the moment AgX is on,
+and the correct order is
+
+    kernel writes LINEAR mean  ->  denoise  ->  output transform  ->  quantise
+
+which means lifting the transform out of the per-pixel path into a pass the caller runs once
+per frame, after every band and every sample chunk. `renderPixel` stays one function, which
+is what keeps a CPU golden image a check on the GPU.
+
+**THE REASON THIS IS NOT BEING LANDED BLIND IS THE DEFAULTS.** `exposureEV` is 0 and
+`agxTonemap` is false, so `applyOutputTransform` **is the identity at default settings**. A
+forgotten transform pass would be invisible in After Effects on every default render, and
+would first appear as "the Exposure slider does nothing" — which reads as a parameter-wiring
+bug, in a different file, months later.
+
+`tests/golden/` would catch it on the CLI paths, because the `sunset` scene renders at
+`--ev 1.5` and both the CPU and GPU comparisons run it. **The AE path has no equivalent and
+is the path that gains the new call site.** So the one change whose failure mode is silent
+is the one change with no test, in the one place that needs the host — which is where this
+stops.
+
+### State
+
+89 unit tests (16 new over the output conversion), 22 ctest suites, all green. No new
+warnings outside the Slang prelude. The OIDN package is measured but **not wired into the
+build**: no CMake change, no new dependency, nothing to install to build this tree.
+
+### Still not done
+
+- **8, 16 and 32 bpc in the host.** The arithmetic is now tested; what is untested is
+  whether AE hands us the formats it says it will and whether the picture is right. That is
+  a much smaller thing to check than it was this morning.
+- **The output-transform lift, and then OIDN.** Blocked on the above, per the section above.
+- **`PF_Cmd_SMART_RENDER_GPU` is still dead code.** AE reports `what_gpu=NONE`.
+- **No progressive display.** A frame reaches its full sample count before AE sees anything.
+- **The camera POSITION is unmapped.** Phase 3, and the comment now says so correctly.
+- **The single-scatter albedo is a constant**, not a parameter — adding a field to
+  `FieldParams` trips the fingerprint tripwire. Phase 3.
+- **`Sky.slang` is still the Phase 1 analytic atmosphere.** The Bruneton precompute is the
+  remaining Phase 2 kernel item and needs no host and no dependency.
+
+---
+
+## 2026-09-28 — THE MAJORANT IS 2.95x TIGHTER AND THE FRAME IS 1.7x FASTER. Nine blobs was a count, not a bound; the tightening is proved to be a change of realisation and not of answer; and the tripwire written to protect it was measured too weak and had to be rebuilt.
+
+The previous entry called this "the next performance task and it is worth real time". It
+was, and it also closed a soundness hole nobody had noticed.
+
+    host structural majorant   0.005616  ->  0.00190258  per metre
+    slack over the sampled peak   18.32x  ->  6.21x
+    1920x1080 at 64 spp            ~9.7s  ->  5.7s
+
+### Nine was the number of slots, not a bound on the sum
+
+`cellField` sums a 3x3 neighbourhood of blobs, so nine blobs each with a ceiling of one
+bounds it. That is sound, free, and wrong about the geometry: **a point cannot be inside
+nine of these blobs, because the blobs are narrower than the grid they sit on.**
+
+The count is four, and it is a theorem rather than an observation. In grid units, with a
+point at fraction u along one axis of its slot:
+
+| | |
+| --- | --- |
+| a blob vanishes at `kBlobFar / kCellSpacing` | = 0.4545 grid units. Its reach |
+| a cell is its slot centre plus `+-kCellJitter/2` | so never nearer than `inset` = 0.1 to the slot edge |
+| the slot one step UP the axis | holds every cell at least `(1 + inset) - u` away |
+| the slot one step DOWN | at least `u + inset` away |
+
+**Those two sum to 1 + 2\*inset = 1.2 whatever u is**, and both are in reach only if they
+sum to under 0.909. So at most one of them is ever in reach: two offsets per axis, two
+axes, four slots. That alone is 2.25x.
+
+The remaining 1.23x is that four blobs cannot all be at their ceiling either, and the same
+inequality gives it — on each axis the two reachable distances sum to at least 2\*inset, so
+the worst case is a two-parameter family over a 0.1 x 0.1 square. **cellOverlapBound() is
+3.2649 against nine.**
+
+**WHICH IS A SEARCH, AND THIS FILE REFUSES TO BOUND BY SAMPLING, SO THE DISTINCTION HAD TO
+BE MADE EXPLICIT.** What is searched is four smoothsteps of a distance — Lipschitz, with a
+slope the function computes — not the fractal detail term. A scan of a Lipschitz function
+*plus its Lipschitz slack* is an upper bound by construction; a scan of an fbm is a guess.
+The slack is 0.0054 at 256 steps, and `RefiningTheCellScanDoesNotRaiseTheBound` is what
+stops that being decorative.
+
+### ...AND THE THREE DEPTH FACTORS WERE BOUNDED BY ONE EACH, WHICH WAS TRUE AND UNSOUND
+
+`head` is a smoothstep RISING from zero at the generating level, so it is zero exactly
+where `sublimation` and `tail` are largest. Bounding each by one bounds the product by one,
+and the product never comes near it: **0.93 at the test parameters, 0.89 on the defaults.**
+
+Each factor is monotone in depth, so partitioning `[0, streakLength]` and taking
+`max(subl at ends) * max(head at ends) * max(tail at ends)` per interval is exact rather
+than sampled — no assumption about which end, none that the partition found the peak, and
+refining it can only lower the answer.
+
+**THE HOLE THAT WAS ALREADY OPEN.** "sublimation <= 1, being exp of a negative" holds only
+while the rate is positive. AE lets an expression drive any slider past its range — which
+every other parameter in this file is already tested against — and at a negative rate
+`exp(-rate * depth / 1000)` GROWS: 4.2x at the default streak length and a rate of -1. The
+old bound omitted the factor entirely, so there it was not loose, **it was below the field
+it was supposed to bound.** Evaluating the factor instead of asserting it is the fix, and
+`ANegativeSublimationRateStillBounds` pins it. Verified to go red against the old
+assumption.
+
+### THE CHANGE IS A CHANGE OF REALISATION, NOT OF ANSWER, AND THAT IS MEASURED
+
+A tighter majorant consumes random numbers differently, so every golden image moved. That
+is expected and says nothing about correctness — **a majorant below the field also moves
+them, and renders a quietly thinner cloud.** The two have to be told apart before the
+references are re-blessed, and an absolute mean difference cannot do it: a systematic
+thinning and a pile of noise both raise it.
+
+So `--majorant` went into the CLI — `QualityParams` already documented the override as
+"overridable for tests" and nothing had exposed it — and midday was rendered at 4096 spp
+three ways, compared on the **signed** mean:
+
+    new vs old bound      signed mean  -0.0004   abs mean 0.4444   brighter 11.6% / darker 12.2%
+    new vs loose (0.045)  signed mean  +0.3384   abs mean 0.6948
+    old vs loose (0.045)  signed mean  +0.3389   abs mean 0.6901
+
+**The signed mean is a thousandth of the absolute mean and the sign split is even.** That
+is Monte Carlo noise and nothing else: the tightened bound converges to the same image.
+
+**THE LOOSE CONTROL SAYS SOMETHING ON ITS OWN, AND IT IS NOT ABOUT THIS CHANGE.** Both tight
+majorants differ from 0.045 by the *same* +0.34 signed shift, so the loose one is the biased
+member of the three. 0.045 per metre against a slab `slabRange` caps at 120 km is about 5400
+expected steps into a `kTrackCap` of 1024, and TransportLib's own note says hitting the cap
+returns a partial product **biased high — too much light**. Measured at +0.34, which is a
+brighter render, in the predicted direction. The tightening moves away from that cliff, not
+towards it.
+
+Golden references re-blessed from the CPU path afterwards; all three GPU comparisons return
+to max 0 against them.
+
+### What it costs now, at 1920x1080 on an RTX 2070 SUPER
+
+Same binary, same session, interleaved, `--majorant` pinned to the old bound against the
+new derived one — because that is the only comparison in which nothing else can have moved.
+
+| samples | old majorant | new derived | |
+| --- | --- | --- | --- |
+| 1 | 0.40 s | 0.28 s | 1.43x |
+| 8 | 1.30 s | 0.84 s | 1.54x |
+| 32 | 4.60 s | 2.85 s | 1.61x |
+| 64 | 9.3–10.1 s | 5.64–5.72 s | 1.70x |
+
+**THE OLD COLUMN DOES NOT REPRODUCE THE TABLE IN THE ENTRY BELOW**, which recorded 12.37 s
+at 64 spp for what should be the same work. It was not re-measured at the time and the
+difference is not explained — clocks, thermals or a different measurement boundary. The
+ratio is the claim here, not the absolute seconds, which is why it was taken head to head
+in one sitting.
+
+**1.7x rather than 2.95x, and the gap is not a disappointment.** Expected steps are
+`majorant * path length + 1` — the `+ 1` is a floor no majorant removes — and the sky, the
+phase function and the camera do not scale with it at all.
+
+### THE TRIPWIRE FOR THIS WAS WRITTEN, THEN MEASURED, AND IT DID NOT WORK
+
+`src/engine/IceField.h` cannot include a `.slang` file, so it MIRRORS four constants —
+`kCellSpacing`, `kCellJitter` and the blob's two edges — and derives a theorem from them.
+A mirrored constant that drifts does not fail to compile. It lowers a majorant.
+
+The first defence was the honest-looking one: run the KERNEL's `cellField` with
+`cellDensity = 1`, densely, and require the host's bound to be above everything it finds.
+`cellField` has no fbm in it, so unlike `iceDensity` it really can be sampled.
+
+**IT PASSED A DELIBERATE 18% DRIFT.** Moving the host's `kCellSpacing` to 2.6 drops the
+bound to 2.9636, and a 49-patch sweep of 784 slot neighbourhoods finds only **1.7714** —
+so 2.96 still covered it and the majorant was wrong with every test green.
+
+That is not a flaw in the sweep. It is the same floor-not-truth limit the peak-density sweep
+has: reaching 3.26 needs all four cells around one slot corner to have jittered towards it,
+the jitter is `hash22(o, 0u)` and therefore fixed per slot, and a few hundred neighbourhoods
+do not contain that configuration. **It is still reached** — there is no seed and the sky is
+millions of slots wide — which is exactly why the bound must cover the rare case and why the
+sampled maximum is a floor.
+
+So the constants are named in `GeneratorLib.slang` now, and a `cellGeometry` entry point
+reads them back with the four-blob worst case **derived and evaluated in the kernel**:
+
+    kCellSpacing   kernel 2.2    host 2.2
+    kCellJitter    kernel 0.8    host 0.8
+    kBlobFar       kernel 1      host 1
+    kBlobNear      kernel 0.05   host 0.05
+    four blobs at the kernel's own corner distance 0.31113 cell-sizes
+      kernel arithmetic 3.2595   host cellOverlapBound() 3.2649
+
+**THE FIRST VERSION OF THAT CHECK COULD NOT FAIL EITHER, AND WAS MEASURED NOT FAILING.** It
+took the corner distance as a uniform and the host computed it from its OWN mirrored
+constants — so a drifted host asks about a different distance, gets a consistent answer, and
+agrees with itself. The 2.2-to-2.6 drift passed it. The kernel derives the configuration from
+its own constants now, and the host contributes nothing but its answer.
+
+The 0.0054 between 3.2595 and 3.2649 is the Lipschitz slack, exactly. The scan lands on its
+own worst case.
+
+**The two checks divide the work and neither subsumes the other**, which is the same argument
+this file already makes about tiers: the sweep catches a wrong derivation, which exact
+constants would pass; the constants catch a drifted copy, which the sweep passes until it is
+enormous.
+
+Both verified to go red on the injected drift, which named `kCellSpacing` and reported the
+consequence separately.
+
+### What is left, and why most of it is not tightenable by this argument
+
+`slang.transport`'s cirrus section derives its own global majorant as the largest cell bound
+over a 16^3 grid — **0.000944957 per metre, the tightest global bound the structural
+construction can give at that resolution.** Against it:
+
+    old host bound  5.94x
+    new host bound  2.01x
+
+So two thirds of what was left is gone and the remaining 2x is a different problem:
+
+- **`kFbmBound` is 1.5 and that is TIGHT**, not lazy. `hash33` returns gradients in the whole
+  cube `[-1,1]^3`, and `sqrt(3) * sqrt(3)/2` is attained at a lattice cell's centre. Lowering
+  it means normalising the gradients, which changes the field — and therefore the look that
+  passed Phase 0's verdict.
+- **The occupancy is a hash.** At `cellDensity` 0.35 most slots are empty and a bound that
+  does not evaluate the hash must assume none of them is. Knowing WHICH is what a majorant
+  GRID is for, and SlangBridge.h's measurement still says the grid loses 7x on thin cirrus
+  and wins 25x on a hard core. That is the Phase 3 convective case, not this one — and the
+  tightening makes the grid-off decision *stronger*, because the global majorant it is being
+  compared against is now twice as tight rather than six times as loose.
+
+**The guard on the theorem is a `static_assert`, not a fallback.** Four slots holds only while
+`2 * (kBlobFar / kCellSpacing) <= 1 + 2 * inset`. A runtime fallback to the trivial nine would
+keep rendering, correctly, 2.76x slower, with nothing saying why. Breaking the build names the
+file to re-read instead — the same argument as `EffectFlags.cmake`'s assert on `out_flags`.
+
+73 unit tests (9 new over the two bounds), 22 ctest suites, all green.
+
+### Still not done, and unchanged by this
+
+- **8 and 16 bpc are still unexercised.** The AE run was 32 bpc throughout, so 16-bit's
+  0..32768 channel range — not 65535, the classic AE trap — has never been through the real
+  transport on either engine. **This change was not run in After Effects**; it is in
+  `src/engine/`, shared by both paths, and the GPU golden comparisons cover it, but the host
+  has not seen it.
+- **`PF_Cmd_SMART_RENDER_GPU` is still dead code.** AE reports `what_gpu=NONE`, so the card is
+  reached through `renderCudaToHost` inside the ordinary CPU smart render.
+- **No denoiser.** OIDN is the Phase 2 item, and its install-bulk question is still deferred.
+- **No progressive display.** A frame reaches its full sample count before AE sees anything.
+- **The camera POSITION is still unmapped** — `CameraConvert` zeroes the translation on
+  purpose, because AE's world is comp pixels against an arbitrary origin. Phase 3.
+- **The single-scatter albedo is a constant**, not a parameter, because adding a field to
+  `FieldParams` trips the fingerprint tripwire. Phase 3 parameter work.
+- **`Sky.slang` is still the Phase 1 analytic atmosphere.** The Bruneton precompute replaces
+  eight-step quadrature with two texture fetches and can be checked against what is there now.
+
+---
+
 ## 2026-09-28 — THERE IS A CLOUD. The Slang transport reaches the pixel, both backends render it byte-identically, and the first picture was a featureless sheet for a reason worth the entry.
 
 `Render.slang` landed and `renderPixel`'s one line changed. What comes out of the CLI is

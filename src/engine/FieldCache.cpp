@@ -42,6 +42,11 @@ uint64_t viewHash(const ViewParams& v, const QualityParams& q) {
     fp.add(v.exposureEV);
     fp.add(v.agxTonemap);
 
+    // THE OUTPUT ENCODING IS PART OF THE VIEW, not of the field: changing it changes
+    // every pixel and nothing about the medium, so it must restart the samples and
+    // must not rebuild the cloud. See ViewParams::encodeSrgb.
+    fp.add(v.encodeSrgb);
+
     // See the header for why maxBounces is here and samplesPerPixel is not.
     fp.add(q.maxBounces);
     fp.add(q.densityMajorant);

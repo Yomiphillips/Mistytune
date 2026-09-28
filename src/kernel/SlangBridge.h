@@ -121,6 +121,19 @@ MT_RENDER void fillSlangScene(const RenderRequest& req, SceneT& s, PhaseT& ph) {
     // IT IS WIRED AND PROVED CORRECT, so switching it on is a line here. Leaving it
     // on would be paying seven times over for a generator it cannot help.
     //
+    // THE 2.4 IS slang.transport's OWN MAJORANT, WHICH IS TIGHTER THAN THE SHIPPING ONE,
+    // and the distinction matters now that the shipping one has moved. That test derives
+    // its global majorant as the largest cell bound over its 16^3 grid -- 0.00094 per
+    // metre, the tightest global bound the structural construction can give -- while
+    // iceMajorant() has to bound the field without evaluating the occupancy hash.
+    //
+    // THE GAP HAS CLOSED AND THE DECISION HELD, which is the useful part: tightening the
+    // cell-overlap and depth factors took the shipping majorant from 5.94x that number to
+    // 2.01x it. So the global column here got BETTER by about three times while the grid's
+    // 16.2 traversal steps did not move at all -- a grid pays per cell crossed whatever
+    // the density is. Switching the grid on is a worse trade today than when this was
+    // measured, not a closer one.
+    //
     // dims AND cellExtent ARE NOT LEFT AT ZERO even though `enabled = 0` means the
     // grid is never consulted: ddaInit still runs and divides by cellExtent.
     s.grid_0.origin_0     = V::v3(0.0f, 0.0f, 0.0f);

@@ -586,6 +586,14 @@ int main() {
         ice.opticalDepth = g.opticalDepth_0;
         ice.streakLength = g.streakLength_0;
 
+        // THE RATE MATTERS NOW AND IT DID NOT BEFORE, which is a trap this line exists
+        // to close. The old bound omitted sublimation entirely, so leaving IceParams at
+        // its default 0.55 while the kernel ran at 0.6 was harmless. depthFactorBound()
+        // reads it, and a host bound computed at a WEAKER rate than the field's is a
+        // bound computed for a different field -- which is unsound in the one direction
+        // that does not announce itself.
+        ice.sublimationRate = g.sublimation_0;
+
         const double hostBound = static_cast<double>(plugin::cloud::iceMajorant(ice));
 
         std::printf("\n  host structural majorant %.6g per metre\n", hostBound);
@@ -602,6 +610,233 @@ int main() {
             ++failures;
         }
     }
+
+    // -----------------------------------------------------------------------
+    // 4. The cell-overlap bound, against the kernel's own cellField
+    // -----------------------------------------------------------------------
+    //
+    // ===========================================================================
+    // THE TRIPWIRE ON A THEOREM THAT LIVES IN A DIFFERENT LANGUAGE FROM WHAT IT IS
+    // ABOUT.
+    //
+    // src/engine/IceField.h derives cellOverlapBound() from four constants it MIRRORS
+    // from GeneratorLib.slang -- the grid pitch, the jitter width, and the two blob
+    // edges. Nothing makes the two copies agree, and the failure of a drifted copy is a
+    // majorant below the field: a cloud that renders quietly too thin.
+    //
+    // A NAME-AND-VALUE COMPARISON WOULD BE THE OBVIOUS TEST AND THE WEAKER ONE. It
+    // checks that the copies match, which is not the claim. The claim is that the bound
+    // holds -- so this runs the KERNEL's cellField and checks the host's number is above
+    // everything it produces. A mirrored constant that drifts fails this; so does a
+    // wrong derivation, which a value comparison would pass.
+    //
+    // cellDensity IS FORCED TO ONE, and that is what makes the test the worst case
+    // rather than a typical one. The bound assumes every slot in the neighbourhood holds
+    // a cell, because the occupancy is a hash the host cannot evaluate. At the default
+    // 0.35 most slots are empty and the sampled peak would land far below the bound for
+    // a reason that has nothing to do with whether the bound is correct.
+    //
+    // AND SAMPLING IS LEGITIMATE HERE, uniquely in this file: cellField has no fbm in
+    // it. See the note over cellFieldPlane in Generator.slang.
+    // ===========================================================================
+    {
+        GeneratorInput_0 cg = g;
+        cg.cellDensity_0  = 1.0f;   // every slot occupied -- the case the bound assumes
+        cg.cellStrength_0 = 1.0f;   // so the sampled maximum IS the overlap factor
+        cg.cellDrift_0    = make_float2(0.0f, 0.0f);
+
+        const int   side = 1024;
+        const float spacing = cg.cellSize_0 * 2.2f;   // kCellSpacing, one grid pitch
+
+        // FOUR PITCHES ACROSS, OFFSET OFF THE LATTICE. The field is periodic in nothing
+        // -- the jitter comes from a hash of the slot -- so a few pitches sample many
+        // different slot neighbourhoods. The offset is so the sample grid does not land
+        // on the slot lattice, where the corners that matter are.
+        const float span = spacing * 4.0f;
+
+        float* dPlane = nullptr;
+        cudaMalloc(&dPlane, static_cast<size_t>(side) * side * sizeof(float));
+
+        RWStructuredBuffer<float> sPlane;
+        sPlane.data  = dPlane;
+        sPlane.count = static_cast<size_t>(side) * side;
+
+        std::vector<float> plane(static_cast<size_t>(side) * side);
+
+        double sampledMax = 0.0;
+
+        // MANY PATCHES OF THE PLANE, so the answer is not one neighbourhood's luck --
+        // and so the note below about how rare the worst jitter is has a number under it.
+        // 7 x 7 patches of 4 pitches each is 784 slot neighbourhoods at 1024x1024 apiece.
+        int patches = 0;
+        for (int py = -3; py <= 3; ++py)
+        for (int px = -3; px <= 3; ++px) {
+            ++patches;
+            const float2 origin = make_float2(static_cast<float>(px) * span + 0.137f * spacing,
+                                              static_cast<float>(py) * span + 0.291f * spacing);
+
+            dim3 block(8, 8);
+            dim3 grid((side + 7) / 8, (side + 7) / 8);
+            cellFieldPlane<<<grid, block>>>(cg, origin, span, sPlane, side);
+            cudaMemcpy(plane.data(), dPlane, plane.size() * sizeof(float),
+                       cudaMemcpyDeviceToHost);
+
+            sampledMax = std::max(sampledMax,
+                                  static_cast<double>(*std::max_element(plane.begin(),
+                                                                        plane.end())));
+        }
+        cudaFree(dPlane);
+
+        const double hostOverlap = static_cast<double>(plugin::cloud::cellOverlapBound());
+
+        std::printf("\ncellField with every slot occupied, %d patches x %dx%d\n",
+                    patches, side, side);
+        std::printf("  kernel sampled maximum      %.4f\n", sampledMax);
+        std::printf("  host cellOverlapBound()     %.4f\n", hostOverlap);
+        std::printf("  the trivial nine-slot bound 9.0000\n");
+        std::printf("  slack %.3fx, against 9/%.4f = %.2fx before the derivation\n",
+                    sampledMax > 0.0 ? hostOverlap / sampledMax : 0.0,
+                    sampledMax, sampledMax > 0.0 ? 9.0 / sampledMax : 0.0);
+
+        if (!(sampledMax > 0.0)) {
+            std::printf("    FAIL: cellField is zero everywhere, so this proved nothing\n");
+            ++failures;
+        }
+
+        // ---------------------------------------------------------------------
+        // WHY THE SAMPLED MAXIMUM SITS WELL BELOW THE BOUND, AND WHY THAT IS NOT SLACK
+        // TO BE REMOVED.
+        //
+        // MEASURED: 1.69 against a bound of 3.26, over 784 slot neighbourhoods.
+        //
+        // The bound is over every jitter the hash could produce. Reaching 3.26 needs all
+        // four cells around one slot corner to have jittered TOWARDS it, and the jitter
+        // is `hash22(o, 0u) - 0.5` -- fixed per slot, not free. Four independent draws
+        // all landing in the same eighth of their square is about one neighbourhood in a
+        // few thousand, so a sweep of a few hundred does not see it.
+        //
+        // IT IS STILL REACHED. There is no seed, and the sky is millions of slots wide,
+        // so a configuration that is rare per neighbourhood is certain somewhere in the
+        // frame -- and null-collision tracking is biased, not merely slow, at the one
+        // place the majorant is under the field. So the bound covers the rare case by
+        // construction and the sampled maximum is a FLOOR on the truth, exactly as the
+        // peak-density sweep above is.
+        //
+        // WHICH SETS WHAT THIS CAN ASSERT. Soundness, in the direction that matters. And
+        // that the four-slot derivation is still doing its job -- four blobs at a ceiling
+        // of one each is 4, so a bound at or above 4 means the derivation has collapsed
+        // back to the trivial nine and the 2.76x is gone. Both are guaranteed. "Close to
+        // the sampled maximum" is not, and asserting it would be asserting that the rare
+        // configuration never happens.
+        // ---------------------------------------------------------------------
+        if (hostOverlap < sampledMax) {
+            std::printf("    FAIL: cellOverlapBound() is BELOW the kernel's own cellField\n"
+                        "          -- %.4f against a sampled maximum of %.4f. Either a\n"
+                        "          constant mirrored in src/engine/IceField.h has drifted\n"
+                        "          from GeneratorLib.slang, or the four-slot derivation in\n"
+                        "          that header is wrong. Both make the majorant too low,\n"
+                        "          and a majorant that is too low renders a thinner cloud\n"
+                        "          rather than an error.\n",
+                        hostOverlap, sampledMax);
+            ++failures;
+        }
+
+        // ---------------------------------------------------------------------
+        // ...AND THE CONSTANTS THEMSELVES, EXACTLY, BECAUSE THE SWEEP ABOVE CANNOT CATCH
+        // A SMALL DRIFT.
+        //
+        // MEASURED WHILE WRITING THIS CHECK: moving the host's kCellSpacing from 2.2 to
+        // 2.6 -- an 18% error, far larger than a typo -- lowers cellOverlapBound() to
+        // 2.96, which is STILL above the 1.77 the sweep finds. So the sweep passed and
+        // the majorant was wrong. That is not a flaw in the sweep: it is the same
+        // floor-not-truth limit the peak-density sweep has, because the worst jitter
+        // configuration is rare and hundreds of neighbourhoods do not contain it.
+        //
+        // WHAT THE FOUR CONSTANTS ARE FOR. src/engine/IceField.h cannot include a .slang
+        // file, so it mirrors kCellSpacing, kCellJitter and the two blob edges and
+        // derives its bound from them. This reads the kernel's own copies back.
+        // ---------------------------------------------------------------------
+        {
+            const int probeCount = 8;
+            float* dProbe = nullptr;
+            cudaMalloc(&dProbe, probeCount * sizeof(float));
+            cudaMemset(dProbe, 0, probeCount * sizeof(float));
+
+            RWStructuredBuffer<float> sProbe;
+            sProbe.data  = dProbe;
+            sProbe.count = static_cast<size_t>(probeCount);
+
+            cellGeometry<<<1, 8>>>(sProbe, probeCount);
+
+            std::vector<float> probe(probeCount);
+            cudaMemcpy(probe.data(), dProbe, probe.size() * sizeof(float),
+                       cudaMemcpyDeviceToHost);
+            cudaFree(dProbe);
+
+            struct Mirror { const char* name; double kernel; double host; };
+            const Mirror mirrors[] = {
+                { "kCellSpacing", probe[0], static_cast<double>(plugin::cloud::kCellSpacing) },
+                { "kCellJitter",  probe[1], static_cast<double>(plugin::cloud::kCellJitter)  },
+                { "kBlobFar",     probe[2], static_cast<double>(plugin::cloud::kBlobFar)     },
+                { "kBlobNear",    probe[3], static_cast<double>(plugin::cloud::kBlobNear)    },
+            };
+
+            std::printf("\nthe four mirrored constants, kernel against host\n");
+            for (const Mirror& m : mirrors) {
+                const bool same = m.kernel == m.host;
+                std::printf("  %-14s kernel %-10.6g host %-10.6g %s\n",
+                            m.name, m.kernel, m.host, same ? "" : "  <-- DRIFTED");
+                if (!same) {
+                    std::printf("    FAIL: GeneratorLib.slang and src/engine/IceField.h\n"
+                                "          disagree about %s. IceField.h derives its\n"
+                                "          cell-overlap bound from this number, so the\n"
+                                "          bound is now a theorem about a field that is not\n"
+                                "          the one being rendered -- which means a majorant\n"
+                                "          below the density, and a cloud that renders\n"
+                                "          quietly too thin.\n", m.name);
+                    ++failures;
+                }
+            }
+
+            // AND THE DERIVED WORST CASE, DERIVED AND EVALUATED ENTIRELY IN THE KERNEL.
+            //
+            // Four blobs at the corner distance is the configuration the host's scan is
+            // searching for. THE HOST CONTRIBUTES NOTHING TO IT BUT ITS ANSWER -- see the
+            // note over cellGeometry for why a first version that passed the distance IN
+            // could not fail, and was measured not failing -- so the host's number must
+            // sit at that value: above it by no more than the Lipschitz slack its scan
+            // adds, and never below it.
+            const double kernelCorner   = static_cast<double>(probe[4]);
+            const double cornerDistance = static_cast<double>(probe[5]);
+
+            std::printf("  four blobs at the kernel's own corner distance %.5f cell-sizes\n",
+                        cornerDistance);
+            std::printf("    kernel arithmetic %.4f   host cellOverlapBound() %.4f\n",
+                        kernelCorner, hostOverlap);
+
+            if (hostOverlap < kernelCorner) {
+                std::printf("    FAIL: cellOverlapBound() is %.4f, BELOW the %.4f the\n"
+                            "          kernel's own blob gives for the configuration the\n"
+                            "          bound is supposed to cover. The scan is missing its\n"
+                            "          own worst case.\n", hostOverlap, kernelCorner);
+                ++failures;
+            }
+
+            // 1% covers the 0.0054 of Lipschitz slack with room to spare, and is tight
+            // enough that a fallback to the trivial nine cannot hide inside it.
+            if (hostOverlap > kernelCorner * 1.01) {
+                std::printf("    FAIL: cellOverlapBound() is %.4f against a worst case of\n"
+                            "          %.4f, which is more slack than the scan's own\n"
+                            "          Lipschitz margin allows. Either the scan searched\n"
+                            "          the wrong square or it fell back to the trivial\n"
+                            "          nine-slot bound.\n", hostOverlap, kernelCorner);
+                ++failures;
+            }
+        }
+    }
+
+
+
 
     cudaFree(dDrift);
 

@@ -274,6 +274,39 @@ struct ViewParams {
     // physical radiance and the pixel.
     Real exposureEV = 0.0f;
     bool agxTonemap = false;
+
+    // ---------------------------------------------------------------------
+    // WHETHER THE OUTPUT CARRIES A DISPLAY TRANSFER CURVE, AND IT IS A PROPERTY OF
+    // THE PROJECT RATHER THAN OF THE BIT DEPTH.
+    //
+    // MEASURED 2026-09-28, in AE 2026 with Working Color Space set to None and
+    // "Linearize working color space" unchecked -- which is the default: AE applies
+    // NO transform to either buffer on the way to the screen. It is the identity, in
+    // both directions, at every bit depth. Confirmed by rendering one frame at 32 bpc
+    // and again at 16 bpc and comparing the two screenshots: they differed by exactly
+    // one sRGB encode, to half a code value on flat areas.
+    //
+    // WHICH MEANS A GENERATOR HAS TO ENCODE ITS OWN OUTPUT. An effect that filters
+    // somebody else's pixels never faces this -- whatever encoding arrives, leaves.
+    // One that makes light from nothing has to choose, and nothing in the buffer says
+    // which choice was made.
+    //
+    // THE CODE USED TO KEY THIS OFF THE BIT DEPTH: linear at 32 bpc, sRGB at 8 and 16.
+    // That is wrong, and it is wrong in a way that cannot be seen from inside one
+    // depth -- the two render the same comp differently, and each looks plausible
+    // alone. Bit depth and colour space are orthogonal in After Effects. The encoding
+    // follows the PROJECT.
+    //
+    // DEFAULT TRUE, because Working Space None is AE's default and is what
+    // proto/index.html does -- and proto is what passed the Phase 0 look verdict, so
+    // it is the reference for what this renderer is supposed to look like.
+    //
+    // FALSE IS FOR A COLOUR-MANAGED PROJECT, where AE linearises the working space and
+    // applies the display transform itself; encoding there would double-encode. The
+    // SDK exposes AEGP_IsOCIOColorManagementUsed and AEGP_DoesViewHaveColorSpaceXform
+    // to tell the two apart, and wiring those up is what closes this properly.
+    // ---------------------------------------------------------------------
+    bool encodeSrgb = true;
 };
 
 // ---------------------------------------------------------------------------
