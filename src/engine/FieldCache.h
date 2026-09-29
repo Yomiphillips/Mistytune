@@ -120,20 +120,32 @@ uint64_t samplingHash(const cloud::ViewParams& v, const cloud::QualityParams& q)
 // magnitudes -- so the exposure has to be in the numbers before the denoiser sees
 // them, or denoise strength silently tracks the exposure slider.
 //
-// THAT ARGUMENT IS STILL TRUE AND IT CONSTRAINS THE ORDER INSIDE THE RESOLVE PASS,
-// NOT WHETHER EXPOSURE IS A SAMPLING INPUT. The resolve is
+// THAT ARGUMENT TURNS OUT TO BE FALSE FOR OIDN 2.x, AND IT WAS MEASURED RATHER THAN
+// ARGUED AGAIN. The filter normalises its own input: the same image denoised three
+// stops apart agrees to 0.42% once the gain is divided out. Denoise strength does NOT
+// track the exposure slider, so exposure does not have to reach the denoiser first.
+// See TheHdrFilterIsScaleInvariantSoExposureNeedNotPrecedeIt in
+// tests/unit/TestDenoiser.cpp, kept so a future OIDN that stops auto-exposing says so
+// there rather than in somebody's render.
 //
-//     mean -> exposure -> DENOISE -> tonemap -> encode
+// SO THE RESOLVE IS THE SIMPLER THING the rest of the codebase already described:
 //
-// and every stage of it is cheap next to tracing. So the denoiser still sees exposed
-// values, and an exposure change still costs one denoise -- about 30 ms on CUDA --
-// rather than a re-render of 2.97 s.
+//     mean -> DENOISE -> exposure, tonemap, encode
+//
+// one output-transform pass rather than two, which is worth about 5 ms a frame at
+// 1080p. What has NOT changed is the constraint that matters: the denoiser must never
+// see a TONEMAPPED or ENCODED buffer. Scale invariance is not curve invariance, and
+// AgX is not a gain.
+//
+// THE SPLIT ITSELF STANDS EITHER WAY. Every stage of the resolve is cheap next to
+// tracing, so an exposure change costs one resolve -- the denoise included, about
+// 30 ms on CUDA -- rather than a re-render of 2.97 s.
 //
 // WHAT MADE THE SPLIT POSSIBLE was lifting applyOutputTransform out of renderPixel.
 // While it ran per sample, the destination held exposed values from the first sample
 // onward and there was nothing linear left to re-expose.
 // ===========================================================================
-uint64_t resolveHash(const cloud::ViewParams& v);
+uint64_t resolveHash(const cloud::ViewParams& v, const cloud::QualityParams& q);
 
 class FieldCache {
 public:
@@ -178,6 +190,71 @@ private:
     bool     m_valid   = false;
     RenderKey m_key;
     int32_t  m_samples = 0;
+};
+
+// ===========================================================================
+// A FieldCache PLUS THE GEOMETRY OF THE BUFFER IT DESCRIBES, AND THE ONE QUESTION THE
+// RENDER LOOP ACTUALLY ASKS OF IT: may this frame be resolved without tracing?
+//
+// ONE OF THESE PER ENGINE, PER RENDER THREAD, thread_local in the effect, beside the
+// accumulators -- which are thread_local too. A shared cache over per-thread buffers is
+// wrong even with a lock: thread A records 32 samples, thread B is told "resolve", and
+// resolves from ITS OWN buffer while the cache vouches for A's.
+//
+// IN src/engine/ RATHER THAN IN THE EFFECT because every condition in canResolve() is
+// one whose absence renders a plausible wrong picture, and here they are testable in
+// microseconds with no host. See tests/unit/TestFieldCache.cpp.
+// ===========================================================================
+class AccumulatorCache {
+public:
+    // Stop vouching for anything. Called BEFORE any render that will write the
+    // accumulator, so that a fallback or an abort partway through leaves it empty.
+    void invalidate() { m_fc.clear(); m_widthPx = m_heightPx = m_pitchPx = 0; }
+
+    // MAY THIS FRAME BE REBUILT FROM THE ACCUMULATOR WITH ZERO NEW SAMPLES?
+    //
+    //   * field and sampling hashes match -- FieldCache answers ResolveOnly or
+    //     Accumulate only when both do. Otherwise the buffer holds another sky or
+    //     another view.
+    //
+    //   * THE SAMPLE COUNT MATCHES EXACTLY, not "at least". Resolving 128 samples for a
+    //     frame asked at 64 gives a cleaner picture -- and a frame whose noise depends
+    //     on what this thread rendered before it. Under multi-frame rendering that is
+    //     neighbouring frames at different noise levels for no visible reason.
+    //     samplesPerPixel is in no hash on purpose, so this is the only place it is
+    //     checked.
+    //
+    //   * THE GEOMETRY MATCHES. The accumulator is indexed by row pitch, pitch is in no
+    //     hash, and AE's rowbytes can differ between two renders of one frame. A resolve
+    //     at another pitch reads every row at the wrong stride: it renders, it is
+    //     garbage.
+    bool canResolve(const RenderKey& key, int32_t totalSamples,
+                    int32_t widthPx, int32_t heightPx, int32_t pitchPx) const {
+        const Decision d = m_fc.decide(key);
+        if (d != Decision::ResolveOnly && d != Decision::Accumulate) return false;
+        if (m_fc.samples() != totalSamples) return false;
+        return m_widthPx == widthPx && m_heightPx == heightPx && m_pitchPx == pitchPx;
+    }
+
+    // A WHOLE FRAME, rendered start to end on one engine with nothing aborted, is now
+    // in the accumulator. The only thing that credits the cache.
+    void adoptFull(const RenderKey& key, int32_t totalSamples,
+                   int32_t widthPx, int32_t heightPx, int32_t pitchPx) {
+        m_fc.adopt(key);
+        m_fc.addSamples(key, totalSamples);
+        m_widthPx = widthPx; m_heightPx = heightPx; m_pitchPx = pitchPx;
+    }
+
+    // The frame was re-resolved: same samples, new resolve key.
+    void adoptResolve(const RenderKey& key) { m_fc.adoptResolve(key); }
+
+    int32_t samples() const { return m_fc.samples(); }
+
+private:
+    FieldCache m_fc;
+    int32_t    m_widthPx  = 0;
+    int32_t    m_heightPx = 0;
+    int32_t    m_pitchPx  = 0;
 };
 
 } // namespace plugin::sim

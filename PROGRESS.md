@@ -4,6 +4,516 @@ Tracked against `PLAN.md`. Newest first.
 
 ---
 
+## 2026-09-29 — BLUE-NOISE OFFSETS DO NOTHING FOR THIS RENDERER, MEASURED AND REVERTED. PLAN.md's first flicker mitigation was built through the shipping path, swept from 0 to 16 blue-noise draws, and left every metric within noise; a sanity render proves the wiring was right and names why it cannot work under delta tracking.
+
+### Why this was next
+
+The previous shimmer entry ranked blue-noise offsets first: PLAN.md lists them first,
+and the sampler's frame stability is what already makes the raw image the temporally
+stable one. So that was the thing to try.
+
+### First, the harness could not see the denoiser
+
+`mistytunec --denoise` quietly did nothing. `denoiseCpu` returns false and leaves the
+image alone when OIDN is not beside the binary, which is correct for the effect, and
+the CLI never said so. **The first "denoised" sweep of this session was byte-identical
+to the raw one.** It was caught only because four rows agreed to the last digit. The
+CLI now prints `denoise: <denoiserDescription()>` whenever a denoise was asked for,
+either `OpenImageDenoise loaded from ...` or the paths it tried. Run from a build
+tree, set `MISTYTUNE_OIDN_DIR=<repo>\tools\oidn\bin`.
+
+### The baseline, re-measured and with its command line this time
+
+The previous entry's figures (0.227 raw / 0.453 denoised) did not record their camera.
+Re-measured:
+
+    mistytunec -w 240 -h 135 -s 4 --pitch 12 --time <0, 0.5 .. 3.5> [--denoise-amount a]
+
+| | raw shimmer | denoised (1.0) shimmer |
+| --- | --- | --- |
+| `--pitch 0` (CLI default) | 0.113 | 0.185 |
+| `--pitch 12` (effect default) | **0.198** | **0.371** |
+
+Pitch 12 reproduces the recorded ratio (the denoiser roughly doubles the shimmer), so
+everything below uses it. The truth is 2048 spp.
+
+### What the noise actually is
+
+A 4 spp frame of this cirrus is **sparse bright dots on a clean sky**. Most camera rays
+pass through the thin medium without a real collision; a few scatter and bring back the
+forward-peaked sun. The pixel's value is dominated by that yes-or-no decision.
+
+### What was built
+
+The textbook version (Georgiev & Fajardo 2016), end to end through the shipping kernel
+on both backends:
+
+- A 64x64 void-and-cluster tile per sampled dimension, generated offline into a header.
+  Checked properly blue: below a quarter of Nyquist, each channel's power is under 0.2%
+  of its high-band power. Thresholded at 25%, the pattern a one-in-four event makes, it
+  is still blue. Cross-channel correlation is under 0.04.
+- Each pixel's samples walk away from its blue-noise offsets along Roberts' R2 (jitter)
+  and R16 (transport), in 32-bit fixed point, keyed to the frame pixel and the sample
+  index. No time input, so a pixel draws the same numbers every frame.
+- An optional prefix on `Rng.slang`, so the first N `randFloat` calls of a path return
+  the given values before PCG takes over.
+- An A/B knob. **`--blue-dims -1` reproduced all three goldens byte-identically on the
+  CPU and on CUDA**, so the comparison below is the same binary with one variable changed.
+
+### Measured: nothing
+
+8 frames, 4 spp. "Blueness" is error power in the band 0.125–0.375 of Nyquist over the
+band 0.625–1.0 (white is about 1, blue well below 1). The band below 0.125 is skipped
+because it holds the display-space bias of a noisy mean, which is not noise.
+
+| blue-noise draws | raw shimmer | raw blueness | raw RMSE | denoised shimmer | denoised RMSE |
+| --- | --- | --- | --- | --- | --- |
+| white (before) | 0.198 | 1.38 | 17.49 | 0.371 | 5.30 |
+| 0 (jitter only) | 0.178 | 1.43 | 17.29 | 0.334 | 5.32 |
+| 4 | 0.191 | 1.36 | 17.35 | 0.378 | 5.46 |
+| 8 | 0.187 | 1.27 | 17.37 | 0.374 | 5.44 |
+| 16 | 0.189 | 1.37 | 17.29 | 0.368 | 5.41 |
+
+**The error stays white at every prefix length.** The shimmer moves by less than its own
+spread across seeds. To check the one row that looked promising, jitter-only was run
+over four field seeds and 16 frames at denoise 1.0:
+
+| seed | white | jitter only | 16 draws |
+| --- | --- | --- | --- |
+| 0x5eed1ce5 | 0.355 | 0.338 | 0.371 |
+| 0x1234567 | 0.359 | 0.348 | 0.383 |
+| 0xbadc0de | 0.363 | 0.356 | 0.342 |
+| 0x7777 | 0.341 | 0.337 | 0.370 |
+
+Jitter-only is consistently better by about 3%. Sixteen draws are worse on three seeds
+of four. Neither comes near the gap between denoised (~0.35) and raw (~0.19).
+
+### The sanity render that says it was wired right, and why it cannot work
+
+A negative result from new code is only worth recording if the code was right. So every
+pixel was given THE SAME offsets:
+
+- **16 identical draws:** the upper sky turns into solid blobs, whole regions scattering
+  together. The first 16 draws do carry the scatter decision, except on grazing paths
+  near the horizon, which still need more.
+- **2 identical draws:** still independent-looking dots. The first tentative collision
+  alone decides very little.
+
+That is the explanation. With the majorant grid off (SlangBridge.h records ~4.8
+tracking steps per camera ray at the shipping majorant, two draws each), **whether a
+ray scatters is a joint function of ten or more draws**: an OR over several tentative
+collisions, each accepted against the density at a distance set by the draws before it.
+Per-dimension blue noise only makes the *additive* part of the error blue. The part that
+depends on the draws jointly stays white, and for a thin, sparse medium under delta
+tracking that part is nearly all of it. This is the known limit of blue-noise dithering
+in high dimensions, and this transport sits squarely inside it.
+
+### Reverted, deliberately
+
+A 3% shimmer gain from jitter-only does not pay for re-blessing every golden and
+carrying a tile, a generator and a sampler switch. The kernel is back to the white-noise
+sampler, and the generated Slang is byte-identical to before (`slang.regenerates`
+passes). What stays is the CLI's denoiser line.
+
+### What this changes about the plan
+
+**The dots are the problem, and they come from the estimator rather than the sampler.**
+PLAN.md's remaining mitigations should be judged against that:
+
+- **Aux buffers are weaker here than they look.** The cloud's single-scatter albedo is a
+  constant, so an albedo feature is really a coverage map. Rendered by the same
+  collide-or-not decision, it would be exactly as dotty as the colour. It only helps if
+  it comes from a continuous estimate, such as a ratio-tracked `1 - T` along the camera
+  ray, which ratio tracking already provides without a Bernoulli.
+- **A continuous primary-ray estimator is the candidate worth measuring next.** Score
+  the sun's next event at *every* tentative collision on the camera segment, weighted
+  by `sigma/majorant` times the ratio-tracked transmittance up to it. By Campbell's
+  theorem that is unbiased for the single-scatter integral, and it replaces the
+  yes-or-no that makes the dots with a sum that varies smoothly. Its cost is one shadow
+  ray per tentative collision, about five per camera ray here. It is a transport change,
+  so it answers to the furnace test and slang.bounce, and it is a hypothesis until
+  measured.
+- **Raising spp** stays the fallback it always was.
+
+### State
+
+146 unit tests, 25 ctest suites, goldens untouched. Build and minor unchanged; the only
+product-side change is a line of CLI output.
+
+---
+
+## 2026-09-29 — THE ACCUMULATOR CACHE IS LIVE: a resolve-only change costs about 10 ms instead of 3.9 s. The last Phase 2 exit criterion, reached by way of a test that first proved it could not fail, and a hash that had the denoiser in the wrong key.
+
+### Why now, when three entries ago it was declined
+
+The 2026-09-28 entry declined to wire the cache for three reasons. All three have since
+been answered: there is a real medium now (reason 1); the sampling/resolve key split
+landed (reason 2); and the previous entry moved the cache thread_local, which removes the
+MFR sharing problem without a lock (reason 3). A frame costs seconds rather than the 20 ms
+that made it not worth doing. **It is the last Phase 2 exit criterion.**
+
+What still blocked it was the GPU accumulator's SIZE.
+
+### The GPU accumulator is frame-sized — a pointer offset, not new arithmetic
+
+It was `rowBytes * bandRows`, so each band overwrote the last and nothing survived the
+render that made it. It is now `rowBytes * heightPx`, and each band is handed the slice
+starting at its first row. **The kernel is unchanged**: `renderPixel` indexes with the
+band-local row it already used, and the base pointer does the mapping. Teaching the kernel
+a frame-relative row instead would have been the band-as-window arithmetic this project
+has shipped wrong three times.
+
+### A test was written, and then shown to be unable to fail
+
+`determinism.gpuBandChunks` renders in bands *and* sample chunks and compares against the
+whole frame. It passed. **So the offset was deleted, and it still passed.**
+
+The reason is worth keeping: each band's first chunk RE-INITIALISES the accumulator, so
+bands sharing one region still produce the right mean as long as they run in sequence. The
+offset only matters when a frame must survive **a second pass** — which is the cache, and
+which nothing yet did.
+
+The discriminating test is `--resolve-check` on the GPU, which used to refuse outright
+("needs the CPU accumulator"). It now walks the bands a second time with zero new samples,
+so band 1 resolves from its own slice or from band 0's. **With the offset deleted, exactly
+one test of 25 goes red: `resolve.reproducesTheRenderOnGpuInBands`.** `gpuBandChunks` stays,
+with a comment saying what it does and does not cover.
+
+### Denoise was in the sampling key, so the slider re-traced every nudge
+
+`denoise` and `denoiseAmount` were hashed into `samplingHash`, on the reasoning that OIDN
+would need auxiliary albedo/normal buffers written while tracing. The integration that
+landed uses none — it filters the finished colour, after accumulation. **So every drag of
+Denoise Amount threw the frame away and traced it again**, on the one control a user tunes
+by eye. Both now live in `resolveHash`, which takes `QualityParams` as well as
+`ViewParams`. A test asserts both halves, and says it is supposed to fail if aux buffers
+are ever added.
+
+### The rules that keep it failing safe
+
+`sim::AccumulatorCache`, in `src/engine/FieldCache.h`, one per engine, thread_local in the
+effect beside the accumulators.
+
+- **Only split renders are cached.** An unsplit render takes the no-accumulator branch and
+  leaves the buffer holding another frame. Draft at one chunk never resolves — cheap to
+  trace anyway.
+- **Invalidate before writing, credit after completing.** A full render invalidates BOTH
+  engines' caches before it touches an accumulator. Only a frame finished start to end on
+  one engine, not aborted, is credited. A GPU failure mid-frame invalidates both, and a
+  resolve that fails over traces the rest in full rather than resolving from the CPU's
+  buffer, which holds something else.
+- **Exact sample count, both directions.** Resolving 128 samples for a frame asked at 64
+  looks harmless and is not: frame noise would depend on the worker's history, and MFR
+  would return neighbouring frames at different noise levels.
+- **Geometry, because pitch is in no hash.** AE's rowbytes can differ between two renders
+  of one frame with every hash matching; a resolve at the old stride shears the picture.
+- **`SMART_RENDER_GPU` and device setdown invalidate the GPU cache** — the first writes the
+  same device accumulator without crediting, the second takes the device away.
+
+Each `canResolve` condition has its own unit test, because each guards a picture that
+renders plausibly and is wrong, and none of them is visible on a still in the host.
+
+### Measured
+
+1920x1080, 64 spp, GPU, four paired runs:
+
+| | min | spread |
+| --- | --- | --- |
+| trace only | 3.877 s | 0.058 s |
+| trace + resolve | 3.883 s | |
+
+Every resolve run is 6–12 ms slower than its paired trace — a consistent signal well under
+the 58 ms noise. **About 10 ms, against 3.9 s: roughly 400x** on Exposure, AgX, Denoise and
+Denoise Amount. Add ~30 ms of CUDA denoise when that is on.
+
+### State
+
+146 unit tests, 25 ctest suites. Build 12, minor 5.
+
+### What needs the host, and it is specific
+
+- **Whether it hits.** A resolve needs the SAME worker thread to re-render the SAME frame.
+  Parked on a frame dragging a slider, that is likely; whether AE actually routes it so is
+  unmeasured. The diagnostic line now says `resolved` or `traced` — a `traced` right after
+  a slider drag, on a split render, is a miss worth reporting.
+- **Nothing here shortens a first render or a camera move.** Those change the sampling key
+  and trace, exactly as before. The cache makes the *second* look at a frame cheap.
+- **Raising Samples still restarts.** `Accumulate` — continue from 64 to 128 rather than
+  start again — is answered by the cache and deliberately not acted on: it needs the chunk
+  loop to start mid-frame across a possible engine fallback, and that is its own change.
+- **GPU memory per worker went up.** The device accumulator is frame-sized now — 33 MB
+  at 1080p — where it was band-sized, and there is one per render thread. Together with
+  the per-thread OIDN device recorded two entries ago, that is the thing to watch under a
+  multi-frame render.
+
+---
+
+## 2026-09-29 — "TOO SMOOTH" AND "IT SHIMMERS" ARE THE SAME BUG, AND THE FIX IS ONE SLIDER. Both complaints come back from the host; both are measured; and they turn out to move TOGETHER rather than trade against each other, which is the opposite of what was assumed before measuring.
+
+### The two reports
+
+From the host, build 10: the denoised cirrus reads **too smooth**, and it **shimmers**
+on a moving render. The second was predicted — PLAN.md says denoiser flicker is judged
+on a moving render and never on a still, and the last entry listed it as the open
+question. The first was not.
+
+### The CLI could not render a sequence at all
+
+`field.timeSeconds` had no command-line flag, so `mistytunec` rendered every frame at
+t=0. **The one thing PLAN.md says flicker must be judged on was the one thing the
+harness could not produce.** `--time <sec>` now exists, and everything below is measured
+through it.
+
+### Measurement 1: the denoiser DOUBLES the shimmer
+
+Eight frames, 240x135 at 4 spp, half a second apart, mean absolute frame-to-frame
+difference per channel:
+
+| | frame-to-frame | temporal Laplacian |
+| --- | --- | --- |
+| raw | 0.227 | 0.452 |
+| denoised | **0.453** | 0.730 |
+
+**The denoised sequence changes twice as much per frame as the raw one.** OIDN is not
+temporal: it reconstructs each frame independently, so a small input difference can
+produce a large output difference in a smooth region. The raw noise, by contrast, is
+nearly FIXED-PATTERN — `hashPixelSample` takes (pixel, sample index, field seed) and no
+frame input, so a given pixel draws the same numbers every frame — and a static pattern
+barely moves frame to frame.
+
+So the denoiser is not merely failing to fix the shimmer. It is the source of it.
+
+### Measurement 2: the denoiser removes two thirds of the REAL detail
+
+The suspicion that "too smooth" just means "4 spp has no detail to keep" is testable:
+render the same frame at 512 spp and ask how much fine structure the truth has. Mean
+neighbouring-pixel difference:
+
+| | | |
+| --- | --- | --- |
+| 512 spp (truth) | 2.364 | 100% |
+| 4 spp, raw | 9.887 | 418% — four times too much; that is the noise |
+| 4 spp, amount 0.5 | 4.984 | 211% |
+| 4 spp, amount 0.8 | 2.655 | **112%** |
+| 4 spp, amount 1.0 | 0.769 | **33%** |
+
+**A full denoise leaves a third of the fine structure a converged render actually has.**
+The report was right, and it is not a preference — the filter overshoots on this
+content.
+
+**RMSE DISAGREES, AND THAT IS WHY THIS IS A SLIDER AND NOT A CONSTANT.** Against the
+same 512-spp reference, RMSE is minimised at amount **0.95** (9.669, against 9.751 at
+1.0 and 25.985 raw). RMSE rewards blur: a smooth wrong image beats a noisy right one.
+The two criteria genuinely point at different numbers, so the choice belongs to whoever
+is looking at the picture. The default follows the structure measurement, because that
+is the one that corresponds to what was complained about.
+
+### The two complaints are the same dial, and they do not trade
+
+This was the finding worth the whole exercise. The assumption going in — written down
+before measuring — was that blending raw noise back would restore detail at the cost of
+MORE shimmer, because noise is what shimmers. **It is the other way round.** The raw
+noise is nearly static, so keeping some of it is temporally cheap, while the denoised
+image is the unstable one:
+
+| amount | shimmer | fine structure |
+| --- | --- | --- |
+| 0.00 | 0.227 | 418% of truth |
+| 0.50 | 0.338 | 211% |
+| 0.80 | 0.395 | 112% |
+| 1.00 | 0.453 | 33% |
+
+Detail and stability move together. There is no trade to warn anyone about: turning the
+amount down helps both complaints at once, and the only thing it costs is noise.
+
+### What was built
+
+**`QualityParams::denoiseAmount`, default 0.8**, hashed beside the switch it scales.
+OIDN's RT filter has no strength of its own, so it is a lerp between the raw render and
+the filtered one — **in linear, before the output transform**, which is the only place
+it can be correct. Blending after the transfer curve would mix two differently encoded
+images.
+
+**THE BLEND NEEDS NO SECOND BUFFER.** At the unpack the destination still holds the
+original radiance — the pack read from it and the filter worked in its own buffer — so
+the raw value is already under the write.
+
+**A RESERVED SPARE BECAME THE CONTROL.** `QualitySpare1` was id 304 and is now Denoise
+Amount at id 304. No index moved, no saved project is rewired, and it sits beside the
+switch it scales rather than after the Output group. **That is the entire reason the
+spares exist**, and this is the first time one has been spent.
+
+Minor 4 -> 5, build 11: `PARAMS_SETUP` only re-runs after a version change, so without
+the bump the slider would not appear at all.
+
+### Proved
+
+Three new tests on top of the ten from the last entry. The endpoints are what a test can
+pin — whether 0.8 is the right default is a judgement about pictures, but **0 being the
+identity and 0.5 landing exactly at the midpoint of raw and fully denoised is
+arithmetic**, and it is the arithmetic that would break silently. Amount 0 also returns
+false and skips the filter entirely rather than running it and discarding the result.
+
+**THE DEFAULT WAS RE-MEASURED THROUGH THE SHIPPING PATH BEFORE IT WAS FIXED.** The first
+sweep lerped 8-bit output and predicted 100% of truth at 0.8; the real blend, in linear,
+gives 112%. Close enough to keep 0.8, and a reminder that a simulation of the pipeline
+is not the pipeline.
+
+138 unit tests, 23 ctest suites, goldens untouched -- the CLI still defaults to no
+denoise, so tier 2 remains independent of whether `tools/oidn/` exists.
+
+### Still open
+
+- **THE SHIMMER IS REDUCED, NOT SOLVED.** At 0.8 it is 0.395 against 0.453 -- about 13%
+  better, and still worse than raw. The real fixes are PLAN.md's remaining mitigations,
+  and the measurements above reorder them: **blue-noise offsets** are now clearly the
+  next one, because the sampler's frame-stability is exactly what makes the raw image
+  the temporally stable one, and blue noise would make that stability perceptually
+  cheaper. Aux buffers come after.
+- **AUXILIARY ALBEDO AND NORMAL BUFFERS** would let the filter keep detail without
+  giving noise back, which is the only way to beat the trade rather than move along it.
+  Kernel work: the renderer would have to emit them, and what "albedo" and "normal" mean
+  for a volume needs deciding.
+- **WHETHER 0.8 IS RIGHT AT OTHER SAMPLE COUNTS IS UNMEASURED.** It was fitted at 4 spp.
+  At 32 spp the raw image is far less noisy and the same amount will keep more real
+  detail and more real noise; the right default may well be sample-count dependent,
+  which would make it a curve rather than a constant.
+
+---
+
+## 2026-09-29 — THE DENOISE CHECKBOX DOES SOMETHING. Third instance in three sessions of a control wired everywhere except the one place that makes it real; plus a measurement that settled two comments arguing with each other, and made the fix simpler rather than harder.
+
+### What was wrong, and it is getting familiar
+
+`QualityParams::denoise` was checked out, mapped in `toQuality()`, hashed into the
+fingerprint and defaulted **on** — and nothing read it. There was no OIDN code in the
+repository and no `cmake/FetchOidn.cmake`. `Mistytune.cpp` said "OIDN goes in
+immediately above this line when it lands."
+
+That is the ice parameters, the sky origin, and now this: **three controls in three
+sessions that were plumbed, hashed, tested and shipped without the one line that makes
+them real.** The shared cause is worth naming — each was finished right up to the seam
+where a *different* subsystem had to accept it, and nothing in three test tiers looks
+at a seam.
+
+This one was the most visible of the three. At 1 spp Draft a path-traced cirrus is
+noise; the denoiser is what makes the preview usable at all.
+
+### What was built
+
+**`cmake/FetchOidn.cmake`** on the `tools/slang/` pattern: version and SHA256 pinned,
+gitignored destination, the repo carrying the instructions rather than 53 MB of
+binaries. It prunes the devices we do not ship — HIP, SYCL and its runtime, the three
+tools — and reports the remaining size. **52 MiB, which is exactly the figure recorded
+on 2026-09-28 as "verified to load and denoise."** The keep set was confirmed by
+arithmetic against that measurement before a line of it was written.
+
+**`src/engine/Denoiser.{h,cpp}`** — loaded with `LoadLibraryEx`/`GetProcAddress`, ten
+functions declared as a local ABI. **Nothing is linked.** There is no
+`OpenImageDenoise.lib` on any link line and no import-table entry, because a load-time
+import of a missing DLL is a plugin After Effects refuses to load AT ALL, with an error
+naming the effect and not the file — a failure indistinguishable from "Mistytune is
+broken". `LOAD_WITH_ALTERED_SEARCH_PATH` is load-bearing: the shim depends on
+`OpenImageDenoise_core.dll`, and without it the loader looks beside `AfterFX.exe`.
+
+**The buffer path, not the shared-pointer path.** `oidnSetSharedFilterImage` needs
+memory the *device* can read, and our destination is host memory — on a CUDA device a
+plain host pointer is not device-accessible. `oidnNewBuffer`/`write`/`read` works for
+every device type, so there is one code path rather than one per device. The pack it
+requires also solves channel order for free: OIDN's FLOAT3 reads three CONSECUTIVE
+floats, ARGB happens to store R,G,B that way and **BGRA stores them reversed**, which no
+stride expresses. AE hands out BGRA worlds, so that is the host path.
+
+**`kernel::denoiseCpu()`** beside `transformCpu()`, honouring the checkbox in one place
+so a fourth call site cannot be written without it.
+
+### The measurement that made it simpler
+
+Two comments in this repository disagreed. `FieldCache.h` fixed the resolve as
+`mean -> exposure -> DENOISE -> tonemap -> encode`, arguing OIDN is trained on
+perceptual magnitudes so "denoise strength silently tracks the exposure slider"
+otherwise. `Shading.h`, `KernelApi.h` and `Mistytune.cpp` all said the shorter
+`render (LINEAR) -> denoise -> output transform`.
+
+The difference was a whole extra full-frame pass — exposure lifted out of the transform,
+about 5 ms a frame at 1080p.
+
+**MEASURED: the same image denoised three stops apart agrees to 0.42% once the gain is
+divided out.** OIDN 2.x normalises its own input. The premise was false for this
+version, the transform stays one pass, and the three shorter comments were right. The
+test is kept, because it is the thing that will say so if a future OIDN stops
+auto-exposing.
+
+What has NOT changed is the constraint that actually matters: **scale invariance is not
+curve invariance.** A tonemapped or encoded buffer is still wrong to hand over, and AgX
+is not a gain.
+
+### Proved
+
+**Ten unit tests, and the ones that matter most run with no OIDN installed** — the
+refusal paths. A missing DLL, a pruned install folder, an antivirus quarantine: all of
+them land there, and it is the path no developer machine exercises by accident, so it is
+the one that rots. Bundling makes it rarer, not unnecessary.
+
+The strongest of the rest is an **equivalence**: the same colours laid out ARGB and BGRA
+must come back bit-identical. A channel-order bug would still smooth the image — it
+would denoise using the colour statistics of a differently-coloured picture, look almost
+right, and say nothing about channel order.
+
+**End to end through the CLI, 320x180 at 2 spp:** neighbour-difference energy falls from
+4.190 to 0.418 levels — **90%**.
+
+**A measured property of the filter, recorded rather than tolerated.** RT does not
+reproduce a flat field exactly at image CORNERS: on flat 0.25/0.50/0.75, 35 of 960
+pixels off by >0.02 at 40x24 (worst 0.135), and 15 of 15360 at 160x96 (worst 0.095). A
+fixed band rather than a fraction — the count barely moved while the area grew sixteen
+times — so it vanishes on a real frame. A wiring error would have scaled with the image
+instead. The test asserts the interior and leaves the border to those numbers.
+
+### The CLI does NOT denoise by default, and that is deliberate
+
+`mistytunec` renders the golden references and every determinism tripwire. Denoising
+there would have broken two things:
+
+- **Tier 2 would depend on whether `tools/oidn/` exists.** A machine that had fetched
+  OIDN and one that had not would bless different references. The whole arrangement is
+  built so a machine with neither Slang nor OIDN builds and tests identically.
+- **`determinism.window` could never pass.** It renders a sub-rect and requires it to
+  equal that region of the whole frame. A denoiser is SPATIAL — the same pixel denoised
+  with a window's neighbours and with the frame's is legitimately different. It would
+  have failed for a correct reason, which is the worst kind of failing test.
+
+So `--denoise` is opt-in there and on by default in the effect. 23 ctest suites and 135
+unit tests green, goldens untouched.
+
+### State, and what is NOT done
+
+Build 10, minor unchanged at 4. `build.ps1 -Install` and `-Package` copy the DLLs beside
+the `.aex` — which is where `Denoiser.cpp` looks, since it resolves its own module's
+directory and not the EXE's.
+
+- **NO HOST HAS SEEN THIS.** Whether it denoises correctly in After Effects, what it
+  costs there, and **whether it flickers** are all untested. OIDN is not temporal, and
+  per-frame denoising of a stochastic image is how animation gets shimmer. PLAN.md is
+  explicit that this is judged on a moving 48-frame render and never on a still. No unit
+  test substitutes for that.
+- **ALBEDO AND NORMAL AUXILIARY BUFFERS ARE NOT WIRED.** They are PLAN.md's second
+  flicker mitigation after stable blue-noise offsets, and they are kernel work: the
+  renderer would have to emit them. Deliberately left until there is a flicker
+  measurement to justify the cost.
+- **THE `PF_Cmd_SMART_RENDER_GPU` PATH DOES NOT DENOISE.** Its destination is a device
+  pointer AE owns, and the host denoiser cannot reach it without a round trip. AE does
+  not currently take that path — PROGRESS records it refusing the GPU command — so it
+  is a gap rather than a live bug.
+- **ONE OIDN DEVICE PER RENDER THREAD.** The session is `thread_local`, matching the
+  accumulator and the transmittance table, because an OIDN filter is not safe to execute
+  from two threads and a lock would serialise the denoise across every MFR worker. A
+  CUDA device is not small, so eight workers means eight contexts. **That is the first
+  thing to watch under a multi-frame render** and it is recorded here rather than
+  discovered.
+
+---
+
 ## 2026-09-29 — THE SKY WAS ASKED FROM THE WRONG PLACE. Every escaped path got the sky as seen from two metres, including one leaving a crystal at nine kilometres; the fix is one argument, and the sunset golden moved the OPPOSITE way from the other two, which is the measurement that says it is right.
 
 ### What was wrong

@@ -33,6 +33,7 @@
 #include "EffectCommon.h"
 #include "Params.h"
 
+#include "Denoiser.h"
 #include "FieldCache.h"
 #include "Fingerprint.h"
 #include "KernelApi.h"
@@ -129,42 +130,40 @@ void disposePreRenderData(void* p) {
 // to protect.
 //
 // ===========================================================================
-// THE FieldCache BELOW IS IN THE WRONG PLACE, AND A LOCK IS NOT THE FIX.
+// THE ACCUMULATOR CACHE: ONE PER ENGINE, PER RENDER THREAD, BESIDE THE BUFFER IT
+// DESCRIBES.
 //
-// This comment used to say the cache "will need the lock in Phase 2, when it starts
-// describing a real GPU allocation". That is the wrong answer, and knowing why is
-// worth more than the lock would have been.
+// It used to be a sim::FieldCache in SequenceData -- shared across every render thread
+// AE has in flight for the layer -- describing accumulators that are NOT shared: both
+// are thread_local, `g_accum` in CpuRender.cpp and the DeviceScratch of the same name in
+// Mistytune.cu. A shared cache over per-thread buffers is wrong even with a lock: thread
+// A records 32 samples, thread B is told "resolve", and resolves from ITS OWN buffer
+// while the cache vouches for A's. A mutex makes that race deterministic. It does not
+// make it correct.
 //
-// A CACHE MUST LIVE WHERE THE MEMORY IT DESCRIBES LIVES. Sequence data is shared
-// across every render thread AE has in flight for this layer. The accumulators it
-// would describe are NOT: both of them are `thread_local` --
-// `g_accum` in CpuRender.cpp and the DeviceScratch of the same name in Mistytune.cu.
+// SO IT IS thread_local TOO, and nothing is shared, and no lock exists. A thread that
+// has not rendered this frame sees an empty cache and renders from scratch -- exactly
+// the behaviour before the cache existed. THE WORST CASE OF A MISS IS A SLOW FRAME.
 //
-// So a shared cache describing per-thread buffers is wrong even WITH a lock. Thread A
-// adopts a key and records 32 samples; thread B asks, is told "Accumulate", and
-// accumulates into ITS OWN empty accumulator while the cache still claims 32 samples
-// are in it. The result is a frame that is darker or noisier than its neighbours for
-// no visible reason, arriving only under multi-frame rendering. A mutex makes that
-// race deterministic; it does not make it correct.
+// ONE PER ENGINE, BECAUSE THEY ARE TWO BUFFERS. A frame accumulated on the GPU is not in
+// the CPU's accumulator, and the render loop can switch engines mid-frame on a driver
+// failure. A single cache would vouch for whichever engine happened to render last.
 //
-// WHERE IT BELONGS is beside the accumulator, thread_local, in the kernel library --
-// and then no lock is needed at all, because nothing is shared. A thread that has not
-// rendered this key sees an empty cache and renders the frame from scratch, which is
-// exactly today's behaviour. THE DESIGN FAILS SAFE: the worst case of a cache miss is
-// a slow frame, never a wrong one.
-//
-// WHAT STILL BLOCKS IT is the GPU accumulator's SIZE rather than its lifetime. The CPU
-// one is already full-frame; the CUDA one is BAND-sized (`rowBytes * bandRows` in
-// renderCudaToHost), so it is overwritten by each band and cannot carry a frame across
-// renders. Making it frame-sized means indexing it by the band's offset into the frame
-// -- which is precisely the band-as-window arithmetic this project has got wrong three
-// times, and it should be written where a host can be watched rather than blind.
-//
-// The member stays here for now because nothing reads it, and moving it before the
-// accumulator question is settled would just relocate the problem.
+// WHAT IT ADDS BEYOND sim::FieldCache is the geometry. The accumulator is indexed by
+// row pitch, and pitch is in no hash -- AE's rowbytes can differ between two renders of
+// the same frame -- so a resolve at a different pitch would read every row at the wrong
+// stride. It renders; it is garbage. The check is cheap and the failure is silent.
 // ===========================================================================
+// THE LOGIC LIVES IN src/engine/FieldCache.h as sim::AccumulatorCache, where every one
+// of its conditions is unit-tested without a host -- each of them guards a picture that
+// would render plausibly and be wrong. Only the per-thread instances live here.
+thread_local sim::AccumulatorCache t_cpuAccumCache;
+thread_local sim::AccumulatorCache t_gpuAccumCache;
+
+// Nothing is kept per sequence any more. The struct stays because the sequence-setup
+// plumbing below allocates it, and a later per-layer setting has a home to go to.
 struct SequenceData {
-    sim::FieldCache cache;
+    int reserved = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -228,6 +227,24 @@ PF_Err gpuDeviceSetdown(PF_InData* in_data, PF_OutData* out_data,
     // Nothing allocated in setup, so nothing to release. See the note there.
     diagLog("GPU_DEVICE_SETDOWN: device_index=%d",
             static_cast<int>(extra->input->device_index));
+
+    // ONE THING IS ALLOCATED ELSEWHERE AND IS RELEASED HERE: this thread's OIDN
+    // session. An OIDN CUDA device holds a context and a few hundred MB, and AE may
+    // issue a setdown between renders rather than at the end of the session -- so
+    // leaving one alive per render thread after the GPU has been taken away is how the
+    // next render fails for a reason that points nowhere near the denoiser.
+    //
+    // ONLY THIS THREAD'S, WHICH IS THE LIMIT OF WHAT A thread_local CAN DO. The
+    // sessions belonging to AE's other render workers are released when those threads
+    // end. That is a real gap and it is bounded: a session is rebuilt on demand, so the
+    // worst case is memory held until the thread exits rather than a wrong picture.
+    cloud::denoiserShutdown();
+
+    // AND THIS THREAD'S GPU ACCUMULATOR CACHE, for the same reason: the device it
+    // described is being taken away, and a cache that outlived its buffer would vouch
+    // for memory that no longer holds the frame -- or no longer exists.
+    t_gpuAccumCache.invalidate();
+
     return PF_Err_NONE;
 }
 
@@ -391,7 +408,7 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
     fp.add(data->field);
     data->key.field    = fp.value();
     data->key.sampling = sim::samplingHash(data->view, data->quality);
-    data->key.resolve  = sim::resolveHash(data->view);
+    data->key.resolve  = sim::resolveHash(data->view, data->quality);
 
     // THE INPUT LAYER IS CHECKED OUT EVEN THOUGH PHASE 1 IGNORES ITS PIXELS.
     //
@@ -537,6 +554,13 @@ PF_Err smartRenderGpu(PF_InData* in_data, PF_OutData* out_data,
     req.accumulatorPitchPx = 0;
 
     if (samplesPerChunk < totalSamples) {
+        // THIS PATH WRITES THE SAME DEVICE ACCUMULATOR THE CPU COMMAND CACHES, and it
+        // does not credit the cache -- its destination is a device buffer AE owns, and
+        // resolving from it would need a second destination it cannot see. So the GPU
+        // cache stops vouching the moment this runs, or the next CPU-command render on
+        // this thread would resolve from a buffer this call just filled with another
+        // frame. Fails safe: the next render traces.
+        t_gpuAccumCache.invalidate();
         req.accumulator = kernel::reserveDeviceAccumulator(req.dest.pitchPx, output->height);
         if (!req.accumulator) {
             const char* why = kernel::lastCudaError();
@@ -786,6 +810,46 @@ PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
     const A_long totalUnits = bandCount * chunksPerBand;
     A_long unitsDone = 0;
 
+    // =======================================================================
+    // CAN THIS FRAME BE RESOLVED RATHER THAN TRACED?
+    //
+    // When nothing but a RESOLVE input changed -- exposure, AgX, the encoding, the
+    // denoise switch or its amount -- every sample in this thread's accumulator is
+    // still exactly right, and the frame can be rebuilt from it with zero new rays:
+    // one pass per band that divides the stored sum and nothing else. At final
+    // quality that is the difference between a slider nudge costing seconds and it
+    // costing the denoise.
+    //
+    // ONLY WHEN THE RENDER IS SPLIT, because only then was the accumulator WRITTEN.
+    // An unsplit render takes renderPixel's no-accumulator branch and leaves the
+    // buffer holding whatever the last split render put there -- another frame. A
+    // Draft render at one chunk therefore never resolves; it is cheap to trace anyway,
+    // and that is where the saving would have been smallest.
+    //
+    // INVALIDATE BEFORE WRITING, CREDIT AFTER COMPLETING. A full render is about to
+    // overwrite an accumulator, so both engines' caches stop vouching for anything
+    // NOW -- the render may fall back to the other engine partway, or be aborted, and
+    // neither leaves a whole frame anywhere. Only a frame finished start to end on one
+    // engine is credited, below the loop. Every path through here that is not that
+    // path leaves the cache empty, and an empty cache is a re-render, never a wrong
+    // picture.
+    // =======================================================================
+    const bool split      = samplesPerChunk < totalSamples;
+    const int  cacheW     = static_cast<int>(req.dest.widthPx);
+    const int  cacheH     = static_cast<int>(req.dest.heightPx);
+    const int  cachePitch = req.dest.pitchPx > 0 ? static_cast<int>(req.dest.pitchPx)
+                                                 : static_cast<int>(req.dest.widthPx);
+
+    sim::AccumulatorCache& startCache = useGpu ? t_gpuAccumCache : t_cpuAccumCache;
+    bool resolveOnly = split && startCache.canResolve(data.key, totalSamples,
+                                                      cacheW, cacheH, cachePitch);
+    bool fellBack = false;
+
+    if (!resolveOnly && split) {
+        t_cpuAccumCache.invalidate();
+        t_gpuAccumCache.invalidate();
+    }
+
     const double t0 = diagSeconds();
 
     for (A_long y = 0; y < output->height; y += rowsPerBand) {
@@ -807,9 +871,19 @@ PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
             for (int s0 = 0; s0 < totalSamples; s0 += samplesPerChunk) {
                 const int n = std::min(samplesPerChunk, totalSamples - s0);
 
-                req.firstSample        = s0;
-                req.sampleCount        = n;
-                req.samplesAlreadyDone = s0;
+                if (resolveOnly) {
+                    // ZERO NEW SAMPLES, AND THE STORED SUM DIVIDED BY THE COUNT IT HOLDS.
+                    // The same request --resolve-check makes, which is proved
+                    // byte-identical to a full render on both engines and, on the GPU,
+                    // in bands -- see resolve.reproducesTheRenderOnGpuInBands.
+                    req.firstSample        = totalSamples;
+                    req.sampleCount        = 0;
+                    req.samplesAlreadyDone = totalSamples;
+                } else {
+                    req.firstSample        = s0;
+                    req.sampleCount        = n;
+                    req.samplesAlreadyDone = s0;
+                }
 
                 if (useGpu) {
                     if (!kernel::renderCudaToHost(req, static_cast<int>(y),
@@ -825,6 +899,20 @@ PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
                                 static_cast<int>(y), why && why[0] ? why : "no detail");
                         useGpu  = false;
                         restart = true;
+
+                        // A RESOLVE CANNOT FALL BACK. The frame's samples are in the
+                        // GPU's accumulator and the CPU's holds something else, so
+                        // resolving there would build this band out of another frame.
+                        // This band -- and every one after it -- is traced in full on
+                        // the CPU instead. The bands already resolved are correct and
+                        // stay.
+                        //
+                        // AND NEITHER CACHE VOUCHES FOR ANYTHING NOW: the frame is
+                        // split across two engines, so no accumulator holds all of it.
+                        resolveOnly = false;
+                        fellBack    = true;
+                        t_cpuAccumCache.invalidate();
+                        t_gpuAccumCache.invalidate();
                         break;
                     }
                 } else {
@@ -851,16 +939,42 @@ PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
                     return abortErr;
                 }
 
+                if (resolveOnly) {
+                    // ONE PASS STANDS IN FOR THE BAND'S EVERY CHUNK, so the progress bar
+                    // moves by the band rather than crawling one unit per band and then
+                    // jumping at the end.
+                    unitsDone = unitsAtBandStart + chunksPerBand;
+                    if (PF_Err progErr = PF_PROGRESS(in_data, unitsDone, totalUnits)) return progErr;
+                    break;
+                }
+
                 ++unitsDone;
                 if (PF_Err progErr = PF_PROGRESS(in_data, unitsDone, totalUnits)) return progErr;
             }
         }
     }
 
-    // THE NUMBER THAT SETTLES "IT RENDERS NOTHING" VERSUS "IT IS STILL RENDERING".
-    diagLog("  rendered %dx%d on the %s in %.2f s (%d rows per band)",
+    // CREDITED ONLY FOR A WHOLE FRAME ON ONE ENGINE -- see above the loop. An abort
+    // returned before reaching here, which is what leaves an aborted frame uncredited.
+    //
+    // resolveOnly STILL TRUE MEANS NO FALLBACK HAPPENED, because the fallback clears it,
+    // so the engine now is the engine the cache was read from.
+    sim::AccumulatorCache& endCache = useGpu ? t_gpuAccumCache : t_cpuAccumCache;
+    if (resolveOnly) {
+        endCache.adoptResolve(data.key);
+    } else if (split && !fellBack) {
+        endCache.adoptFull(data.key, totalSamples, cacheW, cacheH, cachePitch);
+    }
+
+    // THE NUMBER THAT SETTLES "IT RENDERS NOTHING" VERSUS "IT IS STILL RENDERING" --
+    // and now also the one that says whether the cache did anything. "resolved" is the
+    // line to look for after dragging Exposure or Denoise Amount at final quality; a
+    // "traced" there, on a frame that was just rendered, is a cache miss worth knowing.
+    diagLog("  %s %dx%d on the %s in %.2f s (%d rows per band, %d samples%s)",
+            resolveOnly ? "resolved" : "traced",
             static_cast<int>(output->width), static_cast<int>(output->height),
-            useGpu ? "GPU" : "CPU", diagSeconds() - t0, rowsPerBand);
+            useGpu ? "GPU" : "CPU", diagSeconds() - t0, rowsPerBand, totalSamples,
+            resolveOnly ? " from the accumulator" : (split ? "" : ", unsplit -- not cacheable"));
 
     // =======================================================================
     // THE FRAME IS COMPLETE, SO THE OUTPUT TRANSFORM RUNS -- ONCE, HERE.
@@ -871,8 +985,10 @@ PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
     //
     //     render (LINEAR) -> denoise -> output transform -> quantise
     //
-    // OIDN goes in immediately above this line when it lands. That is the entire
-    // reason this pass exists as a pass.
+    // OIDN IS IMMEDIATELY ABOVE THIS LINE, WHICH IS THE ENTIRE REASON THIS PASS EXISTS
+    // AS A PASS -- and the measurement that decided it stays one pass is in
+    // KernelApi.h: the filter normalises its own input, so exposure does not have to
+    // precede it and the transform did not have to be split.
     //
     // transformCpu EVEN WHEN useGpu IS TRUE. renderCudaToHost copies each band back
     // into host memory, so by here the destination is `staging` or AE's own world
@@ -892,6 +1008,16 @@ PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
     // transform a no-op, so a missing pass would have waited months to appear as
     // "the Exposure slider does nothing".
     // =======================================================================
+    const double tDenoise = diagSeconds();
+    const bool denoised = kernel::denoiseCpu(req);
+    if (data.quality.denoise) {
+        // REPORTED EITHER WAY. "Denoise is on and it did not happen" is the state a
+        // user cannot see except as a noisier picture, and it is what a pruned install
+        // folder or a quarantined DLL produces -- so the log has to name it.
+        diagLog("  denoise %.3f s (%s)", diagSeconds() - tDenoise,
+                denoised ? "applied" : cloud::denoiserDescription());
+    }
+
     const double tTransform = diagSeconds();
     kernel::transformCpu(req);
     diagLog("  output transform %.3f s (encodeSrgb=%d, ev=%.2f, agx=%d)",

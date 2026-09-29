@@ -25,6 +25,7 @@
 
 #include "KernelApi.h"
 #include "FieldCache.h"
+#include "Denoiser.h"
 #include "Fingerprint.h"
 
 #include <cmath>
@@ -87,7 +88,9 @@ void printUsage() {
         "  --resolve-check  render, then regenerate the image from the accumulated\n"
         "                   radiance with ZERO new samples, and require the result to\n"
         "                   be byte-identical. That is what FieldCache's ResolveOnly\n"
-        "                   decision promises an exposure change can do. Needs --cpu.\n"
+        "                   decision promises an exposure change can do. Runs on\n"
+        "                   both engines; with --gpu-band-rows it is also the only\n"
+        "                   check on the accumulator's per-band offset.\n"
         "  --device         print what the renderer would use, and exit\n"
         "  --fingerprint    print the field and view hashes, and exit\n"
         "\n"
@@ -236,6 +239,32 @@ int main(int argc, char** argv) {
     req.view.heightPx = 360;
     req.quality.samplesPerPixel = 16;
 
+    // ===================================================================
+    // THE DENOISER IS OFF HERE AND ON IN THE EFFECT, AND THE ASYMMETRY IS THE POINT.
+    //
+    // QualityParams::denoise defaults to TRUE because that is the right default for a
+    // person using the plugin. mistytunec is not that -- PLAN.md calls it the test
+    // harness rather than a feature -- and leaving it on by default would break the
+    // two things this program exists to provide.
+    //
+    //   * TIER 2 WOULD DEPEND ON WHETHER tools/oidn/ EXISTS. The golden references are
+    //     rendered by this binary. With the denoiser on, a machine that had fetched
+    //     OIDN and one that had not would produce different references and disagree
+    //     about every golden -- and the whole arrangement is built so a machine with
+    //     neither Slang nor OIDN still builds and tests identically.
+    //
+    //   * A WINDOWED RENDER COULD NEVER MATCH THE FULL FRAME. determinism.window
+    //     renders a sub-rect and requires it to equal that region of the whole
+    //     picture. A denoiser is SPATIAL: the same pixel denoised with a window's
+    //     worth of neighbours and with the whole frame's is legitimately a different
+    //     pixel. That test would fail for a correct reason, which is the worst kind of
+    //     failing test.
+    //
+    // So it is opt-in here, and --denoise exists so the path CAN be exercised from the
+    // command line -- which is how it gets profiled without After Effects.
+    // ===================================================================
+    req.quality.denoise = false;
+
     const char* outPath  = nullptr;
     const char* comparePath = nullptr;
     bool forceCpu        = false;
@@ -290,15 +319,17 @@ int main(int argc, char** argv) {
         else if (argIs(a, "--turbidity") && hasNext) req.field.atmosphere.turbidity    = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--ev") && hasNext)        req.view.exposureEV = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--agx"))                  req.view.agxTonemap = true;
+        else if (argIs(a, "--denoise"))              req.quality.denoise = true;
+        else if (argIs(a, "--denoise-amount") && hasNext) { req.quality.denoise = true; req.quality.denoiseAmount = static_cast<float>(std::atof(argv[++i])); }
         else if (argIs(a, "--linear"))               req.view.encodeSrgb = false;
         else if (argIs(a, "--pitch") && hasNext)     pitchDegrees = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--seed") && hasNext)      req.field.seed = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 0));
+        else if (argIs(a, "--time") && hasNext)      req.field.timeSeconds = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--cpu"))                  forceCpu = true;
         else if (argIs(a, "--require-gpu"))          requireGpu = true;
         else if (argIs(a, "--gpu-band-rows") && hasNext) gpuBandRows = std::atoi(argv[++i]);
         else if (argIs(a, "--majorant") && hasNext)      req.quality.densityMajorant = static_cast<float>(std::atof(argv[++i]));
-        else if (argIs(a, "--sample-chunk") && hasNext)  sampleChunk = std::atoi(argv[++i]);
-        else if (argIs(a, "--window") && i + 4 < argc) {
+        else if (argIs(a, "--sample-chunk") && hasNext)  sampleChunk = std::atoi(argv[++i]);        else if (argIs(a, "--window") && i + 4 < argc) {
             windowX = std::atoi(argv[++i]);
             windowY = std::atoi(argv[++i]);
             windowW = std::atoi(argv[++i]);
@@ -347,7 +378,7 @@ int main(int argc, char** argv) {
         std::printf("sample: 0x%016llx\n",
                     static_cast<unsigned long long>(sim::samplingHash(req.view, req.quality)));
         std::printf("resolv: 0x%016llx\n",
-                    static_cast<unsigned long long>(sim::resolveHash(req.view)));
+                    static_cast<unsigned long long>(sim::resolveHash(req.view, req.quality)));
         return 0;
     }
 
@@ -522,6 +553,9 @@ int main(int argc, char** argv) {
     // demands byte-identical output; feeding the same count to the transform extends
     // it from "the render is thread-count invariant" to "the whole pipeline is",
     // which is the claim the effect actually relies on under multi-frame rendering.
+    // BEFORE THE TRANSFORM AND AFTER EVERY SAMPLE -- see KernelApi.h. A no-op unless
+    // --denoise was given, and a no-op with a reported reason if OIDN is not installed.
+    kernel::denoiseCpu(req);
     kernel::transformCpu(req, threads);
 
     // ---------------------------------------------------------------------
@@ -544,19 +578,55 @@ int main(int argc, char** argv) {
     // accumulator by the same integer and run the same transform, so anything other
     // than equality means one of those three is not the same.
     if (resolveCheck) {
-        if (renderedOnGpu) {
-            std::fprintf(stderr,
-                "--resolve-check needs the CPU accumulator; re-run with --cpu\n");
-            return 3;
-        }
-
         std::vector<float> rendered(pixels);
 
         kernel::RenderRequest resolve = req;
         resolve.firstSample        = totalSamples;
         resolve.sampleCount        = 0;
         resolve.samplesAlreadyDone = totalSamples;
-        kernel::renderCpu(resolve, threads);
+
+        // ===================================================================
+        // THE GPU RESOLVES TOO NOW, AND THAT IS WHAT MAKES THIS TEST ABLE TO FAIL.
+        //
+        // It used to refuse a GPU render -- "needs the CPU accumulator" -- because the
+        // device accumulator was BAND-SIZED: each band overwrote the last, so there was
+        // no frame left to resolve from. It is frame-sized now, and each band is handed
+        // the slice that starts at its own first row.
+        //
+        // THE BANDS ARE WALKED AGAIN IN THE SAME ORDER, deliberately. A resolve that
+        // asked for the whole frame in one launch would read the accumulator correctly
+        // whatever the per-band offset was, and would therefore prove nothing about it.
+        // Walking the bands is what makes a wrong offset show up: band 1 would resolve
+        // from band 0's samples, and the picture would repeat the top of the frame.
+        //
+        // That is the fourth appearance of the band-as-window hazard in this project,
+        // and the first time a test for it exists before a human found it in the host.
+        // ===================================================================
+        if (renderedOnGpu) {
+            bool ok = true;
+            if (gpuBandRows <= 0) {
+                ok = kernel::renderCudaToHost(resolve, 0, 0);
+            } else {
+                for (int y = 0; y < resolve.dest.heightPx && ok; y += gpuBandRows) {
+                    int y1 = y + gpuBandRows;
+                    if (y1 > resolve.dest.heightPx) y1 = resolve.dest.heightPx;
+                    ok = kernel::renderCudaToHost(resolve, y, y1);
+                }
+            }
+            if (!ok) {
+                const char* why = kernel::lastCudaError();
+                std::fprintf(stderr, "resolve-check: the GPU resolve failed (%s)\n",
+                             why && why[0] ? why : "no detail");
+                return 3;
+            }
+        } else {
+            kernel::renderCpu(resolve, threads);
+        }
+        // THE RESOLVE HAS TO DENOISE TOO, or this compares a denoised first render
+        // against an undenoised second one and reports a difference that is the test's
+        // own doing. It also makes the check mean something stronger: the denoise is
+        // part of the resolve, so ResolveOnly's promise covers it.
+        kernel::denoiseCpu(resolve);
         kernel::transformCpu(resolve, threads);
 
         size_t differing = 0;
@@ -599,5 +669,13 @@ int main(int argc, char** argv) {
     std::printf("wrote %s (%dx%d, %d spp)\n",
                 outPath, destW, destH, req.quality.samplesPerPixel);
     std::printf("  path: %s\n", renderedOnGpu ? "GPU (CUDA)" : "CPU reference");
+
+    // THE DENOISER'S LINE, WHENEVER ONE WAS ASKED FOR. denoiseCpu returns false and
+    // leaves the image alone when OIDN is missing -- correct for the effect, and
+    // exactly how a measurement run from a build tree without MISTYTUNE_OIDN_DIR set
+    // reported "denoised" figures identical to raw ones and said nothing.
+    if (req.quality.denoise) {
+        std::printf("  denoise: %s\n", cloud::denoiserDescription());
+    }
     return 0;
 }

@@ -210,21 +210,21 @@ PL_TEST(ExposureDoesNotRestartTheSamples) {
     PL_CHECK_EQ(samplingHash(a, q), samplingHash(b, q));
 
     // ...but a different picture comes out of them.
-    PL_CHECK(resolveHash(a) != resolveHash(b));
+    PL_CHECK(resolveHash(a, q) != resolveHash(b, q));
 }
 
 PL_TEST(TheTonemapAndTheEncodingAreResolveOnlyToo) {
     ViewParams base;
+    const QualityParams q;
 
     ViewParams tonemapped = base;
     tonemapped.agxTonemap = !base.agxTonemap;
-    PL_CHECK(resolveHash(base) != resolveHash(tonemapped));
+    PL_CHECK(resolveHash(base, q) != resolveHash(tonemapped, q));
 
     ViewParams unencoded = base;
     unencoded.encodeSrgb = !base.encodeSrgb;
-    PL_CHECK(resolveHash(base) != resolveHash(unencoded));
+    PL_CHECK(resolveHash(base, q) != resolveHash(unencoded, q));
 
-    const QualityParams q;
     PL_CHECK_EQ(samplingHash(base, q), samplingHash(tonemapped, q));
     PL_CHECK_EQ(samplingHash(base, q), samplingHash(unencoded, q));
 }
@@ -243,7 +243,44 @@ PL_TEST(TheResolveHashIgnoresEverythingThatDecidesARay) {
     moved.originX = 17;
     moved.cameraFromComp = !base.cameraFromComp;
 
-    PL_CHECK_EQ(resolveHash(base), resolveHash(moved));
+    const QualityParams q;
+    PL_CHECK_EQ(resolveHash(base, q), resolveHash(moved, q));
+}
+
+// ===========================================================================
+// THE DENOISER IS A RESOLVE INPUT, AND IT WAS A SAMPLING ONE UNTIL 2026-09-29.
+//
+// The integration that landed filters the finished colour ALONE -- no auxiliary albedo
+// or normal buffers, which would be written while tracing -- so neither the switch nor
+// the amount changes a single sample. With them in the sampling hash, every drag of the
+// Denoise Amount slider threw the frame away and traced it again, which at a final-
+// quality sample count is seconds per nudge on the one control a user tunes by eye.
+//
+// BOTH HALVES ARE ASSERTED. That the sampling hash IGNORES them is the performance
+// claim; that the resolve hash SEES them is the correctness one -- a resolve input left
+// out of every hash is a slider that moves with nothing re-rendering at all.
+//
+// IF AUXILIARY BUFFERS ARE EVER ADDED, THIS TEST IS SUPPOSED TO FAIL. Those are written
+// during tracing, and a denoise that wants them is a sampling input again.
+// ===========================================================================
+PL_TEST(TheDenoiserIsAResolveInputNotASamplingOne) {
+    const ViewParams v;
+
+    QualityParams base;
+    base.denoise = true;
+    base.denoiseAmount = 0.8f;
+
+    QualityParams off = base;
+    off.denoise = false;
+
+    QualityParams amount = base;
+    amount.denoiseAmount = 0.5f;
+
+    PL_CHECK_EQ(samplingHash(v, base), samplingHash(v, off));
+    PL_CHECK_EQ(samplingHash(v, base), samplingHash(v, amount));
+
+    PL_CHECK(resolveHash(v, base) != resolveHash(v, off));
+    PL_CHECK(resolveHash(v, base) != resolveHash(v, amount));
 }
 
 // --------------------------------------------------------------------------
@@ -338,4 +375,105 @@ PL_TEST(ResizingTheOutputRestartsAccumulation) {
     half.widthPx  = 960;
     half.heightPx = 540;
     PL_CHECK(samplingHash(full, q) != samplingHash(half, q));
+}
+
+// ===========================================================================
+// AccumulatorCache -- the question the render loop actually asks.
+//
+// EACH TEST BELOW IS ONE CONDITION OF canResolve(), and each condition guards a picture
+// that would render plausibly and be wrong. None of them can be seen from a still in
+// After Effects: a resolve from the wrong buffer looks like a rendered frame. So they
+// are pinned here, where a failure names the condition rather than the symptom.
+// ===========================================================================
+
+namespace {
+constexpr int32_t kW = 1920, kH = 1080, kPitch = 1920, kSpp = 64;
+}
+
+// NOTHING IS RESOLVED UNTIL A WHOLE FRAME HAS BEEN CREDITED. The first render after the
+// effect is applied, a fresh MFR worker, and every render after an invalidate() all
+// land here -- and all must trace.
+PL_TEST(AnEmptyAccumulatorCacheNeverResolves) {
+    AccumulatorCache c;
+    PL_CHECK(!c.canResolve(keyOf(1, 2, 3), kSpp, kW, kH, kPitch));
+}
+
+// THE CASE THE WHOLE THING EXISTS FOR: an exposure or denoise-amount drag.
+PL_TEST(AResolveOnlyChangeResolvesFromACreditedFrame) {
+    AccumulatorCache c;
+    c.adoptFull(keyOf(1, 2, 3), kSpp, kW, kH, kPitch);
+
+    PL_CHECK(c.canResolve(keyOf(1, 2, 99), kSpp, kW, kH, kPitch));  // resolve key moved
+    PL_CHECK(c.canResolve(keyOf(1, 2, 3),  kSpp, kW, kH, kPitch));  // nothing moved
+}
+
+// ANOTHER SKY OR ANOTHER VIEW: the buffer holds samples of a different integral.
+PL_TEST(AFieldOrSamplingChangeNeverResolves) {
+    AccumulatorCache c;
+    c.adoptFull(keyOf(1, 2, 3), kSpp, kW, kH, kPitch);
+
+    PL_CHECK(!c.canResolve(keyOf(9, 2, 3), kSpp, kW, kH, kPitch));  // new field -- next frame
+    PL_CHECK(!c.canResolve(keyOf(1, 9, 3), kSpp, kW, kH, kPitch));  // camera moved
+}
+
+// ===========================================================================
+// EXACTLY THE SAMPLE COUNT, NOT "AT LEAST", AND BOTH DIRECTIONS ARE ASSERTED.
+//
+// FEWER is obvious: 32 accumulated samples cannot stand in for 64.
+//
+// MORE is the one that looks harmless and is not. Resolving 128 samples for a frame
+// asked at 64 gives a CLEANER picture -- and a frame whose noise depends on what this
+// thread happened to render before it. Under multi-frame rendering, neighbouring frames
+// land on different workers with different histories, so the render queue would come
+// back with frames at different noise levels for no visible reason.
+// ===========================================================================
+PL_TEST(TheSampleCountMustMatchExactlyInBothDirections) {
+    AccumulatorCache c;
+    c.adoptFull(keyOf(1, 2, 3), kSpp, kW, kH, kPitch);
+
+    PL_CHECK(!c.canResolve(keyOf(1, 2, 3), kSpp * 2, kW, kH, kPitch));
+    PL_CHECK(!c.canResolve(keyOf(1, 2, 3), kSpp / 2, kW, kH, kPitch));
+}
+
+// ===========================================================================
+// THE PITCH IS IN NO HASH, SO THIS IS THE ONLY THING THAT CATCHES IT.
+//
+// The accumulator is indexed row * pitch. AE's rowbytes can differ between two renders
+// of the same frame, and width, height and origin are all identical in that case -- so
+// every hash matches. A resolve at the new pitch reads each row at the old stride: the
+// picture shears diagonally, and it would be read as a camera bug.
+// ===========================================================================
+PL_TEST(ADifferentPitchNeverResolvesEvenWithEveryHashMatching) {
+    AccumulatorCache c;
+    c.adoptFull(keyOf(1, 2, 3), kSpp, kW, kH, kPitch);
+
+    PL_CHECK(!c.canResolve(keyOf(1, 2, 3), kSpp, kW, kH, kPitch + 64));
+    PL_CHECK(!c.canResolve(keyOf(1, 2, 3), kSpp, kW, kH + 1, kPitch));
+    PL_CHECK(!c.canResolve(keyOf(1, 2, 3), kSpp, kW - 1, kH, kPitch));
+}
+
+// INVALIDATE IS WHAT A FULL RENDER CALLS BEFORE IT WRITES. A render that then falls
+// back to the other engine or is aborted never reaches the credit, so the cache must
+// already have stopped vouching -- or the next render resolves from half a frame.
+PL_TEST(InvalidateStopsVouchingImmediately) {
+    AccumulatorCache c;
+    c.adoptFull(keyOf(1, 2, 3), kSpp, kW, kH, kPitch);
+    PL_CHECK(c.canResolve(keyOf(1, 2, 3), kSpp, kW, kH, kPitch));
+
+    c.invalidate();
+    PL_CHECK(!c.canResolve(keyOf(1, 2, 3), kSpp, kW, kH, kPitch));
+    PL_CHECK_EQ(c.samples(), 0);
+}
+
+// A RESOLVE KEEPS THE SAMPLES, so a second drag resolves again rather than tracing.
+// That is the difference between a slider that stays fast and one that is fast once.
+PL_TEST(ASecondResolveStillResolves) {
+    AccumulatorCache c;
+    c.adoptFull(keyOf(1, 2, 3), kSpp, kW, kH, kPitch);
+
+    PL_CHECK(c.canResolve(keyOf(1, 2, 4), kSpp, kW, kH, kPitch));
+    c.adoptResolve(keyOf(1, 2, 4));
+
+    PL_CHECK(c.canResolve(keyOf(1, 2, 5), kSpp, kW, kH, kPitch));
+    PL_CHECK_EQ(c.samples(), kSpp);
 }

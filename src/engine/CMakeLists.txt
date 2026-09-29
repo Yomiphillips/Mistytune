@@ -42,6 +42,15 @@ add_library(plugin_engine STATIC
     Atmosphere.h
     Atmosphere.cpp
 
+    # Intel Open Image Denoise, loaded at RUNTIME with no link-time dependency --
+    # there is deliberately no OpenImageDenoise.lib on any link line here. A
+    # load-time import of a missing DLL is a plugin After Effects refuses to load
+    # at all, with an error naming the effect rather than the file. So this builds,
+    # links and tests identically whether or not tools/oidn/ exists; what changes
+    # is only what denoiserAvailable() answers at runtime.
+    Denoiser.h
+    Denoiser.cpp
+
     # The host's half of the ice generator: the shear integral that IS the
     # fallstreak hook, the habit fall speeds, and a majorant that is sound by
     # construction rather than by sampling. All of it a pure function of the

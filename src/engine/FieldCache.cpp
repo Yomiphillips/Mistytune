@@ -45,26 +45,34 @@ uint64_t samplingHash(const ViewParams& v, const QualityParams& q) {
     fp.add(q.maxBounces);
     fp.add(q.densityMajorant);
 
-    // DENOISE IS A SAMPLING INPUT AND NOT A RESOLVE ONE, which looks wrong at first
-    // glance and is not. Turning the denoiser on does not change the radiance, so it
-    // could be a resolve -- but OIDN needs auxiliary albedo and normal buffers that
-    // the renderer only fills when it knows they are wanted, and those are written
-    // while tracing. Enabling it therefore needs samples that do not exist yet.
+    // DENOISE AND DENOISE AMOUNT USED TO BE HERE AND ARE NOW IN resolveHash.
     //
-    // WHEN THE AUXILIARY BUFFERS ARE ALWAYS WRITTEN, this moves to resolveHash and
-    // toggling the denoiser becomes free. That is a decision to take when OIDN lands
-    // and the cost of always writing them is measurable, not now.
-    fp.add(q.denoise);
+    // The old reason was sound when written: OIDN would need auxiliary albedo and
+    // normal buffers, written while TRACING, so enabling it needed samples that did
+    // not exist yet. The integration that landed uses NO auxiliary buffers -- it
+    // filters the finished colour alone, after accumulation and before the transform.
+    // So neither switch changes a single sample, and hashing them here meant every
+    // drag of the Denoise Amount slider threw the frame away and traced it again.
+    //
+    // IF AUX BUFFERS ARE EVER ADDED, THIS HAS TO BE REVISITED -- those are written
+    // during tracing, and a denoise that wants them is a sampling input again.
 
     return fp.value();
 }
 
-uint64_t resolveHash(const ViewParams& v) {
+uint64_t resolveHash(const ViewParams& v, const QualityParams& q) {
     Fingerprint fp;
 
-    // ALL THREE STAGES OF applyOutputTransform, and nothing else. If a fourth stage
-    // is ever added to that function it belongs here too -- the invariant is that
-    // this hash covers exactly the inputs the resolve pass reads.
+    // EVERY INPUT THE RESOLVE PASS READS, and nothing else. The resolve is
+    //
+    //     mean -> denoise -> exposure, tonemap, encode
+    //
+    // so this covers the denoiser's two inputs and all three stages of
+    // applyOutputTransform. If a stage is ever added to the resolve, it belongs here
+    // too -- a resolve input left out is a slider that moves with nothing changing.
+    fp.add(q.denoise);
+    fp.add(q.denoiseAmount);
+
     fp.add(v.exposureEV);
     fp.add(v.agxTonemap);
     fp.add(v.encodeSrgb);

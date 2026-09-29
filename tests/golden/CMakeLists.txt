@@ -177,6 +177,24 @@ if(PLUGIN_CUDA_FOUND)
                      -P "${CMAKE_CURRENT_SOURCE_DIR}/RunDeterminism.cmake")
 endif()
 
+# BANDS AND SAMPLE CHUNKS AT THE SAME TIME, a combination neither test above renders.
+#
+# IT DOES NOT CATCH A WRONG ACCUMULATOR OFFSET, and it was added believing it would --
+# deleting the offset leaves it green. Each band's first chunk RE-INITIALISES the
+# accumulator, so bands sharing one region still produce the right mean as long as they
+# run in sequence. resolve.reproducesTheRenderOnGpuInBands below is the test that
+# discriminates, because only a second pass over the frame needs the first pass to
+# still be there. This one stays for what it does cover: that splitting a render both
+# ways at once agrees with splitting it neither.
+if(PLUGIN_CUDA_FOUND)
+    add_test(NAME determinism.gpuBandChunks
+             COMMAND ${CMAKE_COMMAND}
+                     -DMISTYTUNEC=$<TARGET_FILE:mistytunec>
+                     -DOUT_DIR=${GOLDEN_OUT}
+                     -DMODE=gpubandchunks
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/RunDeterminism.cmake")
+endif()
+
 # A WINDOW OF THE FRAME MUST MATCH THE SAME PATCH OF THE WHOLE FRAME.
 #
 # The test three shipped bugs were waiting for -- see the mode in RunDeterminism.cmake.
@@ -239,6 +257,29 @@ add_test(NAME resolve.reproducesTheRender
                  --sun-el 2 --sun-az 180 --ev 1.5
                  --resolve-check
                  -o "${GOLDEN_OUT}/resolve-check.ppm")
+
+# THE SAME PROMISE ON THE GPU, IN BANDS -- AND IT IS THE ONLY TEST THAT CAN CATCH A
+# WRONG PER-BAND ACCUMULATOR OFFSET.
+#
+# The device accumulator is frame-sized and each band is handed the slice starting at
+# its own first row. That offset is only non-zero when a render is split by BANDS, and
+# the accumulator only exists when it is split by SAMPLES -- so nothing sees it unless
+# both are true AND the accumulator has to survive a second pass over the frame.
+#
+# determinism.gpuBands and determinism.sampleChunks each satisfy one of those three and
+# pass regardless of the offset; so does a whole-frame resolve, which reads the
+# accumulator correctly whatever the offset is. VERIFIED BY DELETING THE OFFSET: only
+# this test goes red.
+#
+# What a wrong offset reaches a user as: band 1 resolving from band 0's samples, so the
+# top of the picture repeats down the frame after an exposure change and only after one.
+if(PLUGIN_CUDA_FOUND)
+    add_test(NAME resolve.reproducesTheRenderOnGpuInBands
+             COMMAND mistytunec -w 256 -h 144 -s 8 --sample-chunk 1 --require-gpu
+                     --gpu-band-rows 37 --sun-el 12 --ev 1.5
+                     --resolve-check
+                     -o "${GOLDEN_OUT}/resolve-check-gpu.ppm")
+endif()
 
 # ---------------------------------------------------------------------------
 # Blessing.

@@ -18,6 +18,8 @@
 #include "KernelApi.h"
 #include "Shading.h"
 
+#include "Denoiser.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -302,6 +304,35 @@ void transformCpu(const RenderRequest& req, int threads, int rowBegin, int rowEn
         pool.emplace_back(transformRows, y0, y1);
     }
     for (std::thread& th : pool) th.join();
+}
+
+// ---------------------------------------------------------------------------
+
+bool denoiseCpu(const RenderRequest& req) {
+    // THE CHECKBOX IS HONOURED HERE, ONCE, rather than at each of the three call
+    // sites. QualityParams::denoise had been checked out, mapped and hashed into the
+    // fingerprint since Phase 1 with nothing reading it; this is the line that was
+    // missing, and putting the test anywhere else would let a fourth call site be
+    // written without it.
+    if (!req.quality.denoise) return false;
+    if (req.dest.data == nullptr) return false;
+
+    cloud::DenoiseImage img;
+    img.data     = static_cast<float*>(req.dest.data);
+    img.widthPx  = req.dest.widthPx;
+    img.heightPx = req.dest.heightPx;
+    img.pitchPx  = req.dest.pitchPx;
+    img.amount   = req.quality.denoiseAmount;
+
+    // THE ONE PLACE THE TWO CHANNEL-ORDER ENUMS MEET. src/engine may not include
+    // src/kernel -- the dependency runs the other way -- so the translation happens on
+    // this side of the wall, in a single expression, rather than by teaching Denoiser.h
+    // about RenderRequest.h.
+    img.order = (req.dest.order == ChannelOrder::BGRA)
+              ? cloud::DenoiseOrder::BgraFloat4
+              : cloud::DenoiseOrder::ArgbFloat4;
+
+    return cloud::denoiseFrame(img);
 }
 
 } // namespace plugin::kernel

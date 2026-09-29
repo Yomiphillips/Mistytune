@@ -354,6 +354,15 @@ try them: per-pixel blue-noise offsets stable across frames, albedo and normal
 auxiliary buffers, prefiltering, and raising spp before reaching for anything
 temporal. Judge it on a moving 48-frame render, never on a still.
 
+**Blue-noise offsets were tried on 2026-09-29 and do nothing for this renderer.** They
+were built through the shipping kernel and swept from 0 to 16 draws, and the error
+stayed white. Under delta tracking, whether a camera ray scatters depends jointly on
+ten or more draws, beyond what per-dimension dithering can shape. The noise comes from
+the estimator's yes-or-no, not from the sampler. So the next thing to measure is a
+continuous primary-ray estimator: next event at every tentative collision, weighted by
+the ratio-tracked transmittance. Aux buffers only help if their coverage feature comes
+from a continuous estimate too. See PROGRESS.md.
+
 **Camera-only changes must not re-solve.** The cache is keyed on a fingerprint of
 every non-camera input, with Gravitune's `sizeof` tripwire kept so that adding a
 parameter without hashing it breaks the build. The spec is blunt that this row is

@@ -243,7 +243,17 @@ namespace ae {
     FLOAT   (MaxBounces,        302, "Max Bounces",                                        \
              1.0, 1024.0,   1.0, 64.0,      32.0,    0)                                   \
     CHECK   (Denoise,           303, "Denoise", true)                                      \
-    SPARE   (QualitySpare1,     304)                                                       \
+    /* A SPARE TURNED INTO A CONTROL IN PLACE, which is the entire reason the spares       \
+     * exist. Appending would have put Denoise Amount after the Output group; this         \
+     * keeps it beside the switch it scales and costs no reordering. ID 304 was always     \
+     * this slot, so no saved project is rewired.                                          \
+     *                                                                                     \
+     * DEFAULT 0.8, AND IT IS A MEASUREMENT. At 4 spp against a 512-spp render of the      \
+     * same frame, a full denoise leaves 33% of the fine structure the converged image     \
+     * has; 0.8 reproduces it. See CloudParams.h, which carries the table and the          \
+     * reason RMSE picks a different number. */                                            \
+    FLOAT   (DenoiseAmount,     304, "Denoise Amount",                                     \
+             0.0, 1.0,      0.0, 1.0,       0.8,     3)                                    \
     SPARE   (QualitySpare2,     305)                                                       \
     SPARE   (QualitySpare3,     306)                                                       \
     ENDTOPIC(QualityGroupEnd,   307)                                                       \
@@ -678,6 +688,16 @@ inline cloud::QualityParams toQuality(const ParamValues& p) {
     out.samplesPerPixel = static_cast<int32_t>(std::lround(p.v[kMistytuneSamples]));
     out.maxBounces      = static_cast<int32_t>(std::lround(p.v[kMistytuneMaxBounces]));
     out.denoise         = p.v[kMistytuneDenoise] > 0.5;
+
+    // CLAMPED, because the valid range stops at 0 and 1 but an expression is what
+    // actually drives a slider in a comp. An amount above 1 would extrapolate PAST the
+    // denoised image -- sharpening the reconstruction's own error -- and below 0 would
+    // extrapolate away from it into amplified noise. Both render something, neither
+    // means anything.
+    double amount = p.v[kMistytuneDenoiseAmount];
+    if (!(amount > 0.0)) amount = 0.0;          // also catches NaN
+    if (amount > 1.0)    amount = 1.0;
+    out.denoiseAmount = static_cast<float>(amount);
 
     // AT LEAST ONE OF EACH, whatever the parameter says. The valid range starts at
     // 1, but an expression can still deliver 0 on the frame where it divides by

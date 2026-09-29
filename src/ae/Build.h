@@ -71,6 +71,32 @@
 // STILL MINOR 4: no parameter was added and no flag changed. Observer Altitude is a
 // ViewParams field with no control, so nothing in the panel moved -- see PROGRESS.md,
 // which records that it is now honoured and still unreachable.
+// BUILD 10 -- the Denoise checkbox does something. It had been checked out, mapped to
+// QualityParams::denoise and hashed into the fingerprint since Phase 1 with nothing
+// reading it; Open Image Denoise is now loaded at runtime and runs over the finished
+// frame. The DLLs install beside the .aex, and a plugin without them renders
+// undenoised and says so rather than failing to load.
+//
+// STILL MINOR 4: no parameter was added and no flag changed. The checkbox was already
+// there -- that was the problem.
+// MINOR 5, BUILD 11 -- Denoise Amount. Reported from the host as "too smooth", and the
+// report is right: measured at 4 spp against a 512-spp render of the same frame, a full
+// denoise leaves 33% of the fine structure the converged image has. The control is a
+// blend, defaulting to 0.8 because that is where the detail matches.
+//
+// A MINOR BUMP BECAUSE THE PARAMETER LIST CHANGED -- a reserved SPARE became a real
+// control. The ID did not move and no index shifted, so no saved project is rewired;
+// but PARAMS_SETUP only re-runs after a version change, so without this the slider
+// would not appear at all.
+// BUILD 12 -- the accumulator cache is live. A change to a resolve input only --
+// Exposure, AgX, the Denoise switch, Denoise Amount -- rebuilds the frame from what is
+// already accumulated instead of tracing it again: about 10 ms against 3.9 s at
+// 1920x1080 and 64 spp. The GPU accumulator is frame-sized so a frame survives the
+// render that made it; the cache is thread_local, one per engine, and credits only a
+// frame finished start to end on one engine. Every other path traces, as before.
+//
+// STILL MINOR 5: no parameter or flag changed. Denoise and Denoise Amount moved from
+// the sampling hash to the resolve hash, which AE never sees.
 #define PLUGIN_MAJOR 0
-#define PLUGIN_MINOR 4
-#define PLUGIN_BUILD 9
+#define PLUGIN_MINOR 5
+#define PLUGIN_BUILD 12

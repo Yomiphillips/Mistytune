@@ -109,6 +109,63 @@ elseif(MODE STREQUAL "gpubands")
     endif()
     message(STATUS "gpu bands: identical to a single launch")
 
+elseif(MODE STREQUAL "gpubandchunks")
+    # ===================================================================
+    # BANDS *AND* SAMPLE CHUNKS TOGETHER, WHICH NEITHER OF THE TWO TESTS ABOVE
+    # EXERCISES AND WHICH IS THE ONLY CONFIGURATION THE FRAME-SIZED ACCUMULATOR
+    # CHANGES.
+    #
+    # The accumulator exists only when a render is SPLIT BY SAMPLES. Its base pointer
+    # is offset by the band's first row, so the offset is only non-zero when the render
+    # is ALSO split by BANDS.
+    #
+    #   determinism.gpuBands    bands, one sample launch  -> no accumulator at all
+    #   determinism.sampleChunks  chunks, one band        -> offset is always zero
+    #
+    # So a wrong offset passes both of them with full marks. That is the fourth time
+    # this project has met the band-as-window hazard -- the reduced-resolution render
+    # that drew the top-left third, the Region of Interest that drew the top-left
+    # corner, the band offset in renderCudaToHost itself -- and the first time a test
+    # has been written for it BEFORE a human found it in After Effects.
+    #
+    # WHAT A WRONG OFFSET LOOKS LIKE: every band accumulating into the frame's first
+    # rows, so the top of the picture is the sum of every band and the rest is a single
+    # launch. It renders. It looks like a banding or exposure bug.
+    #
+    # 37 ROWS AND CHUNKS OF 1, the harshest of both settings, on a scene with a sun
+    # disc -- because sub-pixel differences only become whole levels where there is an
+    # edge, and this test's ancestor compared byte-identical for weeks on a smooth sky
+    # while the sampler really was seeded per band.
+    # ===================================================================
+    set(SCENE -w 256 -h 144 -s 8 --sun-el 12)
+
+    gpu_render("${OUT_DIR}/gpu_bc_whole.ppm")
+    gpu_render("${OUT_DIR}/gpu_bc_split.ppm" --gpu-band-rows 37 --sample-chunk 1)
+
+    # WITH TOLERANCE, NOT BYTE-FOR-BYTE, and for the reason determinism.sampleChunks
+    # gives: splitting the samples REGROUPS a floating-point sum and addition is not
+    # associative. A misplaced accumulator is not a rounding difference -- it moves
+    # whole bands -- so 2 levels is nowhere near loose enough to hide one.
+    execute_process(
+        COMMAND "${MISTYTUNEC}" ${SCENE} --require-gpu
+                --gpu-band-rows 37 --sample-chunk 1
+                --compare "${OUT_DIR}/gpu_bc_whole.ppm" --tolerance 2
+        RESULT_VARIABLE _same OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+    if(NOT _same EQUAL 0)
+        message(FATAL_ERROR
+            "BANDED + CHUNKED RENDER DISAGREES WITH THE WHOLE FRAME.
+"
+            "  The accumulator is frame-sized and each band is handed the slice that
+"
+            "  starts at its first row. If that offset is wrong, every band accumulates
+"
+            "  into the top of the frame.
+"
+            "  See renderCudaToHost() in src/kernel/Mistytune.cu.
+${_out}${_err}")
+    endif()
+    message(STATUS "gpu bands + sample chunks: matches the whole frame")
+
 elseif(MODE STREQUAL "threads")
     # ONE WORKER VERSUS EIGHT. After Effects picks the worker count under
     # multi-frame rendering and we do not get a say, so the image cannot depend

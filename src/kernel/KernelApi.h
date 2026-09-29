@@ -345,6 +345,44 @@ inline int samplesPerLaunch(long long pixelSampleBudget,
 void transformCpu(const RenderRequest& req, int threads = 0,
                   int rowBegin = 0, int rowEnd = 0);
 
+// ---------------------------------------------------------------------------
+// The denoise, run on the whole frame between the render and the transform
+// ---------------------------------------------------------------------------
+
+// ===========================================================================
+// WHERE IT GOES, AND THE ORDER IS A MEASUREMENT RATHER THAN A PREFERENCE.
+//
+//     render (LINEAR) -> DENOISE -> exposure, tonemap, encode -> quantise
+//
+// Two comments in this repository used to disagree about whether exposure belongs
+// before the denoise. src/engine/FieldCache.h argued it did, on the grounds that OIDN
+// is trained on roughly perceptual magnitudes and denoise strength would otherwise
+// track the exposure slider.
+//
+// MEASURED 2026-09-29, and it does not: OIDN 2.x normalises its own input, so the same
+// image denoised three stops apart agrees to 0.42% once the gain is divided out. The
+// test is TheHdrFilterIsScaleInvariantSoExposureNeedNotPrecedeIt in
+// tests/unit/TestDenoiser.cpp, and it is kept precisely so a future OIDN that stops
+// auto-exposing says so here rather than in somebody's render.
+//
+// So the transform stays ONE pass and this goes in front of it, which is what
+// Shading.h, Mistytune.cpp and this file all already said.
+//
+// WHAT MUST STILL NOT HAPPEN is denoising a TONEMAPPED or ENCODED buffer. Scale
+// invariance is not curve invariance; AgX is not a gain.
+// ===========================================================================
+//
+// THE WHOLE FRAME, NEVER A BAND. OIDN needs spatial context, so denoising a band at a
+// time would both seam at the band edges and denoise with the wrong neighbourhood.
+// That is why this takes no row range where transformCpu does -- the difference is not
+// an oversight and adding one would be a bug.
+//
+// RETURNS FALSE WHEN NOTHING WAS DONE, which is not an error: no OIDN installed, or
+// the filter refused. The caller carries on to the transform and the render is simply
+// noisier. See src/engine/Denoiser.h on why that path exists even though the DLLs ship
+// in the bundle.
+bool denoiseCpu(const RenderRequest& req);
+
 // Device memory, for the one caller whose destination AE owns.
 //
 // Returns false if the launch could not be made; the caller reads lastCudaError().

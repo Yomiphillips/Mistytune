@@ -506,11 +506,36 @@ bool renderCudaToHost(const RenderRequest& req, int rowBegin, int rowEnd) {
     // renderPixel treats samplesAlreadyDone <= 0 as "initialise", so a band's first
     // launch overwrites whatever the previous band left behind and there is no reset
     // to forget.
+    // ===================================================================
+    // THE ACCUMULATOR IS FRAME-SIZED AND THE BAND GETS A SLICE OF IT, which is the
+    // change that lets a frame be carried across RENDERS and not merely across the
+    // launches of one band.
+    //
+    // IT USED TO BE BAND-SIZED -- rowBytes * bandRows -- so each band overwrote the
+    // last and there was nothing left to carry. A FieldCache that promised
+    // "accumulate onto what is already there" would have been describing a buffer
+    // that no longer held it.
+    //
+    // THE WHOLE FIX IS A POINTER OFFSET, AND THAT IS DELIBERATE. renderPixel indexes
+    // the accumulator with the BAND-LOCAL py it already uses; handing it a base that
+    // starts at the band's first row maps that onto the frame without a single new
+    // index expression in the kernel. Teaching renderPixel a frame-relative row
+    // instead would be the band-as-window arithmetic this project has got wrong three
+    // times -- the reduced-resolution render that drew the top-left third, the Region
+    // of Interest that drew the top-left corner, and the band offset in this very
+    // function. Each of those rendered a plausible picture.
+    //
+    // SO THE KERNEL IS UNCHANGED AND determinism.gpuBands IS THE CHECK: the same
+    // frame rendered in one band and in many must stay byte-identical.
+    // ===================================================================
+    const size_t frameBytes = rowBytes * static_cast<size_t>(req.dest.heightPx);
+
     const bool split = req.samplesAlreadyDone > 0 || req.sampleCount < req.quality.samplesPerPixel;
     if (split) {
-        void* accMem = g_accum.reserve(bytes);
+        void* accMem = g_accum.reserve(frameBytes);
         if (!accMem) return false;
-        devReq.accumulator        = static_cast<float*>(accMem);
+        devReq.accumulator        = static_cast<float*>(accMem)
+                                  + static_cast<size_t>(rowBegin) * pitchPx * 4u;
         devReq.accumulatorPitchPx = pitchPx;
     } else {
         devReq.accumulator        = nullptr;

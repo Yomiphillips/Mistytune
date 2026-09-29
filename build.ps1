@@ -155,6 +155,18 @@ if ($Package) {
     New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
     Copy-Item $aex -Destination $stage -Force
+
+    # THE DENOISER SHIPS IN THE ZIP. PLAN.md settled this on 2026-09-29: bundle rather
+    # than fetch on first run, because the denoiser is ON BY DEFAULT, so every failure
+    # mode of fetching lands on nearly every user rather than on a minority who opted
+    # in. It is about 53 MB against a 1 MB effect and that is the trade taken knowingly.
+    $oidnCopied = Copy-OidnRuntime -Destination $stage
+    if ($oidnCopied -gt 0) {
+        Write-Host "  bundled $oidnCopied OIDN DLLs" -ForegroundColor DarkGray
+    } else {
+        Write-Host "  PACKAGING WITHOUT THE DENOISER - the release will render noisy at Draft." -ForegroundColor Yellow
+    }
+
     foreach ($doc in @('README.md', 'INSTALL.md', 'CHANGELOG.md', 'LICENSE')) {
         $p = Join-Path $root $doc
         if (Test-Path $p) { Copy-Item $p -Destination $stage -Force }
@@ -175,6 +187,37 @@ if ($Package) {
     Write-Host ""
     Write-Host "Single self-contained .aex - no impl DLL, no hot-reload stub." -ForegroundColor DarkGray
     Write-Host "Publish the SHA256 alongside the download so users can verify it." -ForegroundColor DarkGray
+}
+
+# ---------------------------------------------------------------------------
+# The Open Image Denoise runtime
+# ---------------------------------------------------------------------------
+#
+# COPIED BESIDE THE .aex, WHICH IS WHERE src/engine/Denoiser.cpp LOOKS. It resolves the
+# directory of its own module -- not of the EXE, which is AfterFX.exe -- so the DLLs
+# have to sit next to the plugin and not in AE's own folder.
+#
+# NOT AN ERROR WHEN THEY ARE ABSENT. The integration is a RUNTIME load with no import
+# table entry, so a plugin installed without these loads and renders; it just renders
+# undenoised and says so in the diagnostic log. Failing the install here would turn an
+# optional dependency back into a required one.
+#
+# Fetch them with:  cmake -P cmake/FetchOidn.cmake
+function Copy-OidnRuntime {
+    param([string]$Destination)
+
+    $oidnBin = Join-Path $root 'tools\oidn\bin'
+    if (-not (Test-Path $oidnBin)) {
+        Write-Host "  no tools\oidn - installing without the denoiser (cmake -P cmake/FetchOidn.cmake)" -ForegroundColor Yellow
+        return 0
+    }
+
+    $n = 0
+    foreach ($dll in (Get-ChildItem -Path $oidnBin -Filter *.dll -ErrorAction SilentlyContinue)) {
+        Copy-Item $dll.FullName -Destination $Destination -Force -ErrorAction Stop
+        $n++
+    }
+    return $n
 }
 
 if ($Install) {
@@ -266,6 +309,15 @@ if ($Install) {
         }
         if (-not $Hot) {
             Copy-Item $aex -Destination $Dest -Force -ErrorAction Stop
+
+            # NOT ON -Hot. A hot swap replaces only the impl DLL with AE holding the
+            # rest open, and OpenImageDenoise_core.dll is 48 MB that AE may well have
+            # loaded and locked. Nothing about a render-code change needs them
+            # refreshed.
+            $oidnCopied = Copy-OidnRuntime -Destination $Dest
+            if ($oidnCopied -gt 0) {
+                Write-Host "  installed $oidnCopied OIDN DLLs" -ForegroundColor DarkGray
+            }
         }
 
         if ($Hot) {

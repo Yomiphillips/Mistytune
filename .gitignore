@@ -33,6 +33,20 @@ sdk/
 # the checked-in generated CUDA instead of regenerating it.
 tools/slang/
 
+# Intel Open Image Denoise. NOT committed, for the same reason and under the same
+# rule: 53 MB of prebuilt binaries, and a binary in git is a binary in git forever.
+# The repo carries the VERSION and the pinned SHA256 instead of the bytes.
+#
+# Get it with:  cmake -P cmake/FetchOidn.cmake
+# A machine without it configures, builds and tests exactly the same -- the
+# integration is a RUNTIME load (src/engine/Denoiser.h), never a link dependency,
+# so the only difference is that denoiserAvailable() answers false and the render
+# is noisier. That is also what a user who prunes the install folder gets.
+#
+# NOT THE SAME QUESTION AS WHETHER THE RELEASE BUNDLES IT. PLAN.md says bundle,
+# because the denoiser is on by default; packaging copies out of tools/oidn/.
+tools/oidn/
+
 # NotchLC writes this into whatever the working directory happens to be when its
 # codec component loads -- so it reappears after being deleted, and it is always
 # empty. Nothing to do with this project.

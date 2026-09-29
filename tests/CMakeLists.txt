@@ -51,6 +51,7 @@ add_executable(plugin_tests
     # constant used to, because the alternative darkens every render on every machine
     # where the AEGP calls do not answer -- and that is not a machine anyone here has.
     unit/TestColorManagement.cpp
+    unit/TestDenoiser.cpp
 
     # The transmittance table, checked against closed forms rather than against
     # stored numbers. Every way of getting a lookup table wrong produces a smooth,
