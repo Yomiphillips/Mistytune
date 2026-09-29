@@ -927,8 +927,9 @@ static __device__ float sunIrradianceTop_0(SkyInput_0 * p_8)
     return 20.0f * p_8->sunIntensity_0;
 }
 
-static __device__ float3  skyRadiance_0(SkyInput_0 * p_9, float3  rayDir_0, bool includeSunDisc_0)
+static __device__ float3  skyRadiance_0(SkyInput_0 * p_9, float originAltitude_0, float3  rayDir_0, bool includeSunDisc_0)
 {
+    float hc_0;
     float3  _S88 = sunDirection_0(p_9);
     float _S89 = p_9->planetRadius_0;
     float planetRadius_3;
@@ -950,25 +951,34 @@ static __device__ float3  skyRadiance_0(SkyInput_0 * p_9, float3  rayDir_0, bool
     {
         scaleHeight_2 = 1.0f;
     }
-    float _S91 = planetRadius_3 + 2.0f;
+    float atmosphereHeight_0 = scaleHeight_2 * 8.0f;
+    float observerAltitude_0;
+    if(originAltitude_0 > 0.0f)
+    {
+        observerAltitude_0 = originAltitude_0;
+    }
+    else
+    {
+        observerAltitude_0 = 0.0f;
+    }
+    float _S91 = planetRadius_3 + observerAltitude_0;
     float _S92 = rayDir_0.y;
     float b_2 = _S91 * _S92;
-    float cGround_0 = shellC_0(2.0f, planetRadius_3, 0.0f);
-    float tTop_0 = shellExit_0(b_2, shellC_0(2.0f, planetRadius_3, scaleHeight_2 * 8.0f));
+    float cGround_0 = shellC_0(observerAltitude_0, planetRadius_3, 0.0f);
+    float tTop_0 = shellExit_0(b_2, shellC_0(observerAltitude_0, planetRadius_3, atmosphereHeight_0));
     if(tTop_0 <= 0.0f)
     {
         return make_float3 (0.0f, 0.0f, 0.0f);
     }
     float tGround_0 = shellEnter_0(b_2, cGround_0);
     bool hitsGround_0 = tGround_0 > 0.0f;
-    float safeSolid_0;
     if(hitsGround_0)
     {
-        safeSolid_0 = tGround_0;
+        observerAltitude_0 = tGround_0;
     }
     else
     {
-        safeSolid_0 = tTop_0;
+        observerAltitude_0 = tTop_0;
     }
     float3  betaR_0 = rayleighCoefficients_0();
     float betaM_0 = mieCoefficient_0(p_9->turbidity_0);
@@ -1007,7 +1017,7 @@ static __device__ float3  skyRadiance_0(SkyInput_0 * p_9, float3  rayDir_0, bool
             break;
         }
         int _S97 = i_6 + int(1);
-        float tNext_0 = safeSolid_0 * float(_S97 * _S97) * 0.00173611112404615f;
+        float tNext_0 = observerAltitude_0 * float(_S97 * _S97) * 0.00173611112404615f;
         float dt_0 = tNext_0 - tPrev_0;
         float tMid_0 = (tPrev_0 + tNext_0) * 0.5f;
         if(dt_0 <= 0.0f)
@@ -1017,7 +1027,6 @@ static __device__ float3  skyRadiance_0(SkyInput_0 * p_9, float3  rayDir_0, bool
             continue;
         }
         float h_2 = altitudeFromQ_0(cGround_0 + 2.0f * tMid_0 * b_2 + tMid_0 * tMid_0, planetRadius_3);
-        float hc_0;
         if(h_2 < 0.0f)
         {
             hc_0 = 0.0f;
@@ -1076,13 +1085,13 @@ static __device__ float3  skyRadiance_0(SkyInput_0 * p_9, float3  rayDir_0, bool
             float solidAngle_0 = 6.28318548202514648f * (1.0f - cosRadius_0);
             if(solidAngle_0 > 9.99999971718068537e-10f)
             {
-                safeSolid_0 = solidAngle_0;
+                hc_0 = solidAngle_0;
             }
             else
             {
-                safeSolid_0 = 9.99999971718068537e-10f;
+                hc_0 = 9.99999971718068537e-10f;
             }
-            radiance_1 = radiance_1 + viewT_0 * make_float3 (_S102 / safeSolid_0);
+            radiance_1 = radiance_1 + viewT_0 * make_float3 (_S102 / hc_0);
         }
     }
     return radiance_1;
@@ -1095,11 +1104,11 @@ struct Environment_0
     int envMode_0;
 };
 
-static __device__ float3  environmentRadiance_0(Environment_0 * e_0, float3  dir_0, bool includeSunDisc_1)
+static __device__ float3  environmentRadiance_0(Environment_0 * e_0, float3  origin_1, float3  dir_0, bool includeSunDisc_1)
 {
     if((e_0->envMode_0) == int(1))
     {
-        float3  _S107 = skyRadiance_0(&e_0->sky_0, dir_0, includeSunDisc_1);
+        float3  _S107 = skyRadiance_0(&e_0->sky_0, origin_1.y, dir_0, includeSunDisc_1);
         return _S107;
     }
     return e_0->uniformRadiance_0;
@@ -1404,7 +1413,7 @@ static __device__ TraceResult_0 trace_0(Scene_0 * s_3, PhaseInput_0 * ph_0, Stru
         bool _S144 = sampleFreeFlight_0(&s_3->medium_0, &s_3->grid_0, bounds_3, drift_0, rng_4, _S142, _S143, &p_15, &dist_0, &(&r_3)->trackingSteps_0);
         if(!_S144)
         {
-            float3  _S145 = environmentRadiance_0(&s_3->environment_0, _S143, bounce_0 == int(0));
+            float3  _S145 = environmentRadiance_0(&s_3->environment_0, _S142, _S143, bounce_0 == int(0));
             (&r_3)->pathRadiance_0 = (&r_3)->pathRadiance_0 + throughput_0 * _S145;
             break;
         }

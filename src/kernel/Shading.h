@@ -448,8 +448,30 @@ MT_DEVICE float lutMuFor(Vec3 geocentric, Vec3 sun) {
 //
 // TAKES THE TABLE, because the sun-transmittance inner march is now a lookup. A null
 // table is legal and means "no atmospheric extinction towards the sun".
-MT_DEVICE Vec3 skyRadiance(const cloud::FieldParams& field, Vec3 rayDir,
-                           const float* transmittanceLut) {
+//
+// ===========================================================================
+// TAKES THE ORIGIN'S ALTITUDE, AND IT USED TO BE THE CONSTANT 2.0.
+//
+// That was correct for exactly as long as this function had one caller: a camera ray
+// from an observer standing on the ground. The bounce loop then started calling it
+// for ESCAPED PATHS -- a path that scattered inside a cirrus at 9 km and left the
+// medium asks the sky what is in its direction -- and a constant answered every one
+// of them with the sky as seen from two metres.
+//
+// THE ERROR IS NOT SMALL AND IT IS NOT NOISE. It integrates nine kilometres of air
+// that is not between the crystal and space, so the skylight illuminating the cloud
+// came back too bright and too blue, systematically, at every bounce. proto/index.html
+// -- the reference that passed the Phase 0 look verdict -- passes `ro` and always
+// did; this is the transcription catching up with it.
+//
+// ONLY THE ALTITUDE, NOT THE POSITION, and that is sound rather than a shortcut: the
+// atmosphere is spherically symmetric, so the march depends on where the origin is
+// only through its height and the ray's angle to the local vertical. The existing
+// local-frame assumption -- the origin sits on the +Y axis -- is what makes `b` one
+// multiply instead of a dot product, and it is unchanged.
+// ===========================================================================
+MT_DEVICE Vec3 skyRadiance(const cloud::FieldParams& field, float originAltitude,
+                           Vec3 rayDir, const float* transmittanceLut) {
     const cloud::AtmosphereParams& atm = field.atmosphere;
     const Vec3 sun = sunDirection(atm);
 
@@ -459,14 +481,21 @@ MT_DEVICE Vec3 skyRadiance(const cloud::FieldParams& field, Vec3 rayDir,
                              ? field.physics.scaleHeight : 1.0f;
     const float atmosphereHeight = scaleHeight * kAtmosphereEFoldings;
 
-    // THE OBSERVER SITS ON THE PLANET, not at the origin. A flat-earth model cannot
+    // THE ORIGIN SITS ON THE PLANET, not at the centre. A flat-earth model cannot
     // produce a horizon at all, and the horizon is where most of the interesting
     // light is.
     //
     // THE ALTITUDE IS CARRIED AS A NUMBER, not recovered from the position. Every
     // intersection below is computed from it, which is what keeps the horizon clean
     // -- see the ray-sphere note above.
-    const float observerAltitude = 2.0f;
+    //
+    // FLOORED AT THE GROUND. An escaped path's origin is a point in the medium and
+    // nothing stops a caller handing over a negative height -- a slab configured
+    // below sea level, or an expression driving the generating level under zero.
+    // A negative altitude puts the origin inside the planet, where shellEnter()
+    // returns a root behind the ray and the march runs backwards through the air.
+    // Clamping is what the density profile already does with `hc` below.
+    const float observerAltitude = originAltitude > 0.0f ? originAltitude : 0.0f;
 
     // b = dot(origin, dir), and the origin is on the +Y axis, so this is one
     // multiply rather than a dot product over coordinates in the millions.

@@ -101,11 +101,26 @@ public struct Environment
 // Mode 0 has no disc to include, so the argument does nothing there -- which is what
 // the furnace test needs and is why the flag was wired up before it had a sun to
 // suppress. Mode 1 is the sky, and there it is doing the job above.
-public float3 environmentRadiance(Environment e, float3 dir, bool includeSunDisc)
+// TAKES THE POSITION THE PATH IS LEAVING FROM, not only the direction it leaves in.
+//
+// MODE 0 IGNORES IT, and must: a uniform environment is the same radiance from
+// everywhere, which is the whole premise of the furnace test.
+//
+// MODE 1 NEEDS IT. The sky a path sees depends on how much air is between it and
+// space, and a path that scattered inside a cirrus at 9 km has nine kilometres less
+// of it than the camera does. Passing only a direction meant every escaped path was
+// answered with the sky as seen from the ground -- see Shading.h's skyRadiance, which
+// carries the argument. proto/index.html passes `ro` here and always did.
+//
+// ONLY `.y` REACHES THE SKY, because the atmosphere is spherically symmetric and the
+// march is built around altitude. The full position is taken rather than a float so
+// the call site cannot quietly pass the wrong component.
+public float3 environmentRadiance(Environment e, float3 origin, float3 dir,
+                                  bool includeSunDisc)
 {
     if (e.envMode == 1)
     {
-        return skyRadiance(e.sky, dir, includeSunDisc);
+        return skyRadiance(e.sky, origin.y, dir, includeSunDisc);
     }
 
     return e.uniformRadiance;
@@ -207,7 +222,12 @@ public TraceResult trace(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
             // The path left the medium. Whatever the environment is in that direction
             // is what it carries home -- which makes skylight a transport result
             // rather than an ambient constant.
-            r.pathRadiance += throughput * environmentRadiance(s.environment, rd, bounce == 0);
+            //
+            // `ro` IS WHERE IT IS LEAVING FROM: the camera at bounce 0, and the last
+            // scattering point after that. The sky is asked from there rather than
+            // from the ground, which is what makes the skylight on a high cirrus the
+            // sky that crystal can actually see.
+            r.pathRadiance += throughput * environmentRadiance(s.environment, ro, rd, bounce == 0);
             break;
         }
 

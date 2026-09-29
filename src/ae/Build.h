@@ -43,17 +43,34 @@
 // 0.1 -- Phase 1. The scaffolding is Mistytune's, the parameter model is real,
 // and the renderer is a placeholder analytic sky proving the plumbing. Nothing
 // has been handed to anyone, so the parameter layout is still free to change.
-// MINOR STAYS AT 3: out_flags, out_flags2 and the parameter list are untouched. The
-// output conversion moved into src/engine/OutputConvert.h and toImageView's fallback
-// narrowed, both of which are internal to the render path.
 //
-// BUILD 7 -- the atmosphere's inner sun march became a precomputed transmittance
-// table. It is the only change since build 6 that moves a pixel: 1.47x faster, and
-// more accurate at low sun, where the 8-step quadrature it replaces was worst. The
-// diagnostic log also names the working-space colour profile now.
+// MINOR 4 -- THE ICE GROUP. Thirty parameters were inserted between Sun and Sky and
+// Physics, which is a PARAMETER LIST change and therefore a minor bump by the rule
+// above. This is not bookkeeping: PARAMS_SETUP is re-run only after a version
+// change, so shipping these controls at minor 3 would install a binary that renders
+// exactly as build 7 did and shows not one of the new sliders. That failure looks
+// like the controls were never written.
 //
-// STILL MINOR 3: no parameter was added, no flag changed. The table reaches the
-// kernel as a pointer in RenderRequest, which AE never sees.
+// INSERTED RATHER THAN APPENDED, which the same bump is what makes safe. AE stores
+// values by POSITION, so every parameter after index 13 has moved; a project saved
+// by build 7 would read its Physics values out of the shear profile. Nothing has
+// shipped and nothing has been handed to anyone, so there is no such project -- and
+// PLAN.md fixes the layout at the v0.5 hand-out, after which this is never free
+// again.
+//
+// BUILD 8 -- the ice generator's parameters reach the panel for the first time. The
+// kernel has marched this field since build 6; until now `field.ice` was never
+// assigned from a control, so every render used the struct's defaults.
+//
+// BUILD 9 -- the sky is asked from where the path actually is. skyRadiance() took the
+// origin altitude as the constant 2.0, which was right while a camera ray was its only
+// caller and wrong from the moment the bounce loop began asking it for ESCAPED paths:
+// every one of them got the sky as seen from two metres. It moves pixels, the three
+// goldens were re-blessed on the evidence, and PROGRESS.md carries the numbers.
+//
+// STILL MINOR 4: no parameter was added and no flag changed. Observer Altitude is a
+// ViewParams field with no control, so nothing in the panel moved -- see PROGRESS.md,
+// which records that it is now honoured and still unreachable.
 #define PLUGIN_MAJOR 0
-#define PLUGIN_MINOR 3
-#define PLUGIN_BUILD 7
+#define PLUGIN_MINOR 4
+#define PLUGIN_BUILD 9

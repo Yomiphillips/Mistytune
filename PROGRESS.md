@@ -4,6 +4,198 @@ Tracked against `PLAN.md`. Newest first.
 
 ---
 
+## 2026-09-29 — THE SKY WAS ASKED FROM THE WRONG PLACE. Every escaped path got the sky as seen from two metres, including one leaving a crystal at nine kilometres; the fix is one argument, and the sunset golden moved the OPPOSITE way from the other two, which is the measurement that says it is right.
+
+### What was wrong
+
+`skyRadiance()` took the origin's altitude as a literal `2.0`. That was correct for
+exactly as long as the function had one caller — a camera ray from an observer standing
+on the ground. The bounce loop then began calling it through `environmentRadiance()`
+for **escaped paths**, and `environmentRadiance` took a direction and no position. So a
+path that scattered inside a cirrus at 9 km and left the medium was told what the sky
+looks like **from two metres above the sea**.
+
+**THE ERROR IS SYSTEMATIC, NOT NOISE.** It integrates nine kilometres of air that is not
+between the crystal and space, at every bounce of every path. Skylight is the whole
+illumination of a cloud that is not direct sun, so it is not a corner case.
+
+**proto/index.html HAS ALWAYS PASSED `ro`** — `skyRadiance(ro, rd, 1e9, neverScattered)`,
+with `ro` updated to the scatter point each bounce. The prototype is what passed the
+Phase 0 look verdict and is the reference this port is checked against. This is the
+transcription catching up with it, not a new idea.
+
+**NOTHING RECORDED IT AS A DECISION.** No comment argued for the constant and no
+PROGRESS entry mentions it. It is a Phase 1 value that silently changed meaning when
+Phase 2 gave the function a second caller — the same shape as the ice parameters two
+entries ago: not a thing that broke, a thing that was never connected.
+
+### The fix, and what it does not do
+
+`skyRadiance(SkyInput, float originAltitude, float3 rayDir, bool)` on both sides, and
+`environmentRadiance(Environment, float3 origin, float3 dir, bool)` passing `origin.y`.
+The bounce loop hands it `ro`: the camera at bounce 0, the last scattering point after.
+
+**ONLY THE ALTITUDE REACHES THE MARCH, and that is sound rather than a shortcut.** The
+atmosphere is spherically symmetric, so the integral depends on the origin only through
+its height and the ray's angle to the local vertical. The local-frame assumption that
+makes `b` one multiply instead of a dot product is untouched.
+
+**FLOORED AT THE GROUND.** An escaped path's origin is a point in the medium and nothing
+stops a slab configured below sea level. A negative altitude puts the origin inside the
+planet, where `shellEnter()` returns a root behind the ray and the march runs backwards.
+
+**`ViewParams::observerAltitude` IS NOW HONOURED TOO**, incidentally: the camera ray's
+`ro.y` is that field, where the sky previously pinned 2.0 regardless. It has no control
+in the panel and no CLI flag, so it is still always 2.0 in practice — the parameter was
+simply being ignored as well as the escape point.
+
+### Proved, not assumed
+
+**`slang.skyParity` NOW SWEEPS ALTITUDE and still passes bitwise.** The test dispatched
+at one altitude, which after this change would have compared the two files only where
+they agreed by construction and stayed green through a transcription error in the new
+argument on either side. It runs at −500, 0, 2, 6400, 9000 and 30000 m — the ground, the
+observer, the streak bottom, the generating level, the stratosphere, and a negative that
+must clamp. 14,449 directions at each: 0 differing channels of 260,082.
+
+**THE CONTROL IS IN THE DATA.** A path that never scatters calls the function with the
+camera's 2.0, which is the old constant, so those pixels must be bit-identical. Measured:
+the sunset scene's rows 31–71 — the part of the frame with no cloud in it — differ by
+exactly zero. Where the cloud is not, nothing moved.
+
+### The goldens moved, and the DIRECTION is the finding
+
+| scene | max | mean | signed mean | darker | brighter | identical |
+| --- | --- | --- | --- | --- | --- | --- |
+| midday | 14 | 0.78 | −0.51 | 36.8% | 5.5% | 57.7% |
+| sunset | 32 | 0.28 | **+0.26** | 0.6% | **6.1%** | 93.2% |
+| horizon | 48 | 1.48 | −0.62 | 75.9% | 11.0% | 13.1% |
+
+Midday and horizon go **darker**: less air above a crystal at 9 km than above the ground,
+so less in-scattered skylight reaches it. Predicted before measuring, and confirmed.
+
+**SUNSET GOES BRIGHTER, AND THAT IS WHY THIS IS RIGHT RATHER THAN WHY IT IS WRONG.** At
+a sun elevation of 2° the geometric horizon seen from 9 km is depressed about 3°, so the
+sun sits roughly 5° above the crystal's own horizon while the ground is nearly in shadow.
+The sky a high crystal sees at sunset is genuinely brighter than the sky from below it.
+That is the alpenglow case, and it is the reason a high cirrus still burns after the
+ground has gone flat — which is the default preset PLAN.md asks for, backlit.
+
+A constant could not have produced a sign that depends on sun elevation. Two scenes
+moving down and one moving up, each for a reason stated before the number was read, is a
+stronger check than three moving the same way would have been.
+
+Magnitudes are dominated by ±1/255 and tail off quickly (midday: 7381 channels at 1,
+1731 at 2, 201 at 6), which is the signature of a modest change to what illuminates a
+semi-transparent layer rather than a change to the background behind it.
+
+**BLESSED**, on those four grounds: the port is bitwise-identical to the reference across
+six altitudes, the change is provably nil where no path scatters and measured nil there,
+the direction is correct in all three scenes including the one that disagrees with the
+other two, and it moves toward proto/index.html rather than away from it.
+
+### A build hazard found on the way, worth the line
+
+The first build after the edit failed partway and left
+`src/kernel/slang/generated/RenderCpu.cpp` holding slangc's raw output: an **absolute
+path** to the prelude on this machine, and no banner. It compiles here and nowhere else.
+`slang.regenerates` caught it — which is exactly the hole that test was written for —
+but the mechanism is worth naming: `add_custom_command` runs slangc and the prelude
+rewrite as two COMMANDs, and a build interrupted between them commits the un-rewritten
+file. Deleting the generated file and rebuilding restores it.
+
+### State
+
+**23 of 23 ctest suites and 123 unit tests green**, goldens re-blessed and the GPU
+comparisons passing against the CPU-blessed references. Build 9, minor unchanged at 4.
+
+### Still not done, and unchanged by this
+
+- **MULTIPLE SCATTERING IN THE AIR IS STILL MISSING** and is the remaining half of "the
+  rest of the Bruneton atmosphere". Shading.h has said so since Phase 1: a hazy or
+  high-turbidity sky comes out too dark because the light that would have bounced a
+  second time is absent, and twilight is worst affected. Neither proto/ nor this kernel
+  has ever had it — the prototype's sky march is the same 12-step single-scattering
+  integral. That is the second LUT, and it is new work rather than a transcription.
+- **AERIAL PERSPECTIVE ON THE CLOUD** — the air between the viewer and the cloud
+  attenuating what the cloud sends back, and adding its own airlight in front of it — is
+  also still absent. The prototype's claim that it "is already in the result" holds only
+  for the sky behind the cloud, not for the cloud itself: `maxDist` exists in its
+  signature and every call site passes `1e9`.
+- OIDN, the field cache, and Working Space None, all unchanged from the last entry.
+
+---
+
+## 2026-09-29 — THE ICE GENERATOR HAS HAD NO CONTROLS. It was plumbed, hashed, tested and shipped in seven builds without one of its parameters reaching the panel, and nothing in the repo could have said so.
+
+### The finding
+
+`FieldParams::ice` was never assigned in the effect. `preRender` filled `physics`,
+`atmosphere` and `quality` and stopped; `field.ice` kept `IceParams`'s defaults. So
+every render made in After Effects since build 6 — when the Slang transport first
+reached the pixel — was **the same cirrus**: 9000 m, Column habit, density 0.35, that
+one shear profile. Correct, and unreachable.
+
+**NOTHING WAS FAILING.** The kernel marches `field.ice` properly, `SlangBridge.h`
+carries all of it, `Fingerprint.cpp` hashes all of it, and `deriveRenderInputs()`
+builds the drift table from all of it. 123 unit tests and 23 ctest suites pass on it
+and always did — `src/cli/` sets its scene directly and never goes through
+`src/ae/Params.h`, so no test tier this project has could see the gap. It is visible
+only from the panel, and only if you know what should have been in it.
+
+**THE THREE TIERS HAVE A FOURTH EDGE AND IT IS UNTESTED.** Unit tests cover the
+engine, goldens cover the kernel, and in-host checks cover the render path. The
+mapping from a control to a struct member is in none of them: `Params.h` needs the
+Adobe SDK, so it is outside tier 1 by construction, and tiers 2 and 3 both enter
+below it. Every parameter this project adds from here passes through code no test
+executes.
+
+### What was built
+
+Thirty parameters — twelve scalars, a habit popup, six shear speeds, six shear
+bearings, four spares, the group and its end — plus `toIce()`.
+
+**INSERTED BETWEEN SKY AND PHYSICS, NOT APPENDED.** Group order is screen order, so
+appending would have put the clouds below Quality and Output. Inserting moves every
+index after 13, which rewires saved projects — **free today and never again**, since
+nothing has shipped and PLAN.md fixes the layout at the v0.5 hand-out.
+
+**THE SHEAR PROFILE IS TWELVE SLIDERS, WHICH IS PLAN.md's PHASE 2 SHAPE** and not a
+compromise reached here: the SDK ships no curve control and no sample of one, so the
+editor is an arbitrary-data parameter with custom UI in Phase 4. `ShearProfile` does
+not change when it arrives. A `static_assert` on `kShearKnots == 6` in `toIce()` is
+the tripwire — raise the constant and the build stops until the sliders exist, the
+same bargain `Fingerprint.h` strikes with `sizeof`.
+
+**NO ENABLE CHECKBOX.** `IceParams::enabled` is hashed but no backend reads it: the
+`enabled` flags in `TransportLib.slang` belong to the **majorant grid**, not to the
+generator. A control that silently does nothing is worse than no control, so the slot
+is `IceSpare1` and the checkbox arrives with the code that honours it.
+
+**MINOR 3 → 4, BUILD 7 → 8, AND THE BUMP IS THE FEATURE.** `PARAMS_SETUP` is re-run
+only after a version change, so these controls installed at minor 3 would have given
+a binary that renders exactly as build 7 and shows not one new slider — a failure
+indistinguishable from never having written them.
+
+Valid ranges are as wide as the maths allows, per the rule in `Params.h`, and every
+divisor downstream is already guarded: `streakLength` and fall speed are floored in
+`IceField.cpp`, `iceMajorant()` clamps the negatives, and `cellSize`'s valid minimum
+of 1 m is the guard for the one that is not. Sublimation's valid range **goes
+negative on purpose** — that is deposition, and `depthFactorBound()` already takes
+the maximum at both ends of each interval precisely because the sign can flip.
+
+### State, and what is NOT verified
+
+123 unit tests and 23 ctest suites green, goldens included — unchanged, as they must
+be: the CLI does not read `Params.h`.
+
+**NO HOST HAS SEEN THIS.** Whether AE accepts thirty inserted parameters, whether the
+group lands between Sky and Physics on screen, whether the angle dials read back as
+bearings, and whether a shear slider visibly changes the streak are all untested and
+cannot be tested here. That is the next thing to do and it needs After Effects.
+
+---
+
 ## 2026-09-29 — THE FIELD CACHE IS IN THE WRONG PLACE, AND A LOCK IS NOT THE FIX. Found while going to wire it; the planned mitigation would have made a real race deterministic without making it correct.
 
 `SequenceData` has carried a `FieldCache` since Phase 1, with a comment saying it "will

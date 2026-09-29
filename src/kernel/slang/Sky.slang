@@ -18,15 +18,22 @@
 // PASSES includeSunDisc = true, because the hand-written skyRadiance it is compared
 // against has no such parameter and always draws the disc. The renderer passes false
 // at every bounce after the first; see SkyLib.slang on why that is not optional.
+//
+// THE ORIGIN ALTITUDE IS A UNIFORM RATHER THAN A CONSTANT so the parity test can
+// sweep it. It was a literal 2.0 inside skyRadiance until the bounce loop started
+// calling that function for escaped paths; a parity test that only ever dispatched
+// at 2 m would keep passing while the argument the renderer actually varies went
+// unchecked on one of the two sides.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void skyMain(uint3 tid : SV_DispatchThreadID,
              uniform SkyInput params,
+             uniform float originAltitude,
              uniform StructuredBuffer<float3> directions,
              uniform RWStructuredBuffer<float3> output,
              uniform int count)
 {
     int i = int(tid.x);
     if (i >= count) return;
-    output[i] = skyRadiance(params, directions[i], true);
+    output[i] = skyRadiance(params, originAltitude, directions[i], true);
 }

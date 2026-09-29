@@ -10,15 +10,23 @@
 // the CPU, all three bit depths, reduced resolution, and the diagnostic line naming
 // the device AE handed us.
 //
-// The thing it renders is a placeholder -- an analytic sky in src/kernel/Shading.h.
-// There is no volumetric transport yet: no null-collision tracking, no multiple
-// scattering, no precomputed atmosphere, no ice generator. Those are Phase 2, ported
-// from proto/ once the Phase 0 look verdict is in.
+// WHAT IT RENDERS IS NO LONGER A PLACEHOLDER. Null-collision tracking, the bounce
+// loop, the Jendersie-d'Eon phase function, the precomputed transmittance table and
+// the ice generator all landed across 2026-09-28 and 09-29; this file hands them a
+// FieldParams and gets float pixels back.
 //
-// The split is on purpose. Phase 1's exit criterion is about the HOST -- that a
-// parameter typed in After Effects reaches a GPU kernel and comes back as correct
-// float pixels at 8, 16 and 32 bpc and at reduced resolution. Proving that with a
-// renderer that also has to be right would confound two unrelated kinds of bug.
+// THE PARAMETER TABLE IS THE PART THAT LAGGED, and it lagged invisibly. The ice
+// generator was plumbed and hashed for a day before a single one of its parameters
+// had a control, so `field.ice` kept the struct's defaults through every render made
+// in that time -- one sky, correct, and unreachable. The `toIce` line in preRender
+// below is the whole of the fix; see Params.h on why the group is inserted rather
+// than appended.
+//
+// The host/renderer split is still on purpose. Phase 1's exit criterion was about the
+// HOST -- that a parameter typed in After Effects reaches a GPU kernel and comes back
+// as correct float pixels at 8, 16 and 32 bpc and at reduced resolution. Proving that
+// with a renderer that also had to be right would have confounded two unrelated kinds
+// of bug, which is why it was proved first and against an analytic sky.
 // ===========================================================================
 
 #include "AEBridge.h"
@@ -286,6 +294,7 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
 
     data->field.physics    = toPhysics(values);
     data->field.atmosphere = toAtmosphere(values);
+    data->field.ice        = toIce(values);
     data->field.timeSeconds = currentTimeSeconds(in_data);
     data->quality          = toQuality(values);
 

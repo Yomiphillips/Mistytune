@@ -82,7 +82,6 @@ static const int kLutFloats       = kLutMuSize * kLutAltitudeSize * kLutChannels
 
 static const float kMieScaleHeight      = 1200.0f;
 static const float kAtmosphereEFoldings = 8.0f;
-static const float kObserverAltitude    = 2.0f;
 
 float clampf(float v, float lo, float hi)
 {
@@ -300,7 +299,12 @@ public float sunIrradianceTop(SkyInput p)
 //
 // A camera ray that reached the sky WITHOUT ever scattering had no next-event
 // estimate, so for that one the disc is the correct and only answer.
-public float3 skyRadiance(SkyInput p, float3 rayDir, bool includeSunDisc)
+//
+// TAKES THE ORIGIN'S ALTITUDE, mirroring Shading.h, which carries the argument for
+// the change at length: a constant answered every escaped path with the sky as seen
+// from two metres, and an escaped path starts wherever it left the medium.
+public float3 skyRadiance(SkyInput p, float originAltitude, float3 rayDir,
+                          bool includeSunDisc)
 {
     float3 sun = sunDirection(p);
 
@@ -308,10 +312,13 @@ public float3 skyRadiance(SkyInput p, float3 rayDir, bool includeSunDisc)
     float scaleHeight  = p.scaleHeight > 1.0f ? p.scaleHeight : 1.0f;
     float atmosphereHeight = scaleHeight * kAtmosphereEFoldings;
 
-    float b = (planetRadius + kObserverAltitude) * rayDir.y;
+    // Floored at the ground, as Shading.h does and for the reason it gives there.
+    float observerAltitude = originAltitude > 0.0f ? originAltitude : 0.0f;
 
-    float cGround = shellC(kObserverAltitude, planetRadius, 0.0f);
-    float cTop    = shellC(kObserverAltitude, planetRadius, atmosphereHeight);
+    float b = (planetRadius + observerAltitude) * rayDir.y;
+
+    float cGround = shellC(observerAltitude, planetRadius, 0.0f);
+    float cTop    = shellC(observerAltitude, planetRadius, atmosphereHeight);
 
     float tTop = shellExit(b, cTop);
     if (tTop <= 0.0f) return float3(0.0f, 0.0f, 0.0f);
@@ -357,7 +364,7 @@ public float3 skyRadiance(SkyInput p, float3 rayDir, bool includeSunDisc)
         float hc = h < 0.0f ? 0.0f : h;
 
         float3 pt = float3(rayDir.x * tMid,
-                           planetRadius + kObserverAltitude + rayDir.y * tMid,
+                           planetRadius + observerAltitude + rayDir.y * tMid,
                            rayDir.z * tMid);
         float bSun = dot(pt, sun);
 
@@ -395,7 +402,7 @@ public float3 skyRadiance(SkyInput p, float3 rayDir, bool includeSunDisc)
     if (hitsGround)
     {
         float3 groundPoint = float3(rayDir.x * tGround,
-                                    planetRadius + kObserverAltitude + rayDir.y * tGround,
+                                    planetRadius + observerAltitude + rayDir.y * tGround,
                                     rayDir.z * tGround);
         float3 groundNormal = normalizeExact(groundPoint);
         float  nDotL = clampf(dot(groundNormal, sun), 0.0f, 1.0f);
