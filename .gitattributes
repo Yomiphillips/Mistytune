@@ -1,0 +1,8 @@
+# Images are bytes, not text. A PPM with no NUL in it looks like text to git, and
+# core.autocrlf would then write CRLF into its header on checkout -- shifting every
+# pixel of a golden reference by a byte on a fresh clone.
+*.ppm binary
+*.pfm binary
+*.exr binary
+*.png binary
+*.jpg binary
