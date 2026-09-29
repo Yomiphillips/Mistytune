@@ -27,7 +27,7 @@ enough to keep beside the answer.
 | Terrain input | A driver slot with Top-Down projection, channel = Luminance or Depth | No new input type, no new code path, and it composes with the other three slots |
 | Physics tab on install | Earth clamp by default; alien presets in a clearly-labelled *Physics demo* group | The alien skies are the proof the tab is real. They should not be the first thing a realism buyer sees |
 | GPU backends | CUDA first (Windows), **one kernel source** cross-compiled; Metal from the same source at Phase 5 | Hand-maintaining two path tracers is the spec's own named risk. See *One kernel source* |
-| Minimum GPU | Deferred until Phase 2 measures samples/second on real cards | It is a measurement, not an opinion, and it sets whether Draft mode is genuinely interactive |
+| Minimum GPU | **Measured 2026-09-29: 44.7 M pixel-samples/s on an RTX 2070 SUPER, linear in pixel-samples.** The floor is set by having a CUDA *denoise*, not by the path tracer — see *Still open* below | It is a measurement, not an opinion, and it sets whether Draft mode is genuinely interactive |
 
 Still open, and each needs an answer before the phase that consumes it:
 
@@ -65,16 +65,45 @@ Still open, and each needs an answer before the phase that consumes it:
   than to an effect that will not load. That is also what makes fetch-on-first-run
   possible at all.
 
-- **Whether Draft mode can be interactive at all** on the floor GPU. Partly answered,
-  and the denoiser turns out to be the deciding term rather than a rounding error.
-  Measured on an RTX 2070 SUPER at 1920x1080: the render is **0.28 s at 1 sample** since
-  the majorant was tightened, and OIDN's RT HDR filter with albedo and normal costs
-  **30 ms on CUDA and 774 ms on the CPU**.
+- **Whether Draft mode can be interactive at all — ANSWERED 2026-09-29, and the answer
+  is yes on this card and probably yes on a quarter of it.**
 
-  So on a card with a CUDA denoise the denoiser is 11% of a Draft frame and can run every
-  frame. On a machine that falls back to the CPU device it is **2.8x the entire render**,
-  and Draft would be denoiser-bound. That is the number that decides whether the CPU
-  device is offered at all, or whether no-GPU means no-denoise.
+  The renderer's cost is **linear in pixel-samples and nothing else**, measured across
+  three resolutions and seven sample counts and fitted:
+
+  | | ns per pixel-sample |
+  | --- | --- |
+  | 1920x1080 | 20.7 |
+  | 960x540 | 21.1 |
+  | 480x270 | 25.2 |
+
+  **44.7 M pixel-samples/second** on an RTX 2070 SUPER. The 480x270 figure is worse
+  because 129,600 pixels is about three waves on a 40-SM card — small frames do not fill
+  it, which matters because that is exactly what a Draft preview is.
+
+  A Draft frame, kernel only:
+
+  | | 1 spp | 4 spp |
+  | --- | --- | --- |
+  | 1920x1080 | 46 ms | 185 ms |
+  | 960x540 | 12 ms | 46 ms |
+
+  Add the output transform (**10 ms** at 1080p, threaded) and OIDN's RT HDR filter with
+  albedo and normal (**30 ms on CUDA, 774 ms on the CPU**). So 1080p at 1 spp is about
+  **86 ms — 12 fps — and 4 spp is 225 ms**, which is scrubbable. Half resolution at
+  4 spp is 86 ms again.
+
+  **Minimum GPU follows from the slope.** A card a quarter of this one's throughput
+  renders 1080p Draft at 1 spp in 184 ms; with the denoiser that is ~225 ms, still
+  usable, and half resolution brings it back under 100 ms. The floor is therefore set
+  by *having a CUDA denoise at all* rather than by the path tracer: on a machine that
+  falls back to OIDN's CPU device the denoiser is **17x the 1 spp render** and Draft
+  becomes denoiser-bound. That is the number that decides whether the CPU device is
+  offered at all, or whether no-GPU means no-denoise.
+
+  Superseded figures: this entry previously recorded 0.28 s at 1 sample. Intervening
+  work — the majorant tightening, then the transmittance table — moved it; see
+  PROGRESS.md for the A/B of each.
 
 
 ## Where we are starting from

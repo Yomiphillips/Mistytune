@@ -4,6 +4,313 @@ Tracked against `PLAN.md`. Newest first.
 
 ---
 
+## 2026-09-29 — Build 7 reported fine in the host. Recorded as REPORTED rather than MEASURED, and the difference matters for exactly one line of it.
+
+Build 7 installed into AE 2026 and checked against the three things it changed: the sky
+at low sun, the frame time, and the Working Space None colour branch. The report back
+was that everything is fine.
+
+**NO LOG WAS CAPTURED HERE, SO THIS ENTRY CARRIES LESS WEIGHT THAN THE ONES ABOVE IT.**
+Every other claim in this file has a number behind it. This one has a person saying it
+looked right, which is the correct evidence for "does the sky look wrong" and weaker
+evidence for the other two.
+
+### What that does and does not settle
+
+| | status |
+| --- | --- |
+| The sky at low sun looks unchanged | **Settled.** This is a judgement and a person is the right instrument for it |
+| The frame got faster | Consistent with the 1.47x A/B, but the host number was not read back |
+| **Working Space None gives `encodeSrgb=1`** | **REPORTED, NOT MEASURED** |
+
+The third is the one that matters. Rules 3 and 4 of `encodesSrgbForHost` have still
+never been seen firing in a log. The stated assertion was that a Working Space None
+project must report `encodeSrgb=1`, and a `0` there would mean
+`AEGP_GetNewWorkingSpaceColorProfile` returns a *linear* profile for "None" — which
+would darken every default project by one sRGB encode.
+
+"Fine" is consistent with `encodeSrgb=1`, and it is also consistent with the branch not
+having been exercised at all. **The log line is still worth capturing the next time
+anyone is in the host**, and the diagnostic now prints the profile name beside the
+gamma, so one line answers it outright:
+
+    colour raw: ocioErr=0 ocio=0 profileErr=? haveGamma=? gamma=? profile="?"
+
+Left open deliberately rather than written up as closed, because a caveat that gets
+quietly upgraded to a fact is how this project has already lost two premises.
+
+---
+
+## 2026-09-29 — 44.7 MILLION PIXEL-SAMPLES A SECOND, which closes three of PLAN.md's open questions at once. Plus the sweep helper that three separate entries said was the real fix and none of them built.
+
+### THE COST IS LINEAR IN PIXEL-SAMPLES AND NOTHING ELSE
+
+Seven sample counts across three resolutions, best of three runs each, least-squares
+fitted so the process-start and file-write overhead falls out as the intercept rather
+than contaminating the slope:
+
+| resolution | pixels | ns per pixel-sample | fixed overhead |
+| --- | --- | --- | --- |
+| 1920x1080 | 2,073,600 | **20.7** | 0.202 s |
+| 960x540 | 518,400 | **21.1** | 0.164 s |
+| 480x270 | 129,600 | **25.2** | 0.160 s |
+
+**44.7 M pixel-samples/second** on an RTX 2070 SUPER.
+
+**THE INTERCEPT IS THE CLI, NOT THE RENDERER.** A 16x16 frame at one sample takes
+0.151 s, which is process start, CUDA context creation and the PPM write with almost no
+kernel under it. In After Effects the context is already up, which is why the user's own
+host log reports 0.11 s for a 1080p 1-sample frame where the CLI reports 0.256 s. The
+slope is the number that transfers; the intercept is this program.
+
+**480x270 IS WORSE PER SAMPLE, AND THAT IS THE INTERESTING ONE.** 129,600 pixels is
+about three waves on a 40-SM card, so a small frame does not fill it. That matters
+precisely because a small frame is what a Draft preview *is* — the per-sample cost gets
+worse exactly where interactivity is wanted.
+
+### WHICH ANSWERS "CAN DRAFT BE INTERACTIVE AT ALL", OPEN SINCE PHASE 0
+
+Kernel only:
+
+| | 1 spp | 4 spp | 16 spp | 64 spp |
+| --- | --- | --- | --- | --- |
+| 1920x1080 | 46 ms | 185 ms | 741 ms | 2.97 s |
+| 960x540 | 12 ms | 46 ms | 185 ms | 741 ms |
+| 480x270 | 3 ms | 12 ms | 46 ms | 185 ms |
+
+Add the output transform (10 ms at 1080p, threaded — see the entry below) and OIDN's RT
+HDR filter with albedo and normal (30 ms on CUDA, 774 ms on the CPU, measured
+2026-09-28). A 1080p Draft frame is then **86 ms, about 12 fps**, and 4 spp is 225 ms,
+which is scrubbable.
+
+**AND IT SETS THE MINIMUM GPU, WHICH PLAN.md HAS DEFERRED SINCE THE START.** A card at a
+quarter of this throughput renders 1080p 1 spp in 184 ms; with a CUDA denoise that is
+~225 ms, and half resolution brings it back under 100 ms. **So the path tracer is not
+what sets the floor — the denoiser is.** On a machine falling back to OIDN's CPU device
+the denoise is 774 ms against a 46 ms render: **17x**, and Draft becomes entirely
+denoiser-bound. Whether the CPU device is offered at all is now a decision with a ratio
+behind it.
+
+### THE TDR BUDGET WAS RE-MEASURED AS THE FILE ASKED, AND THE ANSWER IS TO LEAVE IT
+
+`KernelApi.h` says, in capitals, *"WHEN THE MAJORANT IS TIGHTENED, MEASURE AGAIN."*
+Done. `kGpuPixelSampleBudget` is 2,097,152 pixel-samples, chosen as ~0.19 s of work at
+93 ns per pixel-sample. At 22 ns it is now **47 ms per launch** — four times more
+conservative than designed.
+
+**IT STAYS, AND THE ARITHMETIC IS WHY.** The cost of an over-small budget is launch
+count: 1080p at 64 spp is 63 launches at roughly 50 us of overhead each, which is
+**3.2 ms against 2.97 s of work — one part in nine hundred.** The benefit is margin: 47 ms
+against a ~2 s display-driver timeout is 42x here and still 10x on a card four times
+slower, which is exactly the safety property the constant exists for.
+
+Raising it would buy three milliseconds and spend most of the TDR margin. Recorded so
+the next person to read that instruction finds it already carried out.
+
+### THE SWEEP HELPER, WHICH THREE ENTRIES CALLED FOR AND NONE BUILT
+
+The previous entry said: *"Writing the lesson down has now failed three times to prevent
+it. What would is a sweep helper in `TestFramework.h`."* Built.
+
+`pltest::Sweep` collects, remembers the first disagreement, and reports one line. The
+count that made the case for it:
+
+| test | lines reported on a single injected fault |
+| --- | --- |
+| `TheQuantiserIsExactlyClampScaleAndRound` | ~16,000 |
+| `TheCurveMatchesTheOneOnTheRenderPath` | 2,007 |
+| `TheAltitudeWarpRoundTrips` | 64 |
+
+Two of the three are converted; the output is identical in quality and the boilerplate
+is gone:
+
+    2007 of 2015 curve probes disagree.
+    first: at 0.00313089998 -- got 0.0399987996, wanted 0.0404511765
+
+**THE THIRD IS DELIBERATELY NOT CONVERTED.** `TheQuantiserIsExactlyClampScaleAndRound`
+reports which *bit depth* and which *channel* disagreed and prints both sides as the
+integers they actually are. The generic helper carries one double and one location.
+Converting it would trade real diagnostic detail for uniformity, and that test's whole
+value is saying which of eight quantiser paths failed. The helper is for the next sweep,
+not for rewriting that one.
+
+**BOTH HALVES VERIFIED.** The mismatch path by re-injecting `1.055f` as `1.05f`; the
+`atLeast` guard by temporarily demanding 999,999 comparisons, which reports
+
+    sweep over curve probes compared 2015, expected at least 999999
+    -- an empty sweep passes while checking nothing
+
+That guard is the one that matters long-term: a sweep whose range silently became empty
+passes while checking nothing, and every loop-driven test in this suite has that failure
+mode.
+
+### State
+
+115 unit tests, 22 ctest suites, all green. PLAN.md updated: the minimum-GPU row and the
+Draft-interactivity question are now answered rather than deferred, with the superseded
+0.28 s figure marked as such rather than quietly overwritten.
+
+### Next
+
+- **OIDN**, still the one thing blocked on a product decision rather than on code —
+  and the measurement above sharpens it: the CPU device is 17x the render at Draft, so
+  "bundle the CUDA device only" is now a defensible fourth option.
+- **The rest of the Bruneton atmosphere** — skylight ambient and aerial perspective from
+  `proto/index.html`. The transmittance half is done and the plumbing they need exists.
+  This one changes the look, so it ends in a blessing decision.
+- **The field cache.** The entry of 2026-09-28 declined to wire it for three reasons;
+  reason 2 — "exposure should cost nothing" needing a sampling/resolve key split — was
+  answered by lifting the output transform out of the per-pixel path. Reasons 1 and 3
+  stand, and reason 3 (MFR-shared mutable state) is the one that cannot be verified
+  outside the host.
+- **Working Space None**, one log line.
+
+---
+
+## 2026-09-29 — THE INNER SUN MARCH IS GONE: the table is wired in and the frame is 1.47x faster. Two independent measurements agree on WHERE the picture changed, which is what turned blessing a golden from a judgement into a decision with a number behind it.
+
+`sunOpticalDepth()` ran **inside** the view march — eight steps of quadrature at every
+one of twenty-four steps, 192 `exp()` pairs per sky ray, for a quantity that does not
+depend on the view direction at all. It also ran at every scattering event in the bounce
+loop, which is the hotter of the two.
+
+Both are now one lookup into the table built in the previous entry.
+
+### 1.47x, MEASURED BY A/B ON THE SAME BINARY
+
+The march was put *back* into `SkyLib.slang`, rebuilt, timed, and removed again — so
+this is one change measured against itself rather than against a number from a different
+day.
+
+| scene | with the march | with the table | |
+| --- | --- | --- | --- |
+| GPU, 1920x1080, 8 spp, sun elevation 2 | 1.022 s | **0.697 s** | **1.47x** |
+| CPU, 640x360, 4 spp, sun elevation 2 | 2.458 s | **2.145 s** | 1.15x |
+
+Best of three each, wall clock including process start and the PPM write — so the
+render-only figure is better than this and this is the honest one.
+
+The CPU gains less because the ratio there is dominated by fixed overhead at that size,
+not because the kernel behaves differently; both backends run the identical lookup.
+
+### THE STRUCT CARRIES THE TABLE, WHICH AVOIDED THREADING A PARAMETER THROUGH THE WHOLE CALL CHAIN
+
+`skyRadiance` is reached from inside the bounce loop, through `environmentRadiance`, so
+passing the table as an argument meant adding one to every function on that path — in a
+file whose whole discipline is that its expression structure is preserved so a bitwise
+parity test stays meaningful.
+
+**A `StructuredBuffer` IS LEGAL AS A STRUCT MEMBER on the `cuda` and `cpp` targets.**
+Checked with `slangc` on a throwaway file *before* the design was committed to, not
+assumed — it generates as the prelude's `{ T* data; size_t count; }`, exactly the shape
+the host already fills for the drift table. So it went inside `SkyInput` and nothing
+else changed shape.
+
+**IT IS A POINTER IN `RenderRequest` AND THAT IS NOT STYLE.** The request crosses to the
+device as a kernel argument block, which CUDA caps at **4 KB**. The table is 196 KB.
+By value it would not render wrongly — it would fail the *launch*, as an invalid
+configuration, on every frame.
+
+### WHERE THE PICTURE CHANGED, PREDICTED AND CONFIRMED BY TWO MEASUREMENTS
+
+`slang.skyParity` **passes**, which is the first thing to check: `SkyLib.slang` and
+`Shading.h` were both rewritten and still agree bitwise, so the transcription is
+faithful and any change in the render is the table, not a typo.
+
+Then the goldens:
+
+| scene | sun elevation | result |
+| --- | --- | --- |
+| midday | 45 deg | **unchanged** |
+| horizon | 12 deg | **unchanged** |
+| sunset | 2 deg | max 3, mean 0.40 |
+
+And independently, `LutAgreesWithTheMarchItReplaces` — the table against the 8-step
+quadrature it replaces, which is kept in `Shading.h` for exactly this — reports its
+**worst disagreement of 0.0350 at the top of the atmosphere looking 0.1 below level**:
+a grazing path through the whole depth of the air.
+
+**THOSE TWO ARE THE SAME FINDING ARRIVED AT FROM DIFFERENT DIRECTIONS.** The only golden
+that moved is the one whose light arrives along exactly that grazing path. A pixel test
+and a physics test agreeing on *where* the difference lives is what makes it a
+measurement rather than a coincidence.
+
+### WHICH MADE BLESSING A DECISION WITH A NUMBER BEHIND IT
+
+`tests/golden/CMakeLists.txt` is blunt that blessing is a judgement — *"a suite that
+regenerated its own references whenever they failed would agree with every change ever
+made, including the wrong ones."* The case here:
+
+1. the port is bitwise-faithful (`slang.skyParity`);
+2. two of three scenes did not move at all;
+3. the third moved by 3 of 255 at one pixel, mean 0.40;
+4. the table is the **more accurate** of the two — 64 uniform steps in double against
+   8 quadratic steps in float — so where they differ it is the new number that is right.
+
+**ONLY `sunset` WAS BLESSED, NOT ALL THREE.** `golden-bless` re-renders every reference,
+which would have silently absorbed any sub-tolerance drift in `midday` and `horizon`.
+Their reference files are byte-identical before and after — checked by hash, not
+assumed — so those two remain pinned to references blessed before any of this.
+
+### THE SAMPLER NOW EXISTS THREE TIMES, AND EACH COPY IS PINNED TO ANOTHER
+
+| copy | why it cannot be merged |
+| --- | --- |
+| `src/engine/Atmosphere.cpp` (host, double) | `src/engine/` holds no kernel headers |
+| `src/kernel/Shading.h` (float) | must compile for CUDA |
+| `src/kernel/slang/SkyLib.slang` | another language |
+
+`slang.skyParity` compares the last two bitwise; `LutAgreesWithTheHostSampler` compares
+the first two to 1e-6. The chain is closed. Three copies of anything is two too many,
+and the alternative here is not one copy — it is three copies with nothing comparing
+them.
+
+### THE PARITY HARNESS BUILDS ONE TABLE AND HANDS IT TO BOTH SIDES
+
+`SkyParityMain.cu` already typed its parameters once and fed both engines, for the
+stated reason that separately-filled structs could pass while the port read a different
+sky. The table is under the same rule and it matters *more*: two sides each building
+their own table would compare two samplers over two tables, and agree while the
+atmosphere differed.
+
+### State
+
+115 unit tests (was 113), 22 ctest suites, all green. `sunset` re-blessed; `midday` and
+`horizon` untouched. Build clean under `/W4 /permissive-`.
+
+### THIS IS THE THING TO LOOK AT IN AFTER EFFECTS
+
+Everything since the last host log is now in the binary, and the sky is the part with a
+picture attached:
+
+- the atmosphere is **1.47x faster** and more accurate at low sun;
+- the output transform moved out of the per-pixel path;
+- the colour decision reads the project.
+
+**What to check:** a low sun. The golden says the difference is 3 of 255 at 128x72, so
+this is confirmation rather than investigation — but low-elevation sun is where the
+change lives, and it is the one configuration no golden covers at comp resolution.
+
+The diagnostic log also now names the working-space profile:
+
+    colour raw: ... gamma=2.400 profile="..."
+
+which is what settles the **Working Space None** branch that is still unmeasured — the
+one case where the colour decision could regress. Set the project to Adobe colour
+managed, Working Space None, and read that one line.
+
+### Next
+
+- **OIDN**, which is now only a product decision: ~53 MB bundled, fetch on first run, or
+  built from source with the RT filter alone. The hook point is a marked comment in
+  `smartRenderHost`, immediately above the transform call.
+- **The rest of the Bruneton atmosphere.** The table is the expensive half; skylight
+  ambient and aerial perspective from `proto/index.html` are the remaining Phase 2 sky
+  work, and the plumbing they need now exists.
+- **A sweep helper in `TestFramework.h`**, per the three-times-repeated lesson.
+
+---
+
 ## 2026-09-29 — THE HOST ANSWERED, AND IT CLOSED PHASE 1'S LAST EXIT CRITERION. 8 bpc ran for the first time, the AEGP colour calls are legal from pre-render, and the OCIO working space reports gamma 2.4 — which refutes the reason the rule that reads it was ordered the way it is, while confirming the ordering.
 
 Four frames in AE 2026, `MISTYTUNE_DIAG=1`, three bit depths, one OCIO-managed project.
