@@ -243,26 +243,15 @@ PL_TEST(TheCurveMatchesTheOneOnTheRenderPath) {
         0.1f, 0.18f, 0.5f, 0.9f, 1.0f, 1.5f, 4.0f, 40.0f
     };
 
-    // ONE ASSERTION AFTER THE SWEEP, NOT ONE INSIDE IT. An earlier version of this test
+    // ONE ASSERTION AFTER THE SWEEP, NOT ONE INSIDE IT -- and it is pltest::Sweep
+    // doing the counting now rather than five locals. An earlier version of this test
     // asserted per-value and a single mistyped constant reported two thousand times,
-    // burying every other failure in the run -- which is the same lesson
-    // TheQuantiserIsExactlyClampScaleAndRound records a few tests below, learned again
-    // by injecting 1.055f as 1.05f and watching the output scroll.
-    int   compared = 0;
-    int   mismatches = 0;
-    float firstValue = 0.0f;
-    float firstEngine = 0.0f;
-    float firstKernel = 0.0f;
+    // burying every other failure in the run. See TestFramework.h, which exists
+    // because that happened three separate times.
+    PL_SWEEP(sweep, "curve probes");
 
     const auto compare = [&](float v) {
-        const float engine = encodeSrgb(v);
-        const float kernel = encodeSrgbChannel(v);
-        if (std::fabs(engine - kernel) > 1e-6f && mismatches++ == 0) {
-            firstValue  = v;
-            firstEngine = engine;
-            firstKernel = kernel;
-        }
-        ++compared;
+        sweep.check(encodeSrgb(v), encodeSrgbChannel(v), 1e-6, v);
     };
 
     for (const float v : probes) compare(v);
@@ -270,16 +259,7 @@ PL_TEST(TheCurveMatchesTheOneOnTheRenderPath) {
     // Plus a sweep, so the agreement is not only at the points someone chose.
     for (int i = 0; i <= 2000; ++i) compare(static_cast<float>(i) / 1000.0f);
 
-    if (mismatches > 0) {
-        std::printf("      %d of %d probes disagree between the two copies.\n"
-                    "      first: input %.9g -- engine %.9g, kernel %.9g\n",
-                    mismatches, compared, static_cast<double>(firstValue),
-                    static_cast<double>(firstEngine), static_cast<double>(firstKernel));
-    }
-    PL_CHECK_EQ(mismatches == 0, 1);
-
-    // A comparison loop that compared nothing would pass silently.
-    PL_CHECK(compared > 2000);
+    sweep.finish(2000);
 }
 
 PL_TEST(TheCurveIsMonotonicAndReachesOneAtOne) {
@@ -654,6 +634,13 @@ PL_TEST(TheQuantiserIsExactlyClampScaleAndRound) {
     // watching an earlier version fail: an injected 65535 made it report sixteen thousand
     // times and buried every other failure in the run, including the two that named the
     // actual bug. A sweep should say WHAT disagreed once.
+    //
+    // STILL HAND-ROLLED, DELIBERATELY, NOW THAT pltest::Sweep EXISTS. This one reports
+    // which BIT DEPTH and which CHANNEL disagreed and prints both sides as the integers
+    // they actually are; the generic helper carries one double and one location. Moving
+    // to it would trade real diagnostic detail for uniformity, and this test's whole
+    // value is that when it fails it says exactly which of eight quantiser paths did it.
+    // The helper is for the next sweep, not for rewriting this one.
     if (mismatches > 0) {
         std::printf("      %d of %d channels are not a plain clamp-scale-round.\n"
                     "      first: %s channel %d of input %.9g -- got %u, wanted %u\n",
