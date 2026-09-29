@@ -32,6 +32,7 @@
 
 #include "CameraConvert.h"
 #include "CloudParams.h"
+#include "ColorManagement.h"
 #include "OutputConvert.h"
 #include "RenderRequest.h"
 
@@ -203,6 +204,265 @@ inline ImageView toImageView(PF_EffectWorld* world, PF_PixelFormat format) {
 // were the last part of the render path that could only be checked by rendering in
 // After Effects and looking at the result -- three quiet host conventions with no
 // test between them. Nothing in either is AE-specific, so nothing kept them here.
+
+// ---------------------------------------------------------------------------
+// The project's colour management
+// ---------------------------------------------------------------------------
+
+// One suite, typed, or nullptr.
+//
+// THE CAST IS THE REASON THIS EXISTS. SPBasicSuite::AcquireSuite writes through a
+// `const void**`, and `reinterpret_cast<const void**>(&someSuitePtr)` is ill-formed --
+// it adds const at the second level, which MSVC rejects outright. Going through a
+// `const void*` local is the conversion that is actually legal, and doing it once here
+// keeps four call sites from each getting it slightly differently.
+//
+// AEFX_SuiteScoper IS NOT USED FOR THESE. It throws when a suite is missing, and every
+// suite below is one this effect must be able to do without -- an older host, or a
+// call made where AE will not answer. A throw crossing the AE boundary is never
+// allowed, so the absence has to be a nullptr rather than an exception.
+template <typename Suite>
+inline Suite* acquireSuite(SPBasicSuite* basic, const char* name, int version) {
+    if (!basic) return nullptr;
+    const void* raw = nullptr;
+    if (basic->AcquireSuite(name, version, &raw) || !raw) return nullptr;
+    return static_cast<Suite*>(const_cast<void*>(raw));
+}
+
+// A colour profile's human-readable name, into `out`, for the diagnostic log only.
+//
+// ===========================================================================
+// WHY A NAME IS WORTH TWENTY LINES OF UTF-16 AND MEMORY-HANDLE HANDLING.
+//
+// The gamma alone is ambiguous in exactly the case that still matters. Under Working
+// Space None the open question is whether AEGP_GetNewWorkingSpaceColorProfile fails --
+// in which case rule 4 encodes and is right -- or succeeds with some profile, in which
+// case its gamma decides and could be wrong. `profileErr=0 gamma=1.000` and
+// `profileErr=0 gamma=2.200` need completely different responses, and neither says
+// which SPACE answered.
+//
+// The description does: "None", "sRGB IEC61966-2.1", "ACEScg" and "Rec.709" are all
+// distinguishable at a glance. ONE host session with this line settles every remaining
+// branch; without it, the None case would likely need a second.
+//
+// DIAGNOSTIC ONLY, AND NEVER PARSED. The string is localised, host-specific and free to
+// change between AE versions, so a decision keyed off it would be a decision keyed off
+// a display string. encodesSrgbForHost() never sees it.
+//
+// LOSSY ASCII ON PURPOSE. A_UTF16Char down to one byte per character mangles anything
+// non-Latin, which is the correct trade for a log line: DiagLog is printf-based, and
+// carrying a UTF-8 conversion into it to render a profile name would be a real
+// dependency for a debugging aid.
+// ===========================================================================
+inline void colorProfileDescription(SPBasicSuite* basic, AEGP_PluginID pluginId,
+                                    AEGP_ColorSettingsSuite4* colour,
+                                    AEGP_ColorProfileP profile,
+                                    char* out, size_t outSize) {
+    if (!out || outSize == 0) return;
+    out[0] = '\0';
+    if (!basic || !colour || !profile) return;
+
+    AEGP_MemorySuite1* memory = acquireSuite<AEGP_MemorySuite1>(
+        basic, kAEGPMemorySuite, kAEGPMemorySuiteVersion1);
+    if (!memory) return;
+
+    AEGP_MemHandle handle = nullptr;
+    const A_Err err = colour->AEGP_GetNewColorProfileDescription(pluginId, profile, &handle);
+    if (!err && handle) {
+        void* locked = nullptr;
+        if (!memory->AEGP_LockMemHandle(handle, &locked) && locked) {
+            const A_UTF16Char* utf16 = static_cast<const A_UTF16Char*>(locked);
+            size_t n = 0;
+            while (n + 1 < outSize && utf16[n] != 0) {
+                const A_UTF16Char c = utf16[n];
+                out[n] = (c >= 32 && c < 127) ? static_cast<char>(c) : '?';
+                ++n;
+            }
+            out[n] = '\0';
+            memory->AEGP_UnlockMemHandle(handle);
+        }
+        // FREED WHETHER OR NOT THE LOCK WORKED. "GetNew" means the caller owns it, and
+        // this runs once per frame -- a leak here is a leak per frame.
+        memory->AEGP_FreeMemHandle(handle);
+    }
+
+    basic->ReleaseSuite(kAEGPMemorySuite, kAEGPMemorySuiteVersion1);
+}
+
+// The AEGP plugin id, registered once.
+//
+// AN EFFECT HAS NO PLUGIN ID OF ITS OWN, and two of the three colour-settings calls
+// want one. AEGP_RegisterWithAEGP mints one for any plugin that asks, and it is meant
+// to be asked ONCE -- so the work sits in the initialiser of a function-local static,
+// whose initialisation C++11 guarantees is thread-safe and runs exactly once.
+//
+// THAT GUARANTEE IS THE REASON IT IS WRITTEN THIS WAY rather than as a plain
+// "if (!done)" flag: PF_OutFlag2_SUPPORTS_THREADED_RENDERING means several frames are
+// in flight at once, and a plain flag would let two of them race into the registration.
+//
+// RETURNS 0 AND KEEPS RETURNING 0 IF THE REGISTRATION FAILS, which readHostColorSettings
+// treats as "the host cannot be asked" rather than retrying on every frame.
+inline AEGP_PluginID aegpPluginId(SPBasicSuite* basic) {
+    static const AEGP_PluginID cached = [&]() -> AEGP_PluginID {
+        AEGP_UtilitySuite6* utility = acquireSuite<AEGP_UtilitySuite6>(
+            basic, kAEGPUtilitySuite, kAEGPUtilitySuiteVersion6);
+        if (!utility) return 0;
+
+        AEGP_PluginID id = 0;
+        const A_Err err = utility->AEGP_RegisterWithAEGP(nullptr, PLUGIN_NAME, &id);
+        basic->ReleaseSuite(kAEGPUtilitySuite, kAEGPUtilitySuiteVersion6);
+        return err ? 0 : id;
+    }();
+
+    return cached;
+}
+
+// Asks the project what it does to our pixels on the way to the screen.
+//
+// ===========================================================================
+// EVERY FAILURE PATH RETURNS A DEFAULT-CONSTRUCTED HostColorSettings, WHICH
+// encodesSrgbForHost() MAPS TO EXACTLY WHAT THIS EFFECT DID BEFORE ANY OF THIS EXISTED.
+//
+// That is the whole safety argument for putting three new AEGP calls on the pre-render
+// path. There is no branch here that can make a render worse than the one that shipped;
+// the worst case is that nothing is learned and the constant wins.
+//
+// COLOUR SETTINGS SUITE 4, NOT 6. Suite 4 froze in AE 22.6 and already carries all
+// three calls used here; 6 adds OCIO config paths and LUT interpolation, none of which
+// this needs. Asking for the oldest suite that answers the question is what keeps the
+// effect loadable on hosts older than the SDK it was built against.
+//
+// THE RAW ANSWERS ARE LOGGED, NOT JUST THE CONCLUSION, for the same reason the camera
+// logs distanceToPlane and the plane size: the conclusion is one bool, every value it
+// could take renders a plausible picture, and "Linearize Working Color Space" has no
+// API at all -- so the only way anyone settles what AE reports for a given project
+// configuration is to set it up in the host and read these lines back.
+//
+// THESE CALLS ARE LEGAL FROM PRE-RENDER, AND THAT IS NOW MEASURED RATHER THAN HOPED.
+// Confirmed in AE 2026 over four frames at three bit depths:
+//
+//     colour raw: ocioErr=0 ocio=1 profileErr=0 haveGamma=1 gamma=2.400
+//
+// Both error codes zero means the whole chain ran on the thread AE calls pre-render on:
+// AEGP_RegisterWithAEGP, AEGP_GetEffectLayer, AEGP_GetLayerParentComp,
+// AEGP_GetNewWorkingSpaceColorProfile and AEGP_GetColorProfileApproximateGamma.
+//
+// IT WAS STILL RIGHT TO WRITE IT FAIL-SAFE. Only AEGP_GetEffectCameraMatrix is
+// documented for a render thread (docs/HOST-NOTES.md); AEGP_GetEffectLayer and the
+// colour suite are documented for neither. The SDK returns A_Err_WRONG_THREAD (5)
+// rather than throwing, so a bad thread would have cost a logged 5 and yesterday's
+// render rather than a crash. No 5 appeared. If one ever does -- another host, another
+// AE version, a render-queue worker -- the read moves to sequence setup and gets cached.
+// ===========================================================================
+inline cloud::HostColorSettings readHostColorSettings(PF_InData* in_data) {
+    cloud::HostColorSettings settings;
+
+    if (!in_data || !in_data->pica_basicP) {
+        diagLog("  colour: no SP basic suite -- assuming an unmanaged project.");
+        return settings;
+    }
+    SPBasicSuite* basic = in_data->pica_basicP;
+
+    const AEGP_PluginID pluginId = aegpPluginId(basic);
+    if (pluginId == 0) {
+        diagLog("  colour: AEGP_RegisterWithAEGP failed -- assuming an unmanaged project.");
+        return settings;
+    }
+
+    AEGP_ColorSettingsSuite4* colour = acquireSuite<AEGP_ColorSettingsSuite4>(
+        basic, kAEGPColorSettingsSuite, kAEGPColorSettingsSuiteVersion4);
+    if (!colour) {
+        diagLog("  colour: ColorSettingsSuite4 unavailable -- assuming an unmanaged project.");
+        return settings;
+    }
+
+    // GOT THIS FAR MEANS THE HOST CAN BE ASKED. Individual calls below may still fail,
+    // and each one leaves its own field untouched rather than discarding the others.
+    settings.queried = true;
+
+    // --- Is the project on OCIO? ----------------------------------------
+    A_Boolean ocio = FALSE;
+    const A_Err ocioErr = colour->AEGP_IsOCIOColorManagementUsed(pluginId, &ocio);
+    if (!ocioErr) settings.ocioManaged = (ocio != FALSE);
+
+    // --- What is the working space's transfer curve? ---------------------
+    //
+    // VIA THE COMP, because that is what AEGP_GetNewWorkingSpaceColorProfile takes.
+    // The effect knows its layer and the layer knows its comp, which is two hops and
+    // both of them can fail on a layer that is mid-teardown.
+    //
+    // A COMP WITH NO WORKING SPACE IS EXPECTED TO FAIL HERE, and that failure is
+    // informative rather than a problem: "Working Space None" has no profile to
+    // describe. haveWorkingGamma stays false and rule 4 encodes, which is right.
+    A_Err profileErr = A_Err_NONE;
+
+    // NAMED "(none)" RATHER THAN LEFT EMPTY, so the log distinguishes "no profile
+    // came back" from "a profile came back with a blank name".
+    char profileName[128] = "(none)";
+    do {
+        AEGP_PFInterfaceSuite1* pfInterface = acquireSuite<AEGP_PFInterfaceSuite1>(
+            basic, kAEGPPFInterfaceSuite, kAEGPPFInterfaceSuiteVersion1);
+        if (!pfInterface) {
+            profileErr = A_Err_MISSING_SUITE;
+            break;
+        }
+
+        AEGP_LayerH layer = nullptr;
+        profileErr = pfInterface->AEGP_GetEffectLayer(in_data->effect_ref, &layer);
+        basic->ReleaseSuite(kAEGPPFInterfaceSuite, kAEGPPFInterfaceSuiteVersion1);
+        if (profileErr || !layer) break;
+
+        AEGP_LayerSuite8* layerSuite = acquireSuite<AEGP_LayerSuite8>(
+            basic, kAEGPLayerSuite, kAEGPLayerSuiteVersion8);
+        if (!layerSuite) {
+            profileErr = A_Err_MISSING_SUITE;
+            break;
+        }
+
+        AEGP_CompH comp = nullptr;
+        profileErr = layerSuite->AEGP_GetLayerParentComp(layer, &comp);
+        basic->ReleaseSuite(kAEGPLayerSuite, kAEGPLayerSuiteVersion8);
+        if (profileErr || !comp) break;
+
+        AEGP_ColorProfileP profile = nullptr;
+        profileErr = colour->AEGP_GetNewWorkingSpaceColorProfile(pluginId, comp, &profile);
+        if (profileErr || !profile) break;
+
+        // THE NAME OF WHATEVER ANSWERED, read before the profile is disposed. It is for
+        // the log and never for a decision -- see colorProfileDescription above on why
+        // the gamma alone leaves the Working Space None case ambiguous.
+        colorProfileDescription(basic, pluginId, colour, profile,
+                                profileName, sizeof(profileName));
+
+        // DISPOSED ON EVERY PATH OUT OF HERE. AEGP_GetNewWorkingSpaceColorProfile is a
+        // "GetNew", which in this SDK always means the caller owns it -- and this runs
+        // once per frame, so a leak here is a leak per frame rather than a one-off.
+        A_FpShort gamma = 0.0f;
+        const A_Err gammaErr = colour->AEGP_GetColorProfileApproximateGamma(profile, &gamma);
+        colour->AEGP_DisposeColorProfile(profile);
+
+        if (gammaErr) { profileErr = gammaErr; break; }
+
+        settings.haveWorkingGamma = true;
+        settings.workingGamma = static_cast<float>(gamma);
+    } while (false);
+
+    basic->ReleaseSuite(kAEGPColorSettingsSuite, kAEGPColorSettingsSuiteVersion4);
+
+    // THE RAW ANSWERS, BEFORE ANYTHING IS CONCLUDED FROM THEM. Both error codes are
+    // here because "the project is not OCIO" and "the OCIO query failed" are different
+    // facts that produce the same bool, and telling them apart by looking at the render
+    // is exactly the diagnosis this project keeps getting wrong.
+    diagLog("  colour raw: ocioErr=%d ocio=%d profileErr=%d haveGamma=%d gamma=%.3f profile=\"%s\"",
+            static_cast<int>(ocioErr),
+            static_cast<int>(settings.ocioManaged),
+            static_cast<int>(profileErr),
+            static_cast<int>(settings.haveWorkingGamma),
+            static_cast<double>(settings.workingGamma),
+            profileName);
+
+    return settings;
+}
 
 // ---------------------------------------------------------------------------
 // The camera

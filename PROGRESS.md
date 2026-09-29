@@ -4,6 +4,542 @@ Tracked against `PLAN.md`. Newest first.
 
 ---
 
+## 2026-09-29 — THE HOST ANSWERED, AND IT CLOSED PHASE 1'S LAST EXIT CRITERION. 8 bpc ran for the first time, the AEGP colour calls are legal from pre-render, and the OCIO working space reports gamma 2.4 — which refutes the reason the rule that reads it was ordered the way it is, while confirming the ordering.
+
+Four frames in AE 2026, `MISTYTUNE_DIAG=1`, three bit depths, one OCIO-managed project.
+Everything below is read off that log rather than argued.
+
+### `'argb'` FINALLY APPEARED, AND WITH IT THE LAST OF PLAN.md's PHASE 1 EXIT
+
+That criterion — *"renders correctly at 8, 16 and 32 bpc"* — has been open since the
+effect first loaded, and 8 bpc had **never once run**. All three are now on the record,
+each confirmed twice: by the format code and independently by `rowbytes / width`.
+
+| logged | FOURCC | format | bytes/px | rowbytes/width |
+| --- | --- | --- | --- | --- |
+| 1650946657 | `argb` | `PF_PixelFormat_ARGB32` | 4 | 7680/1920 = 4 |
+| 909206881 | `ae16` | `PF_PixelFormat_ARGB64` | 8 | 3840/480 = 8 |
+| 842229089 | `ae32` | `PF_PixelFormat_ARGB128` | 16 | 30720/1920 = 16 |
+
+Only the 8-bit one is named by its channels; 16 and 32 are `ae16` and `ae32`. The table
+is now in `docs/HOST-NOTES.md`, because a format code prints as a nine-digit integer and
+nothing about 1650946657 says "8 bpc".
+
+**AND ALL THREE RENDERED THE SAME DECISION** — `encodeSrgb=0` on every one of them.
+That is `EveryBitDepthStoresTheSameBrightness` holding in the host rather than in a test:
+the bug that started this whole thread was two depths disagreeing, and they no longer
+can, because the decision is made once in pre-render from the project.
+
+### THE AEGP COLOUR CALLS ARE LEGAL FROM PRE-RENDER
+
+    colour raw: ocioErr=0 ocio=1 profileErr=0 haveGamma=1 gamma=2.400
+
+Both error codes zero, on every frame. The whole chain ran on the thread AE calls
+pre-render on: `AEGP_RegisterWithAEGP`, `AEGP_GetEffectLayer`,
+`AEGP_GetLayerParentComp`, `AEGP_GetNewWorkingSpaceColorProfile` and
+`AEGP_GetColorProfileApproximateGamma`.
+
+Only `AEGP_GetEffectCameraMatrix` is documented for a render thread; the other five are
+documented for neither. **Writing it fail-safe was still right** — a wrong-thread call
+returns `A_Err_WRONG_THREAD` (5) rather than throwing, so the cost of being wrong was a
+logged 5 and yesterday's render. That is what made it cheap to simply try, and the
+fallback stays for the hosts and versions this log does not cover.
+
+### gamma = 2.400 IN OCIO MODE, WHICH REFUTES THE REASON AND CONFIRMS THE ORDER
+
+`ColorManagement.h` asserted that an OCIO working space "is the config's `scene_linear`
+role". **If that were true the gamma would be near 1.0. It is 2.4.**
+
+The log cannot say which of two things is happening:
+
+- the OCIO working space is not scene-linear, or
+- `AEGP_GetNewWorkingSpaceColorProfile` does not describe the OCIO working space at all
+  and is falling back to something generic — Rec.709's transfer curve is 2.4, which is
+  suspicious rather than conclusive.
+
+**WHAT IT DOES SETTLE IS THAT THE GAMMA MUST NOT BE BELIEVED IN OCIO MODE.** Rule 3
+would read 2.4 as "encoded" and return the opposite answer. Rule 2 fires first and never
+asks, so the effect is right — and it is right for a reason that is now measured rather
+than for the reason it was written down with.
+
+**THE ORDERING WAS LOAD-BEARING AND NOBODY KNEW IT.** It was chosen as "the soundest of
+the three"; it turns out to be the only thing standing between this project and a
+double-encoded render. Corrected in the file, because a comment that explains a
+behaviour by an assertion the log contradicts is exactly the failure this project has
+now recorded three times.
+
+### THE OUTPUT TRANSFORM COSTS 9 ms IN THE HOST, WHICH IS WHAT THE CLI SAID
+
+    output transform 0.009 s (encodeSrgb=0, ev=0.00, agx=0)
+
+Against 10.3 ms measured through `mistytunec` at the same resolution. The threading
+decision — taken because the serial version was 91-97 ms and the guess behind writing it
+serial was 20 — transfers to the host unchanged. At 1920x1080 the render is 0.11 s, so
+the pass is 8% of the frame; serial it would have been 46%.
+
+### WHAT THE LOG CONFIRMS IN PASSING
+
+- **`what_gpu=NONE` on all four frames**, again, with a device AE itself handed the
+  effect at `GPU_DEVICE_SETUP` and reported compatible. `SMART_RENDER_GPU` is still
+  never called, so `transformCuda` remains compiled and unexecuted.
+- **The GPU renders anyway**, through `renderCudaToHost` inside the ordinary CPU smart
+  render: 1920x1080 at one sample in 0.11 s.
+- **Reduced resolution is right.** `downsample=1/4` gives `frame=480x270` — the frame
+  scaled *with* the buffer, which is the bug that once drew the top-left third of the
+  sky and read as a dead renderer.
+- **The camera is right.** `distanceToPlane=2666.7 plane=1920x1080` → 22.9 deg, which is
+  exactly the default AE camera this was predicted against.
+
+### STILL NOT MEASURED, AND IT IS THE ONE THAT COULD BITE
+
+**No non-OCIO project has been through this.** Rules 3 and 4 have never fired in a host.
+In particular the regression flagged when this landed is still open: if
+`AEGP_GetNewWorkingSpaceColorProfile` returns a *linear* profile under **Working Space
+None**, rule 3 fires and the default project flips to not encoding. One log line
+settles it, and it needs the project set to Adobe colour managed with Working Space None.
+
+The reading `gamma=2.400` is mildly reassuring for rule 4 — the only real gamma anyone
+has seen sits firmly in the "encoded" bucket — and says nothing about the None case,
+where the question is whether a profile comes back at all.
+
+### State
+
+113 unit tests, 22 ctest suites, all green. Build 7 confirmed in AE 2026 at 8, 16 and
+32 bpc and at quarter resolution.
+
+### Next
+
+- **One log line from a Working Space None project**, per above.
+- **The Sky port**, steps 2 and 3 of the previous entry. Needs no host; needs a person to
+  look at the resulting sky once.
+- **The OIDN decision**, which is a product question and not an engineering one.
+- **A sweep helper in `TestFramework.h`.**
+
+---
+
+## 2026-09-29 — THE TRANSMITTANCE TABLE, which is the thing that makes a precomputed atmosphere affordable. Built and tested against closed forms rather than against stored numbers; and a test that passed for the wrong reason was found by injecting the fault it was written to catch.
+
+`Sky.slang` is still the Phase 1 analytic atmosphere, and the reason it is slow is
+structural rather than incidental: `sunOpticalDepth()` marches **towards the sun** at
+every step of the view march, so the cost is quadratic in a quantity that is not even
+view-dependent.
+
+`proto/index.html` -- which passed the Phase 0 look verdict, and which PLAN.md names as
+the reference the port is checked against -- does not do that. It precomputes a 256x64
+transmittance table once and looks the answer up.
+
+**THE TABLE IS NOT VIEW-DEPENDENT AND NOT SUN-DEPENDENT.** Sun *direction* enters as a
+lookup coordinate, not as an input to the build, so dragging the sun -- the thing an
+artist does continuously -- does not invalidate it. What invalidates it is turbidity,
+planet radius and scale height: the Physics tab, which is set once.
+
+### WHAT LANDED, AND WHAT DELIBERATELY DID NOT
+
+`src/engine/Atmosphere.{h,cpp}` and 11 tests. **Nothing uses it yet**, and that is the
+stopping point rather than an oversight -- see below.
+
+It is host code for the same reason `IceField` and the drift table are: it is a pure
+function of three numbers, it costs about a million `exp()` calls, and it must be
+**cached** rather than rebuilt, because `deriveRenderInputs()` runs once per launch and
+a frame is many launches.
+
+**THE INTEGRATION RUNS IN DOUBLE AND THE TABLE STORES FLOAT**, which looks like it
+contradicts `CloudParams.h`'s "Real is float because these structs cross to the GPU" and
+does not. Neither that rule nor `OutputConvert.h`'s refusal to widen reaches a
+precompute: nothing downstream compares this against a float-built reference, because it
+*replaces* the march it derives from rather than reproducing it. What it does have to be
+is identical everywhere -- and it is more so than what it replaces: **the table is built
+once on the host and the CUDA path uploads those same floats**, so both backends read
+bit-identical values, where the old inner march had each backend evaluating its own
+`exp()`.
+
+### THE TESTS ARE PHYSICS, NOT REGRESSION, AND THAT IS THE POINT
+
+Not one of the 11 compares against a number this code produced. Each states something
+that has to be true of an atmosphere and would still have to be true of a replacement:
+
+- at the top of the atmosphere looking up, transmittance is 1;
+- a long slant path removes blue fastest, by more than 3x -- **that inequality is the
+  sunset**, and a channel-order mistake would otherwise read as a colour grade;
+- transmittance falls monotonically as the path lengthens, in both axes;
+- more turbidity means less light, and it costs red proportionally more than blue,
+  which is why haze goes milky rather than bluer;
+- the build's `v*v` altitude warp and the sampler's `sqrt` invert each other;
+- sampling out of range clamps rather than wrapping.
+
+**A LOOKUP TABLE IS THE EASIEST THING IN A RENDERER TO GET WRONG QUIETLY.** Every one of
+those failures produces a smooth, plausible, wrong sky -- a warp mismatch just looks
+like a clearer day. None is visible in a render; all are trivial against a closed form.
+
+### A TEST THAT PASSED FOR THE WRONG REASON, FOUND BY INJECTING ITS OWN FAULT
+
+`ARayIntoThePlanetIsFullyBlocked` sampled **straight down** from the ground and asserted
+zero. It passed. **It also passed with the ground-shadow branch deleted** -- which is
+how the mistake was found, because the red checks were run rather than assumed.
+
+Without the branch a downward ray integrates straight through the planet, where altitude
+clamps to zero and density therefore sits at its sea-level maximum for thousands of
+kilometres. `exp(-tau)` underflows to zero anyway. The assertion was true for a reason
+that had nothing to do with what it was checking.
+
+**THE BRANCH ONLY MATTERS NEAR TANGENT, WHICH IS WHERE IT MATTERS MOST.** A ray grazing
+just below the horizon cuts a *short* chord through the planet. Computed for this table:
+
+| probe (sea level) | subsurface chord | red leak without the branch |
+| --- | --- | --- |
+| mu = -0.03 | 382 km | **10.9%** |
+| mu = -1.00 (straight down) | 12 742 km | 0 -- underflows either way |
+
+Just below the horizon is where the sun is at sunset. The test is now
+`ARayGrazingIntoThePlanetIsFullyBlocked`, probes four texels below the horizon so every
+bilinear tap is blocked, and **is verified to go red** on the same injected fault.
+
+### THREE FAULTS INJECTED, AND THE THIRD FLOODED AGAIN
+
+| fault | caught by |
+| --- | --- |
+| altitude warp not inverted (`h/top` instead of `sqrt`) | `TheAltitudeWarpRoundTrips`, **and nothing else** |
+| mu axis flipped | five tests |
+| ground-shadow branch deleted | `ARayGrazingIntoThePlanetIsFullyBlocked`, after it was fixed |
+
+The first is the interesting one: monotonicity did **not** catch it, because a wrong
+warp is still monotonic. The round-trip test is the only thing that can see it, which is
+the argument for writing it.
+
+And `TheAltitudeWarpRoundTrips` reported **64 times** on its first red run. That is the
+third time this project has written assertions inside a sweep and had to learn the same
+lesson -- it is recorded twice already, in `TheQuantiserIsExactlyClampScaleAndRound` and
+in yesterday's curve-parity test. Reworked to one assertion after the loop:
+
+    188 of 192 sampled texels missed the row they were built for.
+    first: row 1 -- got 0.142527625, wanted 0.144934282
+
+**Writing the lesson down has now failed three times to prevent it.** What would is a
+sweep helper in `TestFramework.h` that collects and reports once, so the right shape is
+the easy one to reach for.
+
+### State
+
+113 unit tests (was 102), 22 ctest suites, all green. Goldens unmoved -- nothing calls
+this code yet, so no render changed.
+
+### WHERE THIS STOPS, AND WHY IT IS A DECISION RATHER THAN A PAUSE
+
+The remaining work is plumbing and then a look:
+
+- **Wiring**: `RenderRequest` gains a table pointer beside `driftBuffer`;
+  `deriveRenderInputs()` builds it lazily into a `thread_local` keyed on
+  `TransmittanceParams`, so no caller can forget and no launch rebuilds it; `renderCuda`
+  uploads it exactly as it already uploads the drift table -- 196 KB at ~30 us against a
+  190 ms launch, so per-launch upload is simpler than tracking dirtiness and costs
+  nothing measurable.
+- **Use**: `SkyLib.slang`'s `sunOpticalDepth()` call becomes a table lookup, the
+  generated CUDA and C++ are regenerated (`tools/slang/bin/slangc.exe` is present), and
+  a parity test compares the table path against the march it replaces.
+
+**THE GOLDENS WILL MOVE, AND BLESSING THEM IS A JUDGEMENT.** `tests/golden/CMakeLists.txt`
+is explicit that blessing is a decision and not a refresh: *"a test that regenerated its
+own references whenever they failed would agree with every change ever made, including
+the wrong ones."* The port is not meant to be numerically equivalent -- the proto's
+atmosphere is a different and better one -- so "the goldens changed" cannot be
+auto-resolved here.
+
+Stopping with a tested component that nothing calls leaves the tree green. Stopping
+halfway through the wiring would not.
+
+### Next
+
+- **The Sky port, steps 2 and 3 above.** Needs no host and no dependency; needs a person
+  to look at the resulting sky once.
+- **The OIDN decision**, which is a product question and not an engineering one: ~53 MB
+  bundled, fetch on first run, or build from source with only the RT filter. The package
+  is not on this machine.
+- **Read the four colour-management log lines in the host.**
+- **Look at 8 bpc once** -- `'argb'` has still never appeared in a log.
+- **A sweep helper in `TestFramework.h`**, per the third repeat above.
+
+---
+
+## 2026-09-29 — THE OUTPUT TRANSFORM IS OUT OF THE PER-PIXEL PATH, which is what OIDN was blocked on. The restructure that was called too risky to land blind is now the one with the loudest failure mode, and the guess about what it would cost was wrong by five times in the direction that mattered.
+
+`applyOutputTransform` -- real EV, optional AgX, and since yesterday the sRGB transfer
+curve -- was called **inside `renderPixel`**, so the destination held exposed and
+possibly tonemapped values from the first sample onward. OIDN's HDR filter wants linear.
+The order has to be
+
+    kernel writes LINEAR mean  ->  denoise  ->  output transform  ->  quantise
+
+and the last three are per-**frame**, not per-sample.
+
+### THE REASON THIS WAS DEFERRED NO LONGER EXISTS, AND YESTERDAY'S ENTRY IS WHY
+
+The previous attempt stopped here deliberately, and the reason was specific:
+`applyOutputTransform` **was the identity at default settings** -- exposure 0, AgX off --
+so a forgotten transform pass would have been invisible in After Effects on every
+default render and would have first appeared, months later, as "the Exposure slider does
+nothing" in a different file.
+
+`encodeSrgb` defaulting to true removed that. The transform is never the identity now.
+**Measured, by deleting the call and running the goldens:**
+
+| scene | max | mean |
+| --- | --- | --- |
+| midday (ev 0) | 74 | 49.7 |
+| sunset (ev 1.5) | 165 | 56.9 |
+| horizon (ev 0) | 74 | 59.8 |
+
+All six golden tests fail, including the three at default exposure, at a mean error of
+**a fifth of the whole range**. A forgotten pass is now a near-black render with a sun in
+it. The change that could not be landed blind is now the one that cannot be got wrong
+quietly.
+
+### PROVED TO BE A CHANGE OF ARRANGEMENT AND NOT OF ANSWER
+
+All 22 ctest suites pass against references blessed **before** the restructure, with no
+re-blessing. That includes `golden.sunset` at `--ev 1.5`, where the transform is doing
+real work, and all three `golden.gpu.*`.
+
+It is exact rather than close, and it should be: the destination is float32 either way,
+so `mean` written and read back is the same float the old code passed straight to
+`applyOutputTransform`. The one real difference is that a split render used to transform
+the running mean on **every chunk** and throw away all but the last -- redundant work as
+well as the wrong buffer contents.
+
+### THE COST WAS GUESSED AT 20 ms AND IS 93. THAT IS WHAT DECIDED THE DESIGN.
+
+The pass was written single-threaded, with a comment explaining that a pool was not
+worth it against a frame measured in seconds. **Measured with mistytunec at 1920x1080:
+91-97 ms over five runs.**
+
+Nearly five times the guess, and the number is what decides the question rather than
+colouring it. A Draft GPU frame is 0.28 s on an RTX 2070 SUPER, so a 93 ms serial tail
+is **33% of it** -- three times what the denoiser costs on CUDA, for exposure and a
+transfer curve. It is 6.2 million `powf` calls; nothing is wrong, there are simply that
+many.
+
+Threaded, on an 8-core/16-thread i7-10700K: **10.3 ms, a 9x win**, and 3.7% of that frame
+instead of 33%.
+
+**THREADING IT NEEDS NO NEW TRIPWIRE, AND THE REASON IS WORTH KEEPING STRAIGHT.** Every
+pixel here reads and writes only itself, so any partition of the rows produces identical
+floats in any order. That is exactly what is NOT true of the per-sample sum, where
+regrouping changes the image and `samplesPerLaunch()` exists to control it. The two
+splits look alike and are not.
+
+### ...AND `--threads` NOW REACHES THE PASS, SO AN EXISTING TEST COVERS IT FOR FREE
+
+The CLI hands its `--threads` value to `transformCpu` as well as to `renderCpu`, which
+widens `determinism.threadCount` from "the render is thread-count invariant" to "the
+whole pipeline is". That is the claim the effect actually relies on under multi-frame
+rendering, where AE picks the worker count and the effect does not get a say.
+
+### WHICH TRANSFORM TO CALL IS DECIDED BY WHERE THE PIXELS ARE, NOT BY WHAT RENDERED THEM
+
+This is the part that is easy to get backwards. `renderCudaToHost()` copies each band
+into **host** memory, so a GPU-rendered frame on that path -- which is every frame the
+effect renders today, and every frame the CLI renders -- is finished with `transformCpu`.
+
+`transformCuda` exists for exactly one caller: `smartRenderGpu`, whose destination is a
+device pointer from `PF_GPUDeviceSuite1` that never comes back to the host.
+
+A side effect worth noting: the transform is now on the CPU for both golden paths, so it
+has stopped being a source of CPU-versus-GPU divergence.
+
+### State
+
+102 unit tests, 22 ctest suites, all green, goldens unmoved and unblessed. Build clean
+under `/W4 /permissive-` with no new warnings outside the Slang prelude.
+
+### What this did NOT do
+
+- **`transformCuda` has never executed.** It compiles under nvcc and is dead code for
+  the same reason `renderCuda` is: AE reports `what_gpu=NONE` and never calls
+  `PF_Cmd_SMART_RENDER_GPU`. There is no CLI path with a device destination to exercise
+  it from, because `renderCudaToHost` copies back inside itself.
+- **No denoiser.** The hook point is a marked comment in `smartRenderHost`, immediately
+  above the transform call. OIDN is **not** blocked on code any more -- it is blocked on
+  a product decision PLAN.md already states: ship ~53 MB beside a 1 MB effect, fetch on
+  first run, or build OIDN from source with only the RT filter and the CPU and CUDA
+  devices. The package is not on this machine.
+
+### Next
+
+- **The OIDN decision**, which is not an engineering question. The runtime-optional load
+  is the part that does not depend on it and could be built first, but writing an FFI
+  binding with no headers on disk and no way to run one call of it would be guessing.
+- **`Sky.slang` is still the Phase 1 analytic atmosphere.** The Bruneton precompute needs
+  no host and no dependency, and is the remaining Phase 2 kernel item.
+- **Read the four colour-management log lines in the host** (previous entry).
+- **Look at 8 bpc once** -- `'argb'` has still never appeared in a log.
+
+---
+
+## 2026-09-29 — THE ENCODING IS ASKED OF THE PROJECT INSTEAD OF ASSUMED OF IT. The API the last entry named turns out to be the wrong one, the checkbox that decides the hardest case has no API at all, and the hole is pinned by a test that asserts the wrong answer on purpose.
+
+`ViewParams::encodeSrgb` was a hardcoded `true` with a page of reasoning beside it. The
+reasoning was sound and the measurement behind it was real -- **it was a measurement of
+one project**, AE's default, and the constant it justified is wrong for every
+colour-managed one.
+
+### THE API THE LAST ENTRY NAMED IS THE WRONG ONE, AND IT IS WORTH SAYING WHY
+
+The previous entry's Next list said to use `AEGP_IsOCIOColorManagementUsed` **and
+`AEGP_DoesViewHaveColorSpaceXform`**. The second one asks about an `AEGP_ItemViewP` --
+the comp **viewer panel**.
+
+**A render-queue export has no viewer.** So an encoding keyed off that call would make
+the preview and the exported file disagree, which is a worse bug than the one being
+fixed and a much harder one to see: both renders look plausible, and they are only
+wrong next to each other. That is the same shape as the bug the last entry found, one
+level up.
+
+What decides the encoding is the **project**, so the project is what gets asked.
+
+### WHAT IS ACTUALLY READABLE, AND IT IS TWO FACTS AND NOT THREE
+
+| | |
+| --- | --- |
+| `AEGP_IsOCIOColorManagementUsed` | is the project on OCIO |
+| `AEGP_GetNewWorkingSpaceColorProfile` -> `AEGP_GetColorProfileApproximateGamma` | the working space's transfer curve, via the comp |
+| **"Linearize Working Color Space"** | **no API. Searched the AE 25.6 headers; there is none** |
+
+Colour Settings Suite **4**, not 6: suite 4 froze in AE 22.6 and already carries all
+three calls, and asking for the oldest suite that answers keeps the effect loadable on
+hosts older than the SDK it was built against.
+
+An effect has no `AEGP_PluginID` of its own and two of the three calls want one, so
+`AEGP_RegisterWithAEGP` mints one in the initialiser of a function-local static --
+thread-safe by the standard, which matters because
+`PF_OutFlag2_SUPPORTS_THREADED_RENDERING` means several frames are registering at once.
+
+### THE RULES, AND THE ONLY ONE THAT IS SOUND RATHER THAN REASONED
+
+1. **The read failed -> encode.** Exactly what shipped, so a host that cannot answer
+   renders what it rendered yesterday.
+2. **OCIO is on -> do not encode.** The soundest of the four. OCIO mode exists so that
+   AE applies a configured view transform, and its working space is the config's
+   `scene_linear` role. Ours would be the second of two.
+3. **The working space reports a linear gamma -> do not encode.**
+4. **Anything else -> encode.** Covers Working Space None, where AE applies nothing, and
+   a non-linear working space such as sRGB, where the buffer is expected to already
+   carry that space's curve. The two want the same thing from us for different reasons.
+
+The threshold between 3 and 4 is 1.25, and **its exact value cannot matter**: the only
+answers that occur are 1.0 and something from 1.8 up, so anything in that gap gives
+identical answers. `TheLinearCeilingSitsBetweenTheOnlyTwoAnswersThatOccur` pins that the
+gap is empty rather than that 1.25 is special.
+
+### EVERY FAILURE PATH LANDS ON THE OLD CONSTANT, AND THAT IS THE WHOLE SAFETY ARGUMENT
+
+There is no branch that can render worse than what shipped. No SP suite, no plugin id,
+no colour suite, a layer mid-teardown, a host that is not After Effects -- all of them
+return a default-constructed `HostColorSettings`, and `encodesSrgbForHost()` maps that
+to `true`. That is what makes it defensible to put three new AEGP calls on the
+pre-render path at all.
+
+`AnUnaskedHostGetsTheBehaviourThatShipped` is the test that matters most in the file,
+and it is not about colour: it is about never letting a future edit decide `false` on a
+machine where the calls do not answer. Nobody here can enumerate those machines.
+
+### THE HOLE, ASSERTED AS A HOLE
+
+A project set to working space sRGB with **Linearize ON** holds linear pixels and wants
+`encodeSrgb` false. All this decision can see is sRGB's gamma, so it says true, and such
+a project renders one sRGB encode too light.
+
+`ALinearisedWorkingSpaceIsUnservedAndKnowablySo` **asserts that wrong answer on
+purpose.** If someone finds the API, or AE starts reporting gamma 1.0 for a linearised
+space, that test fails -- and its failure is the notification that the hole closed.
+A silent improvement that nobody writes down is how a caveat outlives the thing it
+described.
+
+It was equally unserved before, so this narrows the hole rather than opening one.
+
+### VERIFIED TO GO RED, TWICE, AND THE SECOND ONE REPRODUCED A LESSON THIS FILE ALREADY RECORDS
+
+Two faults injected into a green tree:
+
+| fault | caught by |
+| --- | --- |
+| `if (!settings.queried) return true` -> `false` | `AnUnaskedHostGetsTheBehaviourThatShipped` |
+| `1.055f` -> `1.05f` in the engine's sRGB curve | `TheCurveMatchesTheOneOnTheRenderPath` |
+
+The second one reported **2007 times**, because the sweep asserted per value. The entry
+of 2026-09-28 records that exact mistake -- "an injected 65535 made it report sixteen
+thousand times and buried every other failure in the run" -- and the lesson had been
+written down and then not applied to the next sweep written. Reworked to one assertion
+after the loop; re-injected, and it now reports once:
+
+    2007 of 2015 probes disagree between the two copies.
+    first: input 0.00313089998 -- engine 0.0399987996, kernel 0.0404511765
+
+### THE TWO COPIES OF THE sRGB CURVE ARE NOW COMPARED, WHICH IS WHAT MAKES TWO DEFENSIBLE
+
+`encodeSrgbChannel()` is in `src/kernel/Shading.h` because it has to compile for CUDA.
+`encodeSrgb()` is in `src/engine/OutputConvert.h` and has not been on the render path
+since the encode moved. Two copies of a formula is normally a defect; the test above
+turns the second one into an **independent reference**, so a mistyped constant in either
+is a failure rather than a consistent answer. Merging them would make the comparison
+tautological, which is why the duplication is staying.
+
+### AND THE FILE STILL ASSERTED THE REFUTED PREMISE, IN TWO PLACES
+
+`OutputConvert.h`'s header block still said, at length, *"AE'S INTEGER WORLDS ARE
+DISPLAY-REFERRED. ITS FLOAT WORLD IS LINEAR"* -- the exact claim the last entry
+disproved by rendering one comp at two bit depths. Its body had been fixed; its
+documentation had not, so the file simultaneously explained the bug and asserted its
+cause. `CloudParams.h` still pointed at `AEGP_DoesViewHaveColorSpaceXform` as the way to
+close this. Both corrected.
+
+The last entry has a section titled "A COMMENT THAT HAD BEEN FALSE FOR AN ENTIRE ENTRY".
+This is the same thing, found in the file that entry was about.
+
+### NONE OF THIS HAS BEEN IN AFTER EFFECTS, AND THAT IS THE HONEST STATE
+
+The decision is unit-tested and the reader compiles clean under `/W4 /permissive-`.
+**Not one of the three AEGP calls has ever executed.** What that leaves open:
+
+- **Does `AEGP_GetNewWorkingSpaceColorProfile` succeed under Working Space None?** Rule 4
+  assumes it fails or returns nothing. If it instead returns a *linear* profile, rule 3
+  fires and the default project -- the one configuration confirmed in the host -- flips.
+  That is the one regression this change can cause, and it is one log line to check.
+- **Are these calls legal on a render thread?** `AEGP_GetEffectCameraMatrix` is
+  documented safe and is already called from this same pre-render; `AEGP_GetEffectLayer`
+  and the colour suite are not documented either way. The SDK returns
+  `A_Err_WRONG_THREAD` (5) rather than throwing, so the failure mode is a logged 5 and
+  yesterday's render. If a 5 appears, the read moves to sequence setup and gets cached.
+- **What AE reports for each configuration.** Unknowable from here.
+
+The raw answers are logged before anything is concluded from them, for the same reason
+the camera logs `distanceToPlane` and the plane size:
+
+    colour raw: ocioErr=%d ocio=%d profileErr=%d haveGamma=%d gamma=%.3f
+    colour: encodeSrgb=%d (<which rule fired>)
+
+**The measurement that settles it is one session**, with `MISTYTUNE_DIAG=1`: set the
+project to each of Working Space None, sRGB with Linearize off, sRGB with Linearize on,
+and an OCIO config, and read those two lines back for each.
+
+### State
+
+102 unit tests (was 91), 22 ctest suites, all green. Build clean under `/W4
+/permissive-`. Goldens unmoved -- `src/cli/` has no host to ask and keeps the `true`
+default, so every golden renders exactly as it did.
+
+### Next
+
+- **Read the four log lines in the host.** Blocks nothing and settles the whole entry.
+  The Working-Space-None line is the one that could show a regression.
+- **Look at 8 bpc once**, which has still never run -- `'argb'` has not appeared in any
+  log. Carried from the last entry, still confirmation rather than investigation.
+- **The output-transform lift, then OIDN.**
+- **`Sky.slang` is still the Phase 1 analytic atmosphere.**
+- If the host read turns out unreliable, the escape hatch is an env override beside
+  `MISTYTUNE_DIAG` -- deliberately not built today, because an override nobody has
+  needed is a second code path to keep true.
+
+---
+
 ## 2026-09-28 — THE OUTPUT ENCODING WAS KEYED OFF THE BIT DEPTH, WHICH IS WHY 32 AND 16 BPC RENDERED THE SAME COMP DIFFERENTLY. It belongs to the project, and now it is in one place that every path goes through.
 
 Found by rendering one frame at two bit depths in After Effects and comparing the

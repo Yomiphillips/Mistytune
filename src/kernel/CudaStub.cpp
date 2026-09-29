@@ -29,6 +29,10 @@ bool renderCuda(const RenderRequest&) { return false; }
 
 bool renderCudaToHost(const RenderRequest&, int, int) { return false; }
 
+// NO STUB FOR transformCpu, BECAUSE IT HAS NO GPU IN IT. CpuRender.cpp defines it in
+// both builds -- this file replaces the CUDA half of the API and nothing else.
+bool transformCuda(const RenderRequest&) { return false; }
+
 float* reserveDeviceAccumulator(int, int) { return nullptr; }
 
 const char* lastCudaError() { return ""; }

@@ -257,6 +257,58 @@ inline int samplesPerLaunch(long long pixelSampleBudget,
     return static_cast<int>(fit);
 }
 
+// ---------------------------------------------------------------------------
+// The output transform, run once when the frame is complete
+// ---------------------------------------------------------------------------
+
+// ===========================================================================
+// THE RENDER LEAVES LINEAR RADIANCE IN THE DESTINATION. ONE OF THESE TURNS IT INTO
+// WHAT THE HOST IS EXPECTING, AND THE CALLER MUST RUN IT.
+//
+// It used to happen inside renderPixel, which meant the destination held exposed and
+// possibly tonemapped values from the first sample onward. The denoiser wants linear,
+// so the order has to be
+//
+//     render (LINEAR) -> denoise -> output transform -> quantise
+//
+// and the transform is therefore a per-FRAME pass rather than a per-sample one.
+//
+// EXACTLY ONCE, AFTER THE LAST BAND AND THE LAST SAMPLE CHUNK. These functions read
+// what they write. Running one twice squares the exposure gain and puts the transfer
+// curve through an already-encoded value -- a washed-out picture rather than an
+// obviously broken one.
+//
+// FORGETTING IT IS LOUD, WHICH IS THE ONLY REASON THIS IS SAFE TO SPLIT OUT. The
+// earlier attempt at this restructure was abandoned because applyOutputTransform was
+// the IDENTITY at default settings -- exposure 0, AgX off -- so a missing pass would
+// have been invisible in After Effects until someone touched the Exposure slider,
+// months later, and read it as a parameter-wiring bug. ViewParams::encodeSrgb now
+// defaults to true, so the transform is never the identity: a forgotten pass renders
+// near-black with a sun in it, which is unmissable and points here.
+//
+// WHICH ONE TO CALL IS DECIDED BY WHERE THE DESTINATION LIVES, not by which engine
+// rendered it. renderCudaToHost() leaves its result in HOST memory, so a GPU-rendered
+// frame on that path is finished with transformCpu(). Only the AE GPU path, whose
+// destination is a device pointer from PF_GPUDeviceSuite1, needs transformCuda().
+// ===========================================================================
+
+// Host memory. Rows [rowBegin, rowEnd), rowEnd <= 0 meaning "to the bottom".
+//
+// THREADED, AND THE THREAD COUNT CANNOT CHANGE THE PICTURE -- unlike the sample split,
+// and for a reason worth keeping straight. Every pixel here reads and writes only
+// itself, so any partition of the rows gives identical floats; a sample split regroups
+// a floating-point sum and does not. 0 means "choose one", as renderCpu takes it.
+//
+// MEASURED at 1920x1080: 91-97 ms serial, which is a third of a Draft GPU frame. See
+// CpuRender.cpp for why that measurement overruled the guess that preceded it.
+void transformCpu(const RenderRequest& req, int threads = 0,
+                  int rowBegin = 0, int rowEnd = 0);
+
+// Device memory, for the one caller whose destination AE owns.
+//
+// Returns false if the launch could not be made; the caller reads lastCudaError().
+bool transformCuda(const RenderRequest& req);
+
 // Device memory to accumulate into, for a caller that owns its own destination.
 //
 // FOR THE ONE CASE renderCudaToHost() CANNOT SERVE: a host that hands out GPU

@@ -232,6 +232,14 @@ __global__ void mistytuneKernel(RenderRequest req) {
     renderPixel(req, px, py);
 }
 
+// The output transform over a finished frame. Same shape, same bounds check, and
+// the same arithmetic as the CPU pass because both call transformPixel().
+__global__ void mistytuneTransformKernel(RenderRequest req) {
+    const int px = blockIdx.x * blockDim.x + threadIdx.x;
+    const int py = blockIdx.y * blockDim.y + threadIdx.y;
+    transformPixel(req, px, py);
+}
+
 bool cudaAvailable() {
     // CACHED, because this is asked on the render path and cudaGetDeviceCount
     // initialises the driver on first call. Static local initialisation is
@@ -355,6 +363,45 @@ bool renderCuda(const RenderRequest& req) {
     const cudaError_t syncErr = cudaDeviceSynchronize();
     if (syncErr != cudaSuccess) {
         setError("kernel execution", syncErr);
+        return false;
+    }
+
+    return true;
+}
+
+// ===========================================================================
+// NO deriveRenderInputs, NO DRIFT UPLOAD, NO ACCUMULATOR. This pass reads req.view
+// and req.dest and nothing else, so the whole setup renderCuda does above is dead
+// weight here -- and copying it would put a second drift upload on the frame for a
+// kernel that never looks at the table.
+//
+// IT IS THE ONLY PLACE THE TRANSFORM RUNS ON THE DEVICE. Everything else finishes in
+// host memory and uses transformCpu, including renderCudaToHost's output; this exists
+// for the AE GPU path, whose destination is a pointer PF_GPUDeviceSuite1 handed us.
+// ===========================================================================
+bool transformCuda(const RenderRequest& req) {
+    if (!cudaAvailable()) return false;
+    if (!req.dest.data || req.dest.widthPx <= 0 || req.dest.heightPx <= 0) return false;
+
+    const dim3 block(kBlockX, kBlockY, 1);
+    const dim3 grid(static_cast<unsigned>(divideRoundUp(req.dest.widthPx,  kBlockX)),
+                    static_cast<unsigned>(divideRoundUp(req.dest.heightPx, kBlockY)),
+                    1);
+
+    mistytuneTransformKernel<<<grid, block>>>(req);
+
+    const cudaError_t launchErr = cudaPeekAtLastError();
+    if (launchErr != cudaSuccess) {
+        setError("transform kernel launch", cudaGetLastError());
+        return false;
+    }
+
+    // SYNCHRONISED FOR THE SAME REASON THE RENDER IS: AE takes its GPU world back
+    // when SMART_RENDER_GPU returns, so the write has to have landed. There is no TDR
+    // question here -- the pass is one cheap operation per pixel, not a path trace.
+    const cudaError_t syncErr = cudaDeviceSynchronize();
+    if (syncErr != cudaSuccess) {
+        setError("transform kernel execution", syncErr);
         return false;
     }
 

@@ -301,10 +301,18 @@ struct ViewParams {
     // proto/index.html does -- and proto is what passed the Phase 0 look verdict, so
     // it is the reference for what this renderer is supposed to look like.
     //
-    // FALSE IS FOR A COLOUR-MANAGED PROJECT, where AE linearises the working space and
-    // applies the display transform itself; encoding there would double-encode. The
-    // SDK exposes AEGP_IsOCIOColorManagementUsed and AEGP_DoesViewHaveColorSpaceXform
-    // to tell the two apart, and wiring those up is what closes this properly.
+    // FALSE IS FOR A COLOUR-MANAGED PROJECT, where AE applies the display transform
+    // itself; encoding there would double-encode.
+    //
+    // NO LONGER A CONSTANT AT THE EFFECT. ColorManagement.h decides it from what the
+    // project reports -- AEGP_IsOCIOColorManagementUsed and the working space's own
+    // approximate gamma. THE DEFAULT HERE IS STILL TRUE AND HAS TO BE: src/cli/ has no
+    // host to ask, and a failed read in the effect must land on the behaviour that was
+    // confirmed in AE rather than on a guess.
+    //
+    // NOT AEGP_DoesViewHaveColorSpaceXform, which an earlier note here named. That asks
+    // about the comp VIEWER, and a render-queue export has no viewer -- so it would let
+    // the preview and the exported file disagree. See ColorManagement.h.
     // ---------------------------------------------------------------------
     bool encodeSrgb = true;
 };

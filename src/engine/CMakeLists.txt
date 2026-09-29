@@ -28,6 +28,20 @@ add_library(plugin_engine STATIC
     # piece of host arithmetic whose errors render a convincing wrong picture.
     CameraConvert.h
 
+    # Whether the renderer encodes its own output, decided from what the project
+    # says about its colour management rather than from a constant. Here for the
+    # same reason CameraConvert.h is: every branch renders a plausible picture,
+    # so every branch needs a test that does not involve looking at one.
+    ColorManagement.h
+
+    # The transmittance table: how much light survives from a point in the
+    # atmosphere out to space. A pure function of turbidity, planet radius and
+    # scale height, built ONCE per parameter change rather than per launch --
+    # which is why it is host code and not a kernel loop. It replaces the inner
+    # sun march that made the Phase 1 sky quadratic.
+    Atmosphere.h
+    Atmosphere.cpp
+
     # The host's half of the ice generator: the shear integral that IS the
     # fallstreak hook, the habit fall speeds, and a majorant that is sound by
     # construction rather than by sampling. All of it a pure function of the

@@ -73,7 +73,18 @@ look.
 
 **Ask the world what format it is**, per render
 (`PF_WorldSuite2::PF_GetPixelFormat`). One binary serves 8, 16 and 32 bpc and
-will be called with all three.
+will be called with all three. The codes are FOURCCs and print as integers, so
+keep the decode ring to hand — measured in AE 2026:
+
+| logged | FOURCC | format | bytes/px |
+| --- | --- | --- | --- |
+| 1650946657 | `argb` | `PF_PixelFormat_ARGB32` | 4 |
+| 909206881 | `ae16` | `PF_PixelFormat_ARGB64` | 8 |
+| 842229089 | `ae32` | `PF_PixelFormat_ARGB128` | 16 |
+
+Note that 8 bpc is the only one named by its channels; 16 and 32 are `ae16` and
+`ae32`. Check `rowbytes / width` against the table — it is the independent
+confirmation that the format code was read correctly.
 
 **Buffers are premultiplied.** Colour above its own alpha composites as an
 over-bright halo on every soft edge. Clamp for the integer formats; leave 32bpc
@@ -87,6 +98,63 @@ parameters are never scaled. Normalise in the bridge
 **At reduced resolution you get a smaller buffer**, and anything measured in
 comp pixels has to be scaled or your effect changes shape when the user switches
 preview quality.
+
+## Colour management
+
+**Bit depth and colour space are orthogonal.** There is no "32 bpc float is
+linear, the integer worlds are display-referred" rule, though it is an easy one
+to believe and this codebase shipped it. Measured in AE 2026 with Working Color
+Space **None**: the host applies *no* transform on the way to the screen, at any
+depth. An effect that filters someone else's pixels never meets this — whatever
+encoding arrives, leaves. One that *makes* light has to choose, and the choice
+follows the project, not the buffer.
+
+The symptom of getting it wrong is the worst kind: the same comp renders
+differently at two bit depths, and each looks perfectly plausible on its own.
+
+**`AEGP_DoesViewHaveColorSpaceXform` asks about the comp VIEWER, not the render.**
+It takes an `AEGP_ItemViewP`. A render-queue export has no viewer, so keying
+output encoding off it makes the preview and the exported file disagree. Ask the
+project instead: `AEGP_IsOCIOColorManagementUsed`, and the working space's own
+profile via `AEGP_GetNewWorkingSpaceColorProfile` →
+`AEGP_GetColorProfileApproximateGamma`.
+
+**"Linearize Working Color Space" has no API.** Searched the AE 25.6 headers;
+there is nothing that reads that checkbox. A project working in sRGB with
+linearisation on is linear in fact and will report sRGB's gamma, and no plugin
+can currently tell the two apart.
+
+**In OCIO mode the working-space gamma is not what you would expect, and should
+not be trusted.** Measured in AE 2026 on an OCIO-managed project:
+`ocio=1`, `gamma=2.400`. If the OCIO working space were the config's
+`scene_linear` role the gamma would be near 1. Either it is not, or
+`AEGP_GetNewWorkingSpaceColorProfile` does not describe the OCIO working space
+and falls back to something generic — Rec.709's transfer curve is 2.4, which is
+suspicious. Ask `AEGP_IsOCIOColorManagementUsed` *first* and let it decide;
+reading the gamma in OCIO mode gives the opposite answer.
+
+**The AEGP colour-settings calls are legal from pre-render.** Measured, error
+codes zero, across four frames and three bit depths:
+`AEGP_RegisterWithAEGP`, `AEGP_GetEffectLayer`, `AEGP_GetLayerParentComp`,
+`AEGP_GetNewWorkingSpaceColorProfile` and
+`AEGP_GetColorProfileApproximateGamma`. None of them is *documented* for a
+render thread, so write the fallback anyway — a wrong-thread call returns
+`A_Err_WRONG_THREAD` (5) rather than crashing, which makes it cheap to try.
+
+**An effect has no `AEGP_PluginID`**, and most AEGP colour calls want one.
+`AEGP_UtilitySuite6::AEGP_RegisterWithAEGP` mints one for any plugin that asks.
+Ask once and cache it.
+
+**`AEFX_SuiteScoper` throws when a suite is missing.** For any suite the effect
+must be able to do without — an older host, a call AE will not answer — acquire
+through `SPBasicSuite::AcquireSuite` and check for null instead. A throw crossing
+the AE boundary is never allowed. Note that
+`reinterpret_cast<const void**>(&suitePtr)` is ill-formed; go through a
+`const void*` local.
+
+**A call made on the wrong thread returns `A_Err_WRONG_THREAD` (5)**, it does not
+crash. So an undocumented call is cheap to *try* if every failure path falls back
+to known-good behaviour and the error code is logged.
 
 ## Cameras, layers and paths
 

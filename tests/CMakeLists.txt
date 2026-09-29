@@ -46,6 +46,17 @@ add_executable(plugin_tests
     # three things in it.
     unit/TestOutputConvert.cpp
 
+    # Whether the renderer encodes its own output. The tests that matter are the ones
+    # about the DEFAULTS: a host that cannot be asked must decide what the hardcoded
+    # constant used to, because the alternative darkens every render on every machine
+    # where the AEGP calls do not answer -- and that is not a machine anyone here has.
+    unit/TestColorManagement.cpp
+
+    # The transmittance table, checked against closed forms rather than against
+    # stored numbers. Every way of getting a lookup table wrong produces a smooth,
+    # plausible, wrong sky -- see the file's header for the four that matter.
+    unit/TestAtmosphere.cpp
+
     unit/TestFramework.h
 )
 

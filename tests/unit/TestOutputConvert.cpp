@@ -217,6 +217,71 @@ PL_TEST(TheCurveIsLinearNearZeroAndContinuousAtTheJoin) {
     PL_CHECK(encodeSrgbChannel(0.01f) < 0.01 * 12.92 * 0.9);
 }
 
+// ===========================================================================
+// THE TWO COPIES OF THE CURVE ARE COMPARED, WHICH IS THE ONLY REASON HAVING TWO IS
+// DEFENSIBLE.
+//
+// encodeSrgbChannel() lives in src/kernel/Shading.h because it has to compile for CUDA;
+// encodeSrgb() lives in src/engine/OutputConvert.h and is no longer on the render path.
+// Duplicating a formula is normally a defect, and the thing that turns this pair from a
+// defect into an instrument is this test: the second copy is an INDEPENDENT reference,
+// so a mistyped constant in either one is a failure rather than a consistent answer.
+//
+// A SHARED DEFINITION WOULD MAKE THIS TAUTOLOGICAL, which is why the duplication is not
+// being tidied away. The one thing worth catching here -- 1.055 typed as 1.505, 2.4 as
+// 2.2 -- is exactly what a single definition cannot see.
+//
+// THE TOLERANCE IS 1e-6 AND BOTH SIDES ARE FLOAT. std::pow and powf need not agree to
+// the last bit on the same inputs, and they do not have to: a disagreement that small
+// is thousandths of an 8-bit code, while a wrong constant moves entire codes.
+// ===========================================================================
+PL_TEST(TheCurveMatchesTheOneOnTheRenderPath) {
+    // Across the linear segment, the join, the normal range, and the headroom above 1
+    // that the integer path never sees.
+    const float probes[] = {
+        0.0f, 1e-5f, 0.001f, 0.0031308f, 0.0031309f, 0.01f,
+        0.1f, 0.18f, 0.5f, 0.9f, 1.0f, 1.5f, 4.0f, 40.0f
+    };
+
+    // ONE ASSERTION AFTER THE SWEEP, NOT ONE INSIDE IT. An earlier version of this test
+    // asserted per-value and a single mistyped constant reported two thousand times,
+    // burying every other failure in the run -- which is the same lesson
+    // TheQuantiserIsExactlyClampScaleAndRound records a few tests below, learned again
+    // by injecting 1.055f as 1.05f and watching the output scroll.
+    int   compared = 0;
+    int   mismatches = 0;
+    float firstValue = 0.0f;
+    float firstEngine = 0.0f;
+    float firstKernel = 0.0f;
+
+    const auto compare = [&](float v) {
+        const float engine = encodeSrgb(v);
+        const float kernel = encodeSrgbChannel(v);
+        if (std::fabs(engine - kernel) > 1e-6f && mismatches++ == 0) {
+            firstValue  = v;
+            firstEngine = engine;
+            firstKernel = kernel;
+        }
+        ++compared;
+    };
+
+    for (const float v : probes) compare(v);
+
+    // Plus a sweep, so the agreement is not only at the points someone chose.
+    for (int i = 0; i <= 2000; ++i) compare(static_cast<float>(i) / 1000.0f);
+
+    if (mismatches > 0) {
+        std::printf("      %d of %d probes disagree between the two copies.\n"
+                    "      first: input %.9g -- engine %.9g, kernel %.9g\n",
+                    mismatches, compared, static_cast<double>(firstValue),
+                    static_cast<double>(firstEngine), static_cast<double>(firstKernel));
+    }
+    PL_CHECK_EQ(mismatches == 0, 1);
+
+    // A comparison loop that compared nothing would pass silently.
+    PL_CHECK(compared > 2000);
+}
+
 PL_TEST(TheCurveIsMonotonicAndReachesOneAtOne) {
     float previous = -1.0f;
     for (int i = 0; i <= 1000; ++i) {

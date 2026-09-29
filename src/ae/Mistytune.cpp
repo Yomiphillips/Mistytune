@@ -260,20 +260,36 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
     data->view.agxTonemap = values.v[kMistytuneAgxTonemap] > 0.5;
 
     // ---------------------------------------------------------------------
-    // SET EXPLICITLY, THOUGH IT MATCHES THE DEFAULT, BECAUSE IT IS A DECISION.
+    // ASKED OF THE PROJECT, NOT ASSUMED OF IT -- AND IT USED TO BE A HARDCODED `true`.
     //
     // MEASURED in AE 2026 with Working Color Space None and linearisation off -- which
     // is AE's default: the host applies NO transform to the buffer on the way to the
     // screen, at any bit depth. So a generator has to encode its own output, and
     // proto/index.html, which passed the Phase 0 look verdict, does exactly that.
     //
-    // THIS IS WHERE THE PROJECT'S COLOUR SETTINGS BELONG when they are read. The SDK
-    // has AEGP_IsOCIOColorManagementUsed and AEGP_DoesViewHaveColorSpaceXform, and a
-    // colour-managed project wants this FALSE -- AE linearises the working space and
-    // applies the display transform itself, so encoding here would double-encode. Until
-    // that is wired up and verified in the host, the default configuration wins.
+    // THAT MEASUREMENT WAS OF ONE PROJECT, and the constant it justified is wrong for a
+    // colour-managed one, where AE applies the display transform itself and our encode
+    // would be the second of two. readHostColorSettings() asks; encodesSrgbForHost() in
+    // src/engine/ decides, so every branch of the decision is unit-tested without a
+    // host. A read that fails returns the default-constructed settings, which decide
+    // `true` -- so this line cannot render worse than the constant it replaces.
     // ---------------------------------------------------------------------
-    data->view.encodeSrgb = true;
+    const cloud::HostColorSettings colourSettings = readHostColorSettings(in_data);
+    data->view.encodeSrgb = cloud::encodesSrgbForHost(colourSettings);
+
+    // WHICH RULE FIRED, NAMED. The bool alone cannot distinguish "the project is
+    // unmanaged" from "the host refused to say", and those want different next steps --
+    // the first is correct and the second is a bug to chase. The raw host answers are
+    // logged by readHostColorSettings immediately above this line.
+    diagLog("  colour: encodeSrgb=%d (%s)",
+            static_cast<int>(data->view.encodeSrgb),
+            !colourSettings.queried  ? "host not asked -- default"
+            : colourSettings.ocioManaged ? "OCIO manages the display transform"
+            : colourSettings.haveWorkingGamma
+                ? (cloud::isLinearWorkingGamma(colourSettings.workingGamma)
+                       ? "linear working space"
+                       : "encoded working space")
+                : "no working space profile");
 
     // THE CAMERA'S FRAME IS THE LAYER, NOT THE REQUESTED RECT -- IN DOWNSAMPLED PIXELS.
     //
@@ -509,6 +525,28 @@ PF_Err smartRenderGpu(PF_InData* in_data, PF_OutData* out_data,
         if (PF_Err progErr = PF_PROGRESS(in_data, s0 + req.sampleCount, totalSamples)) {
             return progErr;
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // THE FRAME IS COMPLETE, SO THE OUTPUT TRANSFORM RUNS -- ONCE, AFTER THE LOOP.
+    //
+    // The buffer holds LINEAR radiance until this call. Exposure, AgX and the sRGB
+    // transfer curve left renderPixel because the denoiser needs a linear buffer;
+    // see KernelApi.h.
+    //
+    // transformCuda AND NOT transformCpu, because this is the one path whose
+    // destination is device memory -- AE handed it to us through
+    // PF_GPUDeviceSuite1::GetGPUWorldData and the CPU cannot touch it.
+    //
+    // AFTER THE SAMPLE LOOP AND NOT INSIDE IT. Each chunk rewrites the destination
+    // with the running mean, so transforming per chunk would transform an
+    // already-transformed buffer every time after the first.
+    // ---------------------------------------------------------------------
+    if (!kernel::transformCuda(req)) {
+        const char* why = kernel::lastCudaError();
+        diagLog("SMART_RENDER_GPU: output transform failed: %s",
+                why && why[0] ? why : "(no detail)");
+        return PF_Err_INTERNAL_STRUCT_DAMAGED;
     }
 
     return err;
@@ -780,6 +818,44 @@ PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
     diagLog("  rendered %dx%d on the %s in %.2f s (%d rows per band)",
             static_cast<int>(output->width), static_cast<int>(output->height),
             useGpu ? "GPU" : "CPU", diagSeconds() - t0, rowsPerBand);
+
+    // =======================================================================
+    // THE FRAME IS COMPLETE, SO THE OUTPUT TRANSFORM RUNS -- ONCE, HERE.
+    //
+    // Everything above leaves LINEAR radiance in `req.dest`. Exposure, AgX and the
+    // sRGB transfer curve used to happen inside renderPixel and now do not, because
+    // the denoiser wants the linear buffer and the correct order is
+    //
+    //     render (LINEAR) -> denoise -> output transform -> quantise
+    //
+    // OIDN goes in immediately above this line when it lands. That is the entire
+    // reason this pass exists as a pass.
+    //
+    // transformCpu EVEN WHEN useGpu IS TRUE. renderCudaToHost copies each band back
+    // into host memory, so by here the destination is `staging` or AE's own world
+    // either way -- which engine traced the rays does not decide where the pixels
+    // ended up. The one path that needs transformCuda is smartRenderGpu, whose
+    // destination AE never brings back to the host.
+    //
+    // AFTER THE BAND LOOP AND AFTER THE CHUNK LOOP, WHICH IS WHY IT IS OUT HERE AND
+    // NOT BESIDE EITHER. A band's last chunk leaves that band's linear mean in place;
+    // transforming per band would be correct today and would be silently wrong the
+    // moment a denoiser that needs the WHOLE frame runs between the two.
+    //
+    // FORGETTING THIS IS NOT SUBTLE, WHICH IS WHY THE RESTRUCTURE IS SAFE NOW AND WAS
+    // NOT BEFORE. ViewParams::encodeSrgb defaults to true, so the transform is never
+    // the identity: without this call the render is near-black with a sun in it. The
+    // earlier attempt was abandoned precisely because exposure 0 and AgX off made the
+    // transform a no-op, so a missing pass would have waited months to appear as
+    // "the Exposure slider does nothing".
+    // =======================================================================
+    const double tTransform = diagSeconds();
+    kernel::transformCpu(req);
+    diagLog("  output transform %.3f s (encodeSrgb=%d, ev=%.2f, agx=%d)",
+            diagSeconds() - tTransform,
+            static_cast<int>(data.view.encodeSrgb),
+            static_cast<double>(data.view.exposureEV),
+            static_cast<int>(data.view.agxTonemap));
 
     if (direct) return PF_Err_NONE;
 

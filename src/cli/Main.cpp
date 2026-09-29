@@ -490,6 +490,28 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ---------------------------------------------------------------------
+    // THE FRAME IS COMPLETE, SO THE OUTPUT TRANSFORM RUNS -- ONCE, HERE.
+    //
+    // `pixels` holds LINEAR radiance until this line: exposure, AgX and the sRGB
+    // transfer curve all left renderPixel when the denoiser turned out to need a
+    // linear buffer. See KernelApi.h.
+    //
+    // ALWAYS transformCpu, EVEN AFTER A GPU RENDER, because renderCudaToHost has
+    // already copied the result into this program's own host memory. Which engine
+    // traced the rays does not decide where the destination lives.
+    //
+    // AFTER THE FALLBACK, NOT INSIDE EITHER BRANCH. A GPU render that failed partway
+    // and finished on the CPU must be transformed once in total, and putting this
+    // in both branches is how it would be transformed twice.
+    // ---------------------------------------------------------------------
+    // --threads IS PASSED HERE TOO, AND THAT MAKES determinism.threadCount COVER THIS
+    // PASS FOR FREE. That test renders the same scene at one worker and at eight and
+    // demands byte-identical output; feeding the same count to the transform extends
+    // it from "the render is thread-count invariant" to "the whole pipeline is",
+    // which is the claim the effect actually relies on under multi-frame rendering.
+    kernel::transformCpu(req, threads);
+
     if (comparePath) {
         // WHICH PATH PRODUCED THE PIXELS, PRINTED BESIDE THE VERDICT. A golden
         // comparison that does not say what it compared is a number without a claim.

@@ -12,12 +12,19 @@
 //
 //   * AE's 16-bit channels run 0..32768, NOT 0..65535. Getting it wrong halves the
 //     brightness of every 16 bpc render, which reads as a grading choice.
-//   * 8 and 16 bpc are DISPLAY-REFERRED and want the sRGB curve; 32 bpc float is
-//     linear and must not have one. Skipping the curve renders near-black with a sun
-//     in it -- measured, see encodeSrgb below.
-//   * ALPHA IS COVERAGE, NOT LIGHT, and never gets the curve. An opaque sky cannot
-//     show this, which is exactly why it would survive review and break the first
-//     generator with a real matte.
+//   * INTEGER FORMATS CLAMP AND 32 bpc FLOAT MUST NOT. A radiance above 1.0 is the sun;
+//     clamping it at 32 bpc throws away the headroom the float path exists to carry.
+//   * ALPHA IS COVERAGE, NOT LIGHT. An opaque sky cannot show a mistake here, which is
+//     exactly why it would survive review and break the first generator with a real
+//     matte.
+//
+// THE TRANSFER CURVE IS NOT ON THAT LIST ANY MORE, AND THIS COMMENT LISTED IT. It used
+// to say that 8 and 16 bpc want the sRGB curve while 32 bpc float must not have one --
+// which is the premise that produced two different renders of one comp, because bit
+// depth and colour space are orthogonal in After Effects. The curve belongs to the
+// PROJECT and now lives in applyOutputTransform() in src/kernel/Shading.h, gated on
+// ViewParams::encodeSrgb, which src/engine/ColorManagement.h decides from what the
+// project says about itself. See the note above writeConverted().
 //
 // PLAN.md's Phase 1 exit asks for 8, 16 and 32 bpc to be correct, and the only tool
 // that had ever been pointed at them was a person looking at a picture. Here
@@ -43,35 +50,40 @@ namespace plugin::cloud {
 // ---------------------------------------------------------------------------
 
 // ===========================================================================
-// AE'S INTEGER WORLDS ARE DISPLAY-REFERRED. ITS FLOAT WORLD IS LINEAR.
+// THIS BLOCK USED TO ASSERT THAT AE'S INTEGER WORLDS ARE DISPLAY-REFERRED AND ITS FLOAT
+// WORLD IS LINEAR. THAT IS NOT TRUE, AND EVERYTHING BELOW FOLLOWED FROM IT.
 //
-// This is the single most important host convention for anything that RENDERS light
-// rather than filtering someone else's pixels, and getting it wrong does not look like
-// a colour-management mistake -- it looks like the renderer is broken.
+// If it were true, the same comp rendered at 16 and at 32 bpc would look IDENTICAL --
+// AE would encode our linear float for display and leave our already-encoded integers
+// alone. Measured in AE 2026: they differed by exactly one sRGB encode, ours, applied
+// to one depth and not the other.
 //
-//   PF_PixelFormat_ARGB128 (32 bpc float)   linear. Write radiance straight in.
-//   PF_PixelFormat_ARGB64  (16 bpc, 0..32768)
-//   PF_PixelFormat_ARGB32  (8 bpc, 0..255)  the project working space, which is
-//                                           display-encoded -- sRGB by default.
+// THE PREMISE HOLDS ONLY IN A COLOUR-MANAGED PROJECT and was written as though it held
+// always. Working Color Space None -- AE's default -- applies NO transform in either
+// direction, at any bit depth. Bit depth and colour space are ORTHOGONAL in After
+// Effects, and keying one off the other is what produced two renders of one comp.
 //
-// WHAT IT LOOKS LIKE WHEN YOU SKIP IT. Multiplying linear radiance by 255 and storing
-// it applies no curve at all, so everything below mid-grey collapses towards black and
-// only values above 1.0 survive. Measured on the Phase 1 sky: the ground landed at
-// 18/255 where it should be 74, and the zenith at 106 where it should be 169. The one
-// thing still clearly visible was the sun disc, which is brighter than 1.0 and clips to
-// white.
-//
-// The symptom is therefore "the effect renders black with a bit of sun in it", and
-// nothing about that points at a missing transfer curve.
-//
-// SRGB RATHER THAN THE PROJECT'S ACTUAL WORKING SPACE, and that is a stopgap with a
-// date on it. AE can be told to work in Rec.709, Rec.2020 or a linear space, and the
-// honest answer reads the project's colour settings and uses them. sRGB is the default
-// working space and therefore right far more often than linear is, which is what makes
-// it worth doing now rather than at the same time as the real thing.
+// SO THE ENCODE IS NOT HERE ANY MORE. It is the third stage of the same transform as
+// the exposure and the tonemap, and it lives with them in applyOutputTransform() in
+// src/kernel/Shading.h, gated on ViewParams::encodeSrgb. Every path -- CPU, CUDA, CLI,
+// all three bit depths -- goes through that one function, so every path agrees.
+// src/engine/ColorManagement.h decides the gate from what the project reports about its
+// own colour management, which is what "the honest answer reads the project's colour
+// settings" used to promise here as future work.
 // ===========================================================================
 
 // The sRGB opto-electronic transfer function (IEC 61966-2-1).
+//
+// ===========================================================================
+// NOT ON THE RENDER PATH. The curve the renderer applies is encodeSrgbChannel() in
+// src/kernel/Shading.h, which has to be compilable for CUDA and therefore cannot live
+// in a host-only header. THIS copy survives as the INDEPENDENT reference the tests
+// compare that one against -- see TheCurveMatchesTheOneOnTheRenderPath.
+//
+// Two copies of a formula is normally a defect. Here the second copy is the instrument:
+// a single shared definition would make the test tautological, and the thing worth
+// catching is a typo in a constant, which a tautology cannot see.
+// ===========================================================================
 //
 // THE LINEAR SEGMENT NEAR ZERO IS NOT OPTIONAL. A pure 1/2.4 power curve has an
 // infinite slope at the origin, which turns sensor and sampling noise in the darkest

@@ -833,8 +833,25 @@ MT_RENDER void renderPixel(const RenderRequest& req, int px, int py) {
         mean = sum * inv;
     }
 
-    const Vec3 out = applyOutputTransform(mean, req.view);
-
+    // ===================================================================
+    // THE LINEAR MEAN GOES IN THE DESTINATION. THE OUTPUT TRANSFORM DOES NOT HAPPEN
+    // HERE ANY MORE, AND THAT IS THE WHOLE POINT OF THE SPLIT.
+    //
+    // This used to be `applyOutputTransform(mean, req.view)`, which meant the
+    // destination held exposed, possibly tonemapped, possibly sRGB-encoded values from
+    // the moment the first sample landed. THE DENOISER WANTS LINEAR. OIDN's HDR filter
+    // is built for scene-referred radiance, and handing it an AgX-tonemapped buffer is
+    // wrong in a way that gets worse the more the tonemap is doing.
+    //
+    // The correct order is
+    //
+    //     kernel writes LINEAR mean -> denoise -> output transform -> quantise
+    //
+    // and the last three are per-FRAME, not per-sample: re-exposing on every chunk of
+    // a split render was redundant work as well as the wrong buffer contents.
+    // transformPixel() below is the third stage, run once by the caller when the frame
+    // is complete. See KernelApi.h's transformCpu / transformCuda.
+    // ===================================================================
     float* row = static_cast<float*>(req.dest.data) + py * req.dest.pitchPx * 4;
     float* pix = row + px * 4;
 
@@ -846,9 +863,58 @@ MT_RENDER void renderPixel(const RenderRequest& req, int px, int py) {
     // straight are the same numbers -- so this is correct rather than merely
     // convenient. A generator with genuine transparency would have to multiply.
     if (req.dest.order == ChannelOrder::BGRA) {
-        pix[0] = out.z; pix[1] = out.y; pix[2] = out.x; pix[3] = 1.0f;
+        pix[0] = mean.z; pix[1] = mean.y; pix[2] = mean.x; pix[3] = 1.0f;
     } else {
-        pix[0] = 1.0f; pix[1] = out.x; pix[2] = out.y; pix[3] = out.z;
+        pix[0] = 1.0f; pix[1] = mean.x; pix[2] = mean.y; pix[3] = mean.z;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The output transform, as a pass over a finished frame
+// ---------------------------------------------------------------------------
+
+// Exposure, tonemap and transfer curve, applied in place to one pixel of a
+// destination that already holds linear radiance.
+//
+// ===========================================================================
+// SHARED BETWEEN THE BACKENDS FOR THE SAME REASON renderPixel IS. CpuRender.cpp and
+// Mistytune.cu each wrap this in their own loop and neither has a copy of the
+// arithmetic, so a golden image taken on the CPU still certifies the GPU.
+//
+// IT READS WHAT IT WRITES, which makes it safe to run exactly once and wrong to run
+// twice. Running it twice squares the gain and applies the transfer curve to an
+// already-encoded value; the result is washed out rather than broken, which is the
+// bad kind of wrong. The caller runs it once per frame, after the last band and the
+// last sample chunk.
+//
+// ALPHA IS NOT TOUCHED. It is coverage, not light -- the same rule the quantiser in
+// src/engine/OutputConvert.h follows, and for the same reason.
+//
+// THE CHANNEL ORDER IS READ BACK THE WAY renderPixel WROTE IT rather than assumed to
+// be irrelevant. Today applyOutputTransform happens to be per-channel, so BGRA and
+// ARGB would give the same answer either way; AgX with the inset and outset matrices
+// proto/index.html uses is NOT per-channel, and this is the function those matrices
+// land in. Unpacking properly now costs two lines and stops that port from silently
+// swapping red and blue.
+// ===========================================================================
+MT_DEVICE void transformPixel(const RenderRequest& req, int px, int py) {
+    if (px < 0 || py < 0 || px >= req.dest.widthPx || py >= req.dest.heightPx) return;
+    if (req.dest.data == nullptr) return;
+
+    float* row = static_cast<float*>(req.dest.data) + py * req.dest.pitchPx * 4;
+    float* pix = row + px * 4;
+
+    const bool bgra = (req.dest.order == ChannelOrder::BGRA);
+
+    const Vec3 linear = bgra ? vec3(pix[2], pix[1], pix[0])
+                             : vec3(pix[1], pix[2], pix[3]);
+
+    const Vec3 out = applyOutputTransform(linear, req.view);
+
+    if (bgra) {
+        pix[0] = out.z; pix[1] = out.y; pix[2] = out.x;
+    } else {
+        pix[1] = out.x; pix[2] = out.y; pix[3] = out.z;
     }
 }
 
