@@ -214,6 +214,33 @@ add_test(NAME determinism.seedMatters
                  -P "${CMAKE_CURRENT_SOURCE_DIR}/RunDeterminism.cmake")
 
 # ---------------------------------------------------------------------------
+# THE RESOLVE PATH: an exposure change must not need a single new sample.
+#
+# FieldCache's ResolveOnly decision promises that when only the exposure, tonemap or
+# encoding moved, the picture can be regenerated from the accumulated radiance without
+# tracing. This renders, then regenerates with ZERO new samples, and requires the
+# result to be byte-identical.
+#
+# IT IS BYTE-IDENTICAL RATHER THAN WITHIN A TOLERANCE because both paths divide the
+# same accumulator by the same integer and run the same transform. Anything else means
+# one of those three is not the same, and the failure a loose bar would let through is
+# the worst kind a cache has: the cached picture differs from the one the same
+# parameters would render, so it only appears after an edit and reads as a rendering
+# bug rather than a caching one.
+#
+# --sample-chunk FORCES THE ACCUMULATOR PATH. Without a split, renderPixel takes its
+# no-accumulator branch and there is nothing to resolve FROM -- the test would pass
+# while exercising none of what it names.
+#
+# --ev 1.5 SO THE TRANSFORM IS NOT THE IDENTITY. At exposure 0 with AgX off the
+# resolve would still be checked, but a broken exposure stage could not show.
+add_test(NAME resolve.reproducesTheRender
+         COMMAND mistytunec -w 128 -h 72 -s 24 --sample-chunk 4 --cpu
+                 --sun-el 2 --sun-az 180 --ev 1.5
+                 --resolve-check
+                 -o "${GOLDEN_OUT}/resolve-check.ppm")
+
+# ---------------------------------------------------------------------------
 # Blessing.
 #
 # `cmake --build . --target golden-bless` re-renders every reference.

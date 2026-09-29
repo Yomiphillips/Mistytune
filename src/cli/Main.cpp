@@ -84,6 +84,10 @@ void printUsage() {
         "  --gpu-band-rows <n>  render the GPU frame in bands of n rows (0 = one\n"
         "                   launch). Must not change the image.\n"
         "  --threads <n>    CPU worker threads (0 = choose). Must not change the image.\n"
+        "  --resolve-check  render, then regenerate the image from the accumulated\n"
+        "                   radiance with ZERO new samples, and require the result to\n"
+        "                   be byte-identical. That is what FieldCache's ResolveOnly\n"
+        "                   decision promises an exposure change can do. Needs --cpu.\n"
         "  --device         print what the renderer would use, and exit\n"
         "  --fingerprint    print the field and view hashes, and exit\n"
         "\n"
@@ -258,6 +262,7 @@ int main(int argc, char** argv) {
     bool printDevice     = false;
     bool printHashes     = false;
     int  threads         = 0;      // 0 = let the renderer choose
+    bool resolveCheck    = false;  // --resolve-check, see the end of render()
     int  tolerance       = 2;
 
     // THE CAMERA, WHICH THIS TOOL COULD NOT SET AND SHOULD HAVE BEEN ABLE TO.
@@ -304,6 +309,7 @@ int main(int argc, char** argv) {
             compareAtY = std::atoi(argv[++i]);
         }
         else if (argIs(a, "--threads") && hasNext)   threads = std::atoi(argv[++i]);
+        else if (argIs(a, "--resolve-check"))       resolveCheck = true;
         else if (argIs(a, "--compare") && hasNext)   comparePath = argv[++i];
         else if (argIs(a, "--tolerance") && hasNext) tolerance = std::atoi(argv[++i]);
         else if (argIs(a, "--device"))               printDevice = true;
@@ -334,8 +340,14 @@ int main(int argc, char** argv) {
         sim::Fingerprint fp;
         fp.add(req.field);
         std::printf("field : 0x%016llx\n", static_cast<unsigned long long>(fp.value()));
-        std::printf("view  : 0x%016llx\n",
-                    static_cast<unsigned long long>(sim::viewHash(req.view, req.quality)));
+        // TWO HASHES, NOT ONE. `sample` is what restarts accumulation; `resolve` is
+        // what only re-runs the output transform. Printing them separately is what
+        // makes the split checkable from outside -- drag exposure and only the second
+        // should move.
+        std::printf("sample: 0x%016llx\n",
+                    static_cast<unsigned long long>(sim::samplingHash(req.view, req.quality)));
+        std::printf("resolv: 0x%016llx\n",
+                    static_cast<unsigned long long>(sim::resolveHash(req.view)));
         return 0;
     }
 
@@ -511,6 +523,64 @@ int main(int argc, char** argv) {
     // it from "the render is thread-count invariant" to "the whole pipeline is",
     // which is the claim the effect actually relies on under multi-frame rendering.
     kernel::transformCpu(req, threads);
+
+    // ---------------------------------------------------------------------
+    // THE RESOLVE PATH, CHECKED RATHER THAN ASSUMED TO EXIST.
+    //
+    // FieldCache's ResolveOnly decision claims that when only the exposure, tonemap
+    // or encoding changed, the picture can be regenerated from the accumulated
+    // radiance without tracing a single ray. THAT CLAIM NEEDS NO NEW KERNEL CODE,
+    // which is the finding worth pinning: renderPixel with sampleCount == 0 adds
+    // nothing to the accumulator, divides it by samplesAlreadyDone and writes the
+    // mean -- which is exactly a resolve. The transform pass then finishes it.
+    //
+    // SO THIS RE-RENDERS WITH ZERO SAMPLES AND DEMANDS THE IDENTICAL IMAGE. If the
+    // two ever diverge, the ResolveOnly branch is silently showing a different
+    // picture from the one the same parameters would render -- which is the single
+    // worst failure a cache can have, because it only appears after an edit and
+    // looks like a rendering bug rather than a caching one.
+    //
+    // BYTE-IDENTICAL IS THE RIGHT BAR, not a tolerance. Both paths divide the same
+    // accumulator by the same integer and run the same transform, so anything other
+    // than equality means one of those three is not the same.
+    if (resolveCheck) {
+        if (renderedOnGpu) {
+            std::fprintf(stderr,
+                "--resolve-check needs the CPU accumulator; re-run with --cpu\n");
+            return 3;
+        }
+
+        std::vector<float> rendered(pixels);
+
+        kernel::RenderRequest resolve = req;
+        resolve.firstSample        = totalSamples;
+        resolve.sampleCount        = 0;
+        resolve.samplesAlreadyDone = totalSamples;
+        kernel::renderCpu(resolve, threads);
+        kernel::transformCpu(resolve, threads);
+
+        size_t differing = 0;
+        size_t firstAt   = 0;
+        for (size_t i = 0; i < rendered.size(); ++i) {
+            if (rendered[i] != pixels[i]) {
+                if (differing == 0) firstAt = i;
+                ++differing;
+            }
+        }
+
+        if (differing != 0) {
+            std::printf("resolve-check: FAIL -- %zu of %zu floats differ, "
+                        "first at %zu (%.9g vs %.9g)\n",
+                        differing, rendered.size(), firstAt,
+                        static_cast<double>(rendered[firstAt]),
+                        static_cast<double>(pixels[firstAt]));
+            return 4;
+        }
+        std::printf("resolve-check: ok -- %zu floats identical, "
+                    "re-resolved from %d accumulated samples without tracing\n",
+                    rendered.size(), totalSamples);
+        return 0;
+    }
 
     if (comparePath) {
         // WHICH PATH PRODUCED THE PIXELS, PRINTED BESIDE THE VERDICT. A golden

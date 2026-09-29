@@ -43,10 +43,20 @@ struct RenderKey {
     // Fingerprint of FieldParams. Changing this invalidates the medium itself.
     uint64_t field = 0;
 
-    // Hash of everything that changes the IMAGE without changing the MEDIUM --
-    // the camera, the exposure, the bounce depth, the output size. Changing this
-    // invalidates the accumulated samples and nothing else.
-    uint64_t view = 0;
+    // Hash of everything that decides WHICH RAYS ARE TRACED -- the camera, the
+    // output size and origin, the bounce depth. Changing this invalidates the
+    // accumulated samples, because the samples already taken are samples of a
+    // different integral.
+    //
+    // RENAMED FROM `view`, AND THE RENAME IS THE POINT: `view` used to mean
+    // "everything that is not the field", which lumped the camera in with the
+    // exposure slider. Those two cost wildly different amounts to change.
+    uint64_t sampling = 0;
+
+    // Hash of everything applied to the FINISHED accumulation -- exposure, the
+    // tonemap, the output encoding. Changing this needs no new samples at all.
+    // See resolveHash().
+    uint64_t resolve = 0;
 };
 
 enum class Decision {
@@ -56,7 +66,23 @@ enum class Decision {
     // being sure about.
     Accumulate,
 
-    // The camera moved, or the exposure changed, or the comp was resized. The
+    // ===================================================================
+    // ONLY THE OUTPUT TRANSFORM CHANGED. The accumulated radiance is still
+    // exactly right; re-run the resolve pass over it and trace NOTHING.
+    //
+    // THIS CASE DID NOT EXIST UNTIL THE OUTPUT TRANSFORM LEFT THE PER-PIXEL PATH.
+    // While exposure was applied inside renderPixel, the accumulator held exposed
+    // values and there was no way to re-expose them without re-tracing -- so
+    // exposure had to live in the sampling key, and dragging the exposure slider
+    // threw away every sample.
+    //
+    // WHAT IT IS WORTH: measured at 1920x1080, a resolve is the ~10 ms transform
+    // pass against 2.97 s to re-trace 64 samples. Three hundred to one, on the
+    // control an artist drags most.
+    // ===================================================================
+    ResolveOnly,
+
+    // The camera moved, or the comp was resized, or the bounce depth changed. The
     // field still describes the same sky, so KEEP IT and clear the accumulator.
     RestartSamples,
 
@@ -79,7 +105,35 @@ enum class Decision {
 // changes the image, so the samples already taken are not samples of the image
 // now being asked for, and averaging the two would give a picture of neither.
 // The field is untouched though, so this is a RestartSamples and not a rebuild.
-uint64_t viewHash(const cloud::ViewParams& v, const cloud::QualityParams& q);
+//
+// EXPOSURE, TONEMAP AND ENCODING ARE DELIBERATELY ABSENT -- they are resolveHash's.
+uint64_t samplingHash(const cloud::ViewParams& v, const cloud::QualityParams& q);
+
+// The hash of everything applied to the finished accumulation.
+//
+// ===========================================================================
+// THESE THREE USED TO BE IN THE SAMPLING HASH, WITH A REASON THAT WAS RIGHT AT THE
+// TIME AND IS NOW THE REASON THEY ARE HERE INSTEAD.
+//
+// The old comment argued that exposure must be hashed with the samples because the
+// accumulation buffer is linear radiance and OIDN is trained on roughly perceptual
+// magnitudes -- so the exposure has to be in the numbers before the denoiser sees
+// them, or denoise strength silently tracks the exposure slider.
+//
+// THAT ARGUMENT IS STILL TRUE AND IT CONSTRAINS THE ORDER INSIDE THE RESOLVE PASS,
+// NOT WHETHER EXPOSURE IS A SAMPLING INPUT. The resolve is
+//
+//     mean -> exposure -> DENOISE -> tonemap -> encode
+//
+// and every stage of it is cheap next to tracing. So the denoiser still sees exposed
+// values, and an exposure change still costs one denoise -- about 30 ms on CUDA --
+// rather than a re-render of 2.97 s.
+//
+// WHAT MADE THE SPLIT POSSIBLE was lifting applyOutputTransform out of renderPixel.
+// While it ran per sample, the destination held exposed values from the first sample
+// onward and there was nothing linear left to re-expose.
+// ===========================================================================
+uint64_t resolveHash(const cloud::ViewParams& v);
 
 class FieldCache {
 public:
@@ -90,7 +144,19 @@ public:
 
     // This key's field is now built and its accumulator is live. Resets the
     // sample count to zero.
+    //
+    // FOR RebuildField AND RestartSamples ONLY. A ResolveOnly render must not come
+    // through here -- it would throw away the samples it exists to preserve.
     void adopt(const RenderKey& k);
+
+    // The resolve pass has been re-run for this key. KEEPS THE SAMPLE COUNT, which
+    // is the entire difference from adopt().
+    //
+    // IGNORED IF THE FIELD OR SAMPLING HALVES DISAGREE, for the same reason
+    // addSamples checks: a resolve that finished after the camera moved is a
+    // resolve of the previous picture, and recording it would leave the cache
+    // claiming the new view is resolved when the buffer holds the old one.
+    void adoptResolve(const RenderKey& k);
 
     // Another batch of `count` samples landed in the accumulator for the key
     // that is currently adopted. Ignored if the key does not match, which is

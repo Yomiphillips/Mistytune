@@ -347,8 +347,9 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
 
     sim::Fingerprint fp;
     fp.add(data->field);
-    data->key.field = fp.value();
-    data->key.view  = sim::viewHash(data->view, data->quality);
+    data->key.field    = fp.value();
+    data->key.sampling = sim::samplingHash(data->view, data->quality);
+    data->key.resolve  = sim::resolveHash(data->view);
 
     // THE INPUT LAYER IS CHECKED OUT EVEN THOUGH PHASE 1 IGNORES ITS PIXELS.
     //

@@ -4,6 +4,123 @@ Tracked against `PLAN.md`. Newest first.
 
 ---
 
+## 2026-09-29 — THE VIEW HASH SPLITS IN TWO, and an exposure change stops costing a re-render. The mechanism turns out to need NO new kernel code, which is the finding; and a comment that was right when written is now the reason for doing the opposite.
+
+PLAN.md's Phase 2 exit has four clauses. Two were done, one was closed by the
+measurement in the entry below, and this is the third: *"survives a camera move without
+rebuilding the field"*.
+
+### THE OLD COMMENT WAS RIGHT, AND IT IS NOW THE ARGUMENT FOR THE OTHER SIDE
+
+`FieldCache.cpp` carried, at length, the reason exposure had to be hashed with the
+samples:
+
+> They could be a post-pass over the accumulated buffer, and then changing them would
+> not even restart accumulation. They are not, because the accumulation buffer is
+> linear radiance and the denoiser runs on it: OIDN is trained on roughly perceptual
+> magnitudes, so the exposure the user chose has to be in the numbers before the
+> denoiser sees them.
+
+**THAT ARGUMENT IS STILL TRUE. IT CONSTRAINS THE ORDER INSIDE THE RESOLVE PASS, NOT
+WHETHER EXPOSURE IS A SAMPLING INPUT.** The resolve is
+
+    mean -> exposure -> DENOISE -> tonemap -> encode
+
+and every stage of it is cheap next to tracing. The denoiser still sees exposed values;
+an exposure change still costs one denoise — about 30 ms on CUDA — rather than 2.97 s of
+re-tracing.
+
+What actually kept exposure in the sampling hash was that `applyOutputTransform` ran
+**inside** `renderPixel`, so the accumulator held exposed values and there was nothing
+linear left to re-expose. Lifting it out removed that, and the entry of 2026-09-28
+predicted exactly this: *"store raw radiance and make exposure, denoise and tonemap a
+RESOLVE pass over it... That splits `viewHash` into a sampling key and a resolve key."*
+
+### THE SPLIT
+
+`RenderKey.view` becomes `sampling` and `resolve`. The rename is the point: `view` meant
+"everything that is not the field", which lumped the camera in with the exposure slider,
+and those two cost wildly different amounts to change.
+
+| | contains | changing it costs |
+| --- | --- | --- |
+| `field` | FieldParams | rebuild the medium |
+| `sampling` | camera, size, origin, bounce depth, majorant, denoise | every sample so far |
+| `resolve` | exposure, tonemap, encoding | **one resolve pass** |
+
+`Decision` gains `ResolveOnly`, and `adoptResolve()` sits beside `adopt()` — identical
+except that it **keeps the sample count**, which is the whole difference.
+
+**THE ORDER INSIDE `decide()` IS LOAD-BEARING AND IS ASSERTED RATHER THAN LEFT TO THE
+READING.** A render whose camera *and* exposure both moved must restart, not resolve;
+reversing those two tests would re-expose a buffer full of the old camera's pixels,
+which is a picture of neither view. `ACameraMoveBeatsAnExposureChange` pins it.
+
+`addSamples` deliberately does **not** check the resolve half: a batch launched before
+the slider moved holds exactly the right radiance for the new exposure. Requiring them
+to match would throw those samples away and undo the split.
+
+### THE MECHANISM NEEDS NO NEW KERNEL CODE, AND THAT IS THE PART WORTH RECORDING
+
+The obvious next step was a `resolveCpu` / `resolveCuda` pair beside `renderCpu`. It is
+not needed. **`renderPixel` with `sampleCount == 0` already IS a resolve**: it adds
+nothing to the accumulator, divides it by `samplesAlreadyDone`, and writes the mean. The
+transform pass then finishes it.
+
+So the whole ResolveOnly path is two calls the renderer already has, and there is no
+second copy of the accumulation arithmetic to keep in step with the first.
+
+**CHECKED RATHER THAN ASSERTED.** `--resolve-check` renders, then regenerates from the
+accumulator with zero new samples and demands byte-identical output:
+
+    resolve-check: ok -- 36864 floats identical,
+    re-resolved from 24 accumulated samples without tracing
+
+Verified to go red by resolving against `totalSamples - 1`: 27,648 of 36,864 floats
+differ. Now `resolve.reproducesTheRender` in ctest.
+
+**BYTE-IDENTICAL IS THE RIGHT BAR, NOT A TOLERANCE.** Both paths divide the same
+accumulator by the same integer and run the same transform. A loose bar would admit the
+worst failure a cache has — the cached picture differing from the one the same
+parameters would render — which appears only after an edit and reads as a rendering bug
+rather than a caching one.
+
+The test passes `--sample-chunk` deliberately: without a split, `renderPixel` takes its
+no-accumulator branch and there is nothing to resolve *from*, so the test would pass
+while exercising none of what it names.
+
+### State
+
+123 unit tests (was 115), 23 ctest suites (was 22), all green.
+
+### WHAT IS STILL NOT WIRED, AND IT IS THE PART THAT NEEDS A HOST
+
+The policy and the mechanism both exist and are tested. **Nothing calls them yet.**
+
+The entry of 2026-09-28 declined to wire the cache for three reasons. Reason 2 — the
+sampling/resolve split — is what this entry is. Reason 1 stands in a reduced form: there
+is still no *field* to rebuild, because the ice generator is procedural, so what the
+cache now saves is the accumulated samples rather than a medium. At 2.97 s for 64 spp
+that is worth having, where at the 20 ms frame of the original entry it was not.
+
+**REASON 3 IS UNCHANGED AND IS THE BLOCKER.** A cross-render accumulator is shared
+mutable state between frames After Effects has in flight;
+`PF_OutFlag2_SUPPORTS_THREADED_RENDERING` is set, and `docs/HOST-NOTES.md` is blunt that
+anything shared then needs a lock or needs not to be shared. A single accumulator keyed
+on one `RenderKey` would thrash between concurrent frames, so it wants a keyed cache with
+an eviction policy and a lock — and none of that can be verified outside the host.
+
+### Next
+
+- **Wire it**, which is where MFR has to be reasoned about properly and then watched in
+  AE under a multi-frame render.
+- **OIDN**, now decided: bundle the 52.9 MB set. Needs the package fetched to develop
+  against; `cmake/FetchOidn.cmake` follows the `tools/slang/` pattern.
+- **The rest of the Bruneton atmosphere**, which ends in a look.
+- **Working Space None**, one log line.
+
+---
+
 ## 2026-09-29 — Build 7 reported fine in the host. Recorded as REPORTED rather than MEASURED, and the difference matters for exactly one line of it.
 
 Build 7 installed into AE 2026 and checked against the three things it changed: the sky

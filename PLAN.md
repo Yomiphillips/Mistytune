@@ -60,10 +60,26 @@ Still open, and each needs an answer before the phase that consumes it:
   option and the only one that could shrink `core.dll` itself; it costs an ISPC and TBB
   toolchain in the build.
 
-  **THE INTEGRATION MUST BE A RUNTIME-OPTIONAL LOAD EITHER WAY**, which is the part that
-  does not depend on the decision: a missing DLL has to degrade to "no denoise" rather
-  than to an effect that will not load. That is also what makes fetch-on-first-run
-  possible at all.
+  **DECIDED 2026-09-29: BUNDLE THE 52.9 MB SET.** 53 MB is unremarkable for a VFX plugin,
+  and the deciding argument is that the denoiser is **on by default** — so every failure
+  mode of fetching (offline install, corporate proxy, a first-run stall, a cache
+  directory that is not writable) lands on nearly every user rather than on a minority
+  who opted in. Building from source would shrink it and costs an ISPC and TBB toolchain
+  that every contributor would then need, which is a poor trade for a one-time download.
+
+  The CPU device stays in the bundle despite the measurement below making it nearly
+  useless for Draft — it is 1.3 MB, and it is what a machine with no CUDA falls back to
+  for a final render, where 774 ms a frame is irrelevant.
+
+  **THE INTEGRATION MUST BE A RUNTIME-OPTIONAL LOAD ANYWAY**, and that does not change
+  with the decision: a missing or mismatched DLL has to degrade to "no denoise" rather
+  than to an effect that will not load. Bundling makes that path rarer, not unnecessary
+  — a user who prunes the install folder, or an antivirus that quarantines one DLL, is
+  exactly the case it exists for.
+
+  Follows the `tools/slang/` pattern: a `cmake/FetchOidn.cmake`, a gitignored directory,
+  and the repo carrying the version and the fetch instructions rather than 53 MB of
+  binaries. A binary in git is a binary in git forever.
 
 - **Whether Draft mode can be interactive at all — ANSWERED 2026-09-29, and the answer
   is yes on this card and probably yes on a quarter of it.**
