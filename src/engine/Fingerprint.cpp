@@ -26,7 +26,9 @@ static_assert(sizeof(ShearProfile) == 48,
               "ShearProfile changed -- hash the new member in Fingerprint::add(ShearProfile)");
 static_assert(sizeof(IceParams) == 100,
               "IceParams changed -- hash the new member in Fingerprint::add(IceParams)");
-static_assert(sizeof(FieldParams) == 172,
+static_assert(sizeof(ConvectionParams) == 56,
+              "ConvectionParams changed -- hash the new member in Fingerprint::add(ConvectionParams)");
+static_assert(sizeof(FieldParams) == 228,
               "FieldParams changed -- hash the new member in Fingerprint::add(FieldParams)");
 
 // THE ONE PAIR THAT MUST NOT BE HASHED, asserted so that a future refactor
@@ -106,10 +108,28 @@ void Fingerprint::add(const IceParams& i) {
     add(i.detailOctaves);
 }
 
+void Fingerprint::add(const ConvectionParams& c) {
+    add(c.enabled);
+    add(c.cellSize);
+    add(c.polarity);
+    add(c.coverage);
+    add(c.instability);
+    add(c.inversionHeight);
+    add(c.density);
+    add(c.billowAmount);
+    add(c.billowScale);
+    add(c.billowOctaves);
+    add(c.windSpeed);
+    add(c.windBearing);
+    add(c.lifetime);
+    add(c.dropletDiameter);
+}
+
 void Fingerprint::add(const FieldParams& f) {
     add(f.physics);
     add(f.atmosphere);
     add(f.ice);
+    add(f.convection);
 
     // TIME IS PART OF THE FIELD, not of the view. The generating cells advect,
     // so a new frame genuinely is a new medium -- which is also why a still

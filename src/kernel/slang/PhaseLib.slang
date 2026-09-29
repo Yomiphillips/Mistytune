@@ -58,6 +58,12 @@ public struct PhaseInput
     float draineAlpha;  // the Draine lobe's alpha
     float draineW;      // how much of the mixture is the Draine lobe
     int   useIce;       // nonzero selects the ice placeholder
+
+    // THE DIFFRACTION LOBE A TRUNCATED PHASE FUNCTION LEFT OUT, for single scattering
+    // only -- see phaseCamera below. Zero weight means none, which is every phase
+    // function except a delta-scaled droplet one.
+    float lobeG;
+    float lobeWeight;
 };
 
 // THE FOUR PARAMETERS COME FROM THE DROPLET DIAMETER, which is the whole point of
@@ -105,6 +111,8 @@ public PhaseInput phaseFromDropletDiameter(float diameterMicrons, int useIce)
     p.draineAlpha = exp(3.62489f - 8.29288f / (d + 5.52825f));
     p.draineW     = exp(-(0.599085f / (d - 0.641583f)) - 0.665888f);
     p.useIce      = useIce;
+    p.lobeG       = 0.0f;
+    p.lobeWeight  = 0.0f;
     return p;
 }
 
@@ -170,6 +178,38 @@ public float phaseAt(PhaseInput p, float cosT)
     return p.useIce != 0 ? phaseIce(cosT) : phaseLiquid(p, cosT);
 }
 
+// ===========================================================================
+// THE PHASE FUNCTION FOR THE CAMERA RAY'S SINGLE SCATTERING, WHICH GETS THE DIFFRACTION
+// PEAK BACK.
+//
+// Cloud droplets put about half their scattering into a diffraction lobe a degree
+// wide -- Jendersie-d'Eon's HG term at g = 0.995 for 20 micron droplets, peaking near
+// 4e4 per steradian. In multiple scattering that lobe is a firefly generator: a path
+// deep in a cumulus has a nearly random direction, and the rare one within a degree of
+// the sun returns a next-event estimate ten thousand times the mean. PROGRESS.md shows
+// the render: 64 spp of salt and pepper, gone when the lobe is removed.
+//
+// So the transport uses the delta-Eddington truncation (Joseph, Wiscombe and Weinman
+// 1976): that fraction of the scattering is treated as NOT scattering at all -- the
+// extinction drops by it and the lobe is replaced by a broad one with the same
+// asymmetry. Multiple scattering depends on the asymmetry and the reduced optical
+// depth, both preserved, so the diffuse light of a cloud is unchanged. What is lost is
+// the lobe's own angular shape: the glow within a few degrees of the sun behind a thin
+// edge -- the silver lining.
+//
+// THE CAMERA RAY CAN HAVE IT BACK FOR FREE. Along one camera ray the angle to the sun
+// is fixed, so the lobe's value is a constant across the whole estimate rather than a
+// random spike -- no variance at all. This adds the truncated lobe back, at the weight
+// the truncation took out of the extinction, and only here. Everywhere else it would
+// be the firefly again.
+// ===========================================================================
+public float phaseCamera(PhaseInput p, float cosT)
+{
+    float v = phaseAt(p, cosT);
+    if (p.lobeWeight > 0.0f) v += p.lobeWeight * hg(cosT, p.lobeG);
+    return v;
+}
+
 // ---------------------------------------------------------------------------
 // Sampling
 // ---------------------------------------------------------------------------
@@ -205,6 +245,42 @@ public float3 sampleHG(inout Rng rng, float3 wo, float g, out float cosT)
     float3 v = cross(w, u);
 
     return normalize(sinT * cos(phi) * u + sinT * sin(phi) * v + cosT * w);
+}
+
+// ===========================================================================
+// DRAINE'S LOBE, SAMPLED EXACTLY, BY REJECTION FROM ITS OWN HG ENVELOPE.
+//
+// Draine is HG(g) times (1 + a cos^2) over a constant, so HG(g) times (1 + a) is an
+// envelope for it. Draw from HG, keep with probability (1 + a cos^2) / (1 + a), and what
+// is kept is distributed exactly as Draine: the pdf IS the phase, and the weight is one.
+//
+// THE SHORTCUT THIS REPLACES WAS UNBIASED AND IT WAS A FIREFLY GENERATOR. The lobe used
+// to be drawn from plain HG and reweighted by (1 + a cos^2)/norm, which the comment here
+// called "bounded" -- and it is, at 0.06 to 1.7 for 20 micron droplets, where the fit's
+// alpha is 27. But a weight that averages one and varies that much COMPOUNDS: after
+// thirty bounces through a cumulus the throughput is a product of thirty of them, and
+// its variance grows geometrically with depth. MEASURED: a 64 spp cumulus stayed salt
+// and pepper after the diffraction lobe was truncated, and this was the rest of it.
+//
+// It never showed on cirrus, which scatters with the ice phase function and a handful
+// of times at most.
+//
+// THE DRAW COUNT IS RANDOM -- (1 + a) / E[1 + a cos^2] tries on average, 1.7 at 20
+// microns -- which costs nothing in determinism: it depends only on the stream. The
+// cap is a bound the GPU can see; reaching it takes 64 rejections in a row, which at
+// the worst acceptance any droplet gives is below one in a trillion.
+// ===========================================================================
+public float3 sampleDraine(inout Rng rng, float3 wo, float g, float a, out float cosT)
+{
+    float3 dir = sampleHG(rng, wo, g, cosT);
+    if (!(a > 0.0f)) return dir;
+
+    for (int i = 0; i < 64; ++i)
+    {
+        if (randFloat(rng) * (1.0f + a) <= 1.0f + a * cosT * cosT) break;
+        dir = sampleHG(rng, wo, g, cosT);
+    }
+    return dir;
 }
 
 // ---------------------------------------------------------------------------
@@ -248,13 +324,14 @@ public float3 samplePhaseDir(PhaseInput p, inout Rng rng, float3 wo, out float w
     }
     else
     {
-        // The Draine lobe is sampled as an HG lobe of the same g: exact in its
-        // angular spread, differing only by the bounded (1 + a cos^2) factor.
-        if (randFloat(rng) < p.draineW) dir = sampleHG(rng, wo, p.draineG, cosT);
+        // EACH LOBE FROM ITS OWN DISTRIBUTION, the Draine lobe by rejection -- see
+        // sampleDraine. The pdf of the mixture is then the phase function itself, term
+        // for term, and the weight is exactly one wherever the phase is positive.
+        if (randFloat(rng) < p.draineW) dir = sampleDraine(rng, wo, p.draineG, p.draineAlpha, cosT);
         else                            dir = sampleHG(rng, wo, p.hgG, cosT);
 
-        pdf = p.draineW * hg(cosT, p.draineG) + (1.0f - p.draineW) * hg(cosT, p.hgG);
-        weight = pdf > 1e-9f ? phaseLiquid(p, cosT) / pdf : 0.0f;
+        pdf = phaseLiquid(p, cosT);
+        weight = pdf > 1e-9f ? 1.0f : 0.0f;
     }
 
     return dir;

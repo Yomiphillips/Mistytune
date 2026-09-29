@@ -167,7 +167,7 @@ PhaseInput_0 dropletPhase(float diameterMicrons) {
     cudaMemcpy(&h, d, sizeof(float4), cudaMemcpyDeviceToHost);
     cudaFree(d);
 
-    PhaseInput_0 p;
+    PhaseInput_0 p{};   // value-initialised: no truncated lobe
     p.hgG_0         = h.x;
     p.draineG_0     = h.y;
     p.draineAlpha_0 = h.z;
@@ -285,7 +285,7 @@ int main() {
     // ISOTROPIC. Not reachable through phaseFromDropletDiameter, and the reason this
     // entry point takes derived parameters -- see Bounce.slang. It is what makes the
     // furnace identity exact instead of statistical.
-    PhaseInput_0 iso;
+    PhaseInput_0 iso{};
     iso.hgG_0 = 0.0f; iso.draineG_0 = 0.0f;
     iso.draineAlpha_0 = 0.0f; iso.draineW_0 = 0.0f; iso.useIce_0 = 0;
 

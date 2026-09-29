@@ -127,11 +127,11 @@ namespace ae {
      * Inserting rewires saved projects, which is FREE TODAY AND NEVER AGAIN: nothing   \
      * has shipped, and PLAN.md fixes the layout at the v0.5 hand-out.                  \
      *                                                                                  \
-     * NO ENABLE CHECKBOX, and that is deliberate. IceParams::enabled is hashed but no  \
-     * backend reads it -- the `enabled` flags in TransportLib.slang belong to the      \
-     * MAJORANT GRID, not to the generator. A control that silently does nothing is     \
-     * worse than no control, so its slot is a reserved spare below and the checkbox    \
-     * arrives with the code that honours it. */                                        \
+     * THE ENABLE CHECKBOX IS THE LAST ROW, in the spare that was held for it. It was   \
+     * left out until the bridge honoured IceParams::enabled -- a control that silently \
+     * does nothing is worse than no control -- and SlangBridge.h now empties the ice   \
+     * slab when it is off. It sits after the shear knots rather than first because    \
+     * that slot is the one that was reserved; moving it would shift every index. */    \
     TOPIC   (IceGroup,          500, "Ice and Fallstreaks")                             \
     /* WHERE THE CRYSTALS ARE MADE. Cirrus generates between about 6 and 12 km; the     \
      * valid range reaches 100 km because the Unbound physics clamp and the v2          \
@@ -205,12 +205,65 @@ namespace ae {
     ANGLE   (IceShearBearing3,  522, "Wind From 4",          258.0)                     \
     ANGLE   (IceShearBearing4,  523, "Wind From 5",          250.0)                     \
     ANGLE   (IceShearBearing5,  524, "Wind From 6 (Bottom)", 240.0)                     \
-    /* IceSpare1 IS EARMARKED FOR THE ENABLE CHECKBOX, per the note on the group. */    \
-    SPARE   (IceSpare1,         525)                                                    \
+    /* A SPARE TURNED INTO A CONTROL IN PLACE, as it was earmarked to be. ID 525 was    \
+     * always this slot, so no saved project is rewired. */                             \
+    CHECK   (IceEnabled,        525, "Ice Layer", true)                                 \
     SPARE   (IceSpare2,         526)                                                    \
     SPARE   (IceSpare3,         527)                                                    \
     SPARE   (IceSpare4,         528)                                                    \
     ENDTOPIC(IceGroupEnd,       529)                                                    \
+                                                                                        \
+    /* ---------------- Cumulus: cellular convection ---------------- */                \
+    /* THE SECOND GENERATOR, AND THE SECOND LAYER. Cumulus under cirrus is the spec's   \
+     * default preset, so the layer is ON by default in the effect -- where the engine's\
+     * own default is off, to keep every golden image a lone cirrus.                    \
+     *                                                                                  \
+     * INSERTED BETWEEN ICE AND PHYSICS, NOT APPENDED, for the reason the Ice group     \
+     * gives: group order is screen order, and nothing has shipped. Minor 6.            \
+     *                                                                                  \
+     * THE BASE IS NOT HERE. It is the lifting condensation level, from Surface         \
+     * Humidity in the Physics group -- dry air lifts it, and air too dry to saturate   \
+     * under the Inversion has no cumulus at all. See ConvectionField.h. */             \
+    TOPIC   (CumulusGroup,      600, "Cumulus")                                         \
+    CHECK   (CumulusEnabled,    601, "Cumulus Layer", true)                             \
+    /* THE ONE PARAMETER THAT MATTERS MOST, per the spec. 0 is open cells -- air rising \
+     * at the rims, scattered cumulus; 1 is closed -- rising in the centres, a          \
+     * stratocumulus deck with clear seams. */                                          \
+    FLOAT   (CumulusPolarity,   602, "Cell Polarity",                                   \
+             0.0, 1.0,        0.0, 1.0,          0.0,     3)                            \
+    FLOAT   (CumulusCoverage,   603, "Coverage",                                        \
+             0.0, 1.0,        0.0, 1.0,          0.6,     3)                            \
+    FLOAT   (CumulusInstability,604, "Instability",                                     \
+             0.0, 1.0,        0.0, 1.0,          0.45,    3)                            \
+    /* A DIVISOR, floored at 1 m in the bridge; the valid minimum says so too. */       \
+    FLOAT   (CumulusCellSize,   605, "Cell Size",                                       \
+             1.0, 100000.0,   200.0, 20000.0,    1800.0,  0)                            \
+    FLOAT   (CumulusInversion,  606, "Inversion Height",                                \
+             0.0, 100000.0,   500.0, 8000.0,     2400.0,  0)                            \
+    /* PEAK EXTINCTION PER METRE. Real cumulus is 0.05 to 0.3; every doubling costs     \
+     * roughly twice the scattering events, which is why the default is below it. */    \
+    FLOAT   (CumulusDensity,    607, "Density",                                         \
+             0.0, 10.0,       0.0, 0.2,          0.03,    4)                            \
+    FLOAT   (CumulusBillow,     608, "Billow Amount",                                   \
+             0.0, 100000.0,   0.0, 1000.0,       350.0,   0)                            \
+    FLOAT   (CumulusBillowScale,609, "Billow Scale",                                    \
+             1.0, 100000.0,   50.0, 2000.0,      450.0,   0)                            \
+    FLOAT   (CumulusWindSpeed,  610, "Wind Speed",                                      \
+             0.0, 1000.0,     0.0, 40.0,         6.0,     1)                            \
+    ANGLE   (CumulusWindFrom,   611, "Wind From", 250.0)                                \
+    /* One cell's life, in seconds. Each cell is at its own point in the cycle, which   \
+     * is what stops a timelapse pulsing in step. */                                    \
+    FLOAT   (CumulusLifetime,   612, "Cell Lifetime",                                   \
+             1.0, 1000000.0,  60.0, 3600.0,      1200.0,  0)                            \
+    /* Microns. Selects the droplets' phase function: the silver lining, the fogbow and \
+     * the glory. The fit is valid for 5 to 50 and is clamped there. */                 \
+    FLOAT   (CumulusDroplet,    613, "Droplet Size",                                    \
+             1.0, 1000.0,     5.0, 50.0,         20.0,    1)                            \
+    SPARE   (CumulusSpare1,     614)                                                    \
+    SPARE   (CumulusSpare2,     615)                                                    \
+    SPARE   (CumulusSpare3,     616)                                                    \
+    SPARE   (CumulusSpare4,     617)                                                    \
+    ENDTOPIC(CumulusGroupEnd,   618)                                                    \
                                                                                         \
     /* ---------------- Physics ---------------- */                                      \
     /* EARTH BY DEFAULT, and the alien presets live in a clearly labelled demo group     \
@@ -678,8 +731,34 @@ inline cloud::IceParams toIce(const ParamValues& p) {
         out.shear.bearing[k] = static_cast<float>(bearing[k]);
     }
 
-    // `enabled` is left at its default. No backend reads it -- see the note on the
-    // Ice group in the table -- so there is no control to read it from.
+    // HONOURED NOW: SlangBridge.h empties the ice slab when this is off.
+    out.enabled = p.v[kMistytuneIceEnabled] > 0.5;
+    return out;
+}
+
+inline cloud::ConvectionParams toConvection(const ParamValues& p) {
+    cloud::ConvectionParams out;
+
+    out.enabled         = p.v[kMistytuneCumulusEnabled] > 0.5;
+    out.polarity        = static_cast<float>(p.v[kMistytuneCumulusPolarity]);
+    out.coverage        = static_cast<float>(p.v[kMistytuneCumulusCoverage]);
+    out.instability     = static_cast<float>(p.v[kMistytuneCumulusInstability]);
+    out.cellSize        = static_cast<float>(p.v[kMistytuneCumulusCellSize]);
+    out.inversionHeight = static_cast<float>(p.v[kMistytuneCumulusInversion]);
+    out.density         = static_cast<float>(p.v[kMistytuneCumulusDensity]);
+    out.billowAmount    = static_cast<float>(p.v[kMistytuneCumulusBillow]);
+    out.billowScale     = static_cast<float>(p.v[kMistytuneCumulusBillowScale]);
+    out.windSpeed       = static_cast<float>(p.v[kMistytuneCumulusWindSpeed]);
+
+    // NOT WRAPPED, for the reason the shear bearings are not: convectionWind() goes
+    // through sin and cos, so a dial keyframed round through north keeps turning.
+    out.windBearing     = static_cast<float>(p.v[kMistytuneCumulusWindFrom]);
+
+    out.lifetime        = static_cast<float>(p.v[kMistytuneCumulusLifetime]);
+    out.dropletDiameter = static_cast<float>(p.v[kMistytuneCumulusDroplet]);
+
+    // Polarity and coverage are clamped to [0, 1] in SlangBridge.h, where the kernel's
+    // bound needs them to be; billow octaves have no control and keep the default.
     return out;
 }
 

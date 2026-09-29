@@ -85,6 +85,27 @@ void printUsage() {
         "  --gpu-band-rows <n>  render the GPU frame in bands of n rows (0 = one\n"
         "                   launch). Must not change the image.\n"
         "  --threads <n>    CPU worker threads (0 = choose). Must not change the image.\n"
+        "  --heading <deg>  the compass direction the camera faces, clockwise from +Z\n"
+        "                   like --sun-az (default 180, the identity camera). Set it\n"
+        "                   to the sun's azimuth for a backlit view.\n"
+        "  --fov <deg>      vertical field of view (default 39.6, 50 mm full frame)\n"
+        "  --bounces <n>    scattering events per path (default 32)\n"
+        "\n"
+        "  The cumulus layer (cellular convection). OFF unless one of these is given,\n"
+        "  so every golden scene above is a lone cirrus:\n"
+        "  --cumulus        turn the convection layer on at its defaults\n"
+        "  --no-ice         turn the cirrus layer off\n"
+        "  --polarity <p>   0 = open cells (scattered cumulus) .. 1 = closed (a deck)\n"
+        "  --coverage <c>   0..1, how much of the sky the moisture fills\n"
+        "  --instability <i> 0..1, humilis -> congestus\n"
+        "  --cell-size <m>  the convective cells' spacing (default 1800)\n"
+        "  --inversion <m>  the lid (default 2400)\n"
+        "  --conv-density <s>  peak extinction per metre (default 0.03)\n"
+        "  --billow <m>     billow displacement (default 160)\n"
+        "  --billow-scale <m>  the largest billow (default 320)\n"
+        "  --humidity <rh>  surface humidity 0..1, which sets the base (default 0.7)\n"
+        "  --conv-grid <0|1>  the cumulus layer's procedural majorant grid (default 0).\n"
+        "                   Cost only: any majorant above the density is unbiased.\n"
         "  --nee-scale <k>  the camera ray's sun: 0 = one next event at the first real\n"
         "                   collision (delta tracking); k >= 1 = a continuous estimate\n"
         "                   over tentative collisions drawn at k x the majorant\n"
@@ -310,6 +331,11 @@ int main(int argc, char** argv) {
     // ZERO IS THE DEFAULT AND MEANS IDENTITY, so the golden images are unchanged.
     float pitchDegrees = 0.0f;
 
+    // 180 IS THE IDENTITY CAMERA, which looks down -Z -- compass azimuth 180 in the
+    // convention --sun-az uses. Keeping the default at the identity is what keeps the
+    // golden scenes' matrix exactly what it was.
+    float headingDegrees = 180.0f;
+
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
         const bool hasNext = (i + 1) < argc;
@@ -336,6 +362,23 @@ int main(int argc, char** argv) {
         else if (argIs(a, "--majorant") && hasNext)      req.quality.densityMajorant = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--sample-chunk") && hasNext)  sampleChunk = std::atoi(argv[++i]);
         else if (argIs(a, "--nee-scale") && hasNext)     req.neeTentativeScale = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--heading") && hasNext)       headingDegrees = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--fov") && hasNext)           req.view.verticalFovDegrees = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--bounces") && hasNext)       req.quality.maxBounces = std::atoi(argv[++i]);
+        else if (argIs(a, "--conv-grid") && hasNext)     req.convectionGrid = std::atoi(argv[++i]) != 0;
+        // The convection layer. Any of its settings turns it on, since setting one of
+        // them on an absent layer would otherwise be a flag that silently does nothing.
+        else if (argIs(a, "--cumulus"))                  req.field.convection.enabled = true;
+        else if (argIs(a, "--no-ice"))                   req.field.ice.enabled = false;
+        else if (argIs(a, "--polarity") && hasNext)      { req.field.convection.enabled = true; req.field.convection.polarity        = static_cast<float>(std::atof(argv[++i])); }
+        else if (argIs(a, "--coverage") && hasNext)      { req.field.convection.enabled = true; req.field.convection.coverage        = static_cast<float>(std::atof(argv[++i])); }
+        else if (argIs(a, "--instability") && hasNext)   { req.field.convection.enabled = true; req.field.convection.instability     = static_cast<float>(std::atof(argv[++i])); }
+        else if (argIs(a, "--cell-size") && hasNext)     { req.field.convection.enabled = true; req.field.convection.cellSize        = static_cast<float>(std::atof(argv[++i])); }
+        else if (argIs(a, "--inversion") && hasNext)     { req.field.convection.enabled = true; req.field.convection.inversionHeight = static_cast<float>(std::atof(argv[++i])); }
+        else if (argIs(a, "--conv-density") && hasNext)  { req.field.convection.enabled = true; req.field.convection.density         = static_cast<float>(std::atof(argv[++i])); }
+        else if (argIs(a, "--billow") && hasNext)        { req.field.convection.enabled = true; req.field.convection.billowAmount    = static_cast<float>(std::atof(argv[++i])); }
+        else if (argIs(a, "--billow-scale") && hasNext)  { req.field.convection.enabled = true; req.field.convection.billowScale     = static_cast<float>(std::atof(argv[++i])); }
+        else if (argIs(a, "--humidity") && hasNext)      req.field.physics.surfaceHumidity = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--window") && i + 4 < argc) {
             windowX = std::atoi(argv[++i]);
             windowY = std::atoi(argv[++i]);
@@ -399,15 +442,22 @@ int main(int argc, char** argv) {
     // same arithmetic rather than a second version of it: R_x(pitch), so a positive
     // angle sends the camera's forward (0,0,-1) to world y = +sin(pitch) and pitches
     // it UP. See fillCameraFromComp in src/ae/AEBridge.h.
-    if (pitchDegrees != 0.0f) {
+    // PITCH THEN HEADING: the camera tilts up about its own X axis, then turns about the
+    // world's Y. Camera-to-world, row-major, as ViewParams documents -- Ry(theta) * Rx(pitch),
+    // where theta = heading - 180 because the identity camera already faces azimuth 180.
+    // Left untouched at the defaults, so the golden scenes keep the exact identity.
+    if (pitchDegrees != 0.0f || headingDegrees != 180.0f) {
         const float rad = pitchDegrees * 0.01745329252f;
         const float cc  = std::cos(rad);
         const float ss  = std::sin(rad);
+        const float yaw = (headingDegrees - 180.0f) * 0.01745329252f;
+        const float cy  = std::cos(yaw);
+        const float sy  = std::sin(yaw);
         const float m[16] = {
-            1.0f, 0.0f, 0.0f, 0.0f,
-            0.0f, cc,   -ss,  0.0f,
-            0.0f, ss,   cc,   0.0f,
-            0.0f, 0.0f, 0.0f, 1.0f
+            cy,    sy * ss,  sy * cc,  0.0f,
+            0.0f,  cc,       -ss,      0.0f,
+            -sy,   cy * ss,  cy * cc,  0.0f,
+            0.0f,  0.0f,     0.0f,     1.0f
         };
         for (int i = 0; i < 16; ++i) req.view.cameraToWorld[i] = m[i];
     }

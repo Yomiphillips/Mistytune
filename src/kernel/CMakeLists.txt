@@ -33,6 +33,7 @@ set(PLUGIN_SLANG_RENDER_DEPS
     "${SLANG_DIR}/BounceLib.slang"
     "${SLANG_DIR}/TransportLib.slang"
     "${SLANG_DIR}/GeneratorLib.slang"
+    "${SLANG_DIR}/ConvectionLib.slang"
     "${SLANG_DIR}/PhaseLib.slang"
     "${SLANG_DIR}/SkyLib.slang"
     "${SLANG_DIR}/Rng.slang")

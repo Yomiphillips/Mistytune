@@ -88,6 +88,11 @@
 // ===========================================================================
 #include "GeneratorLib.slang"
 
+// The second generator, behind `mode 3` -- the seam the note above left for it. Cumulus
+// is where the majorant grid finally pays, which is why this file also grows a
+// procedural bound below.
+#include "ConvectionLib.slang"
+
 // ---------------------------------------------------------------------------
 // The medium
 // ---------------------------------------------------------------------------
@@ -114,7 +119,11 @@ public struct Medium
     // parameter change rather than something the kernel can recompute per sample.
     GeneratorInput gen;
 
-    int   mode;         // 0 = constant, 1 = background + core, 2 = ice generator
+    // mode 3 only: cellular convection. No table travels beside it -- every input is
+    // a scalar, and the cells are a hash of the lattice.
+    ConvectionInput conv;
+
+    int   mode;         // 0 = constant, 1 = background + core, 2 = ice, 3 = convection
 };
 
 // ===========================================================================
@@ -144,6 +153,7 @@ public float densityAt(Medium m, StructuredBuffer<float2> disp, float3 p)
     if (m.mode == 0) return m.density;
 
     if (m.mode == 2) return iceDensity(m.gen, disp, p);
+    if (m.mode == 3) return convectionDensity(m.conv, p);
 
     float3 d  = (p - m.coreCentre) / max(m.coreRadius, 1e-6f);
     float  r2 = dot(d, d);
@@ -228,15 +238,44 @@ public struct MajorantGrid
     float3 origin;      // world position of the min corner of cell (0,0,0)
     float3 cellExtent;  // NOT `cellSize` -- GeneratorInput already has one. See above
     int3   dims;
-    int    enabled;     // 0 = ignore the grid and use Medium.majorant everywhere
+    int    enabled;     // 0 = ignore the grid and use Medium.majorant everywhere;
+                        // 1 = the stored bounds; 2 = computed per cell (see gridBound)
 };
+
+// A sound upper bound on the medium's density anywhere in the box [lo, hi], from the
+// generator's own structure. Only the generators that can say something better than
+// their global majorant do; everything else answers with it.
+public float mediumBound(Medium m, StructuredBuffer<float2> disp, float3 lo, float3 hi)
+{
+    if (m.mode == 3) return convectionBound(m.conv, lo, hi);
+    if (m.mode == 2) return iceDensityBound(m.gen, disp, lo, hi);
+    return m.majorant;
+}
 
 // The bound for one cell. OUTSIDE THE GRID FALLS BACK TO THE GLOBAL MAJORANT, which
 // keeps the estimator correct when the grid does not span the whole medium -- the grid
 // is an accelerator, never the definition of where the medium is.
-public float gridBound(MajorantGrid g, StructuredBuffer<float> bounds, int3 c, float fallback)
+//
+// ===========================================================================
+// `enabled = 2` IS A GRID WITH NO STORAGE: THE BOUND IS COMPUTED FOR THE CELL THE WALK
+// HAS JUST ENTERED, FROM THE GENERATOR'S STRUCTURE.
+//
+// A stored grid needs a finite extent, and a cumulus layer has none -- it runs to the
+// horizon in every direction, and a grazing ray crosses tens of kilometres of it. So the
+// lattice is unbounded and each cell's bound is mediumBound over its box. That is sound
+// for exactly the reason a stored analytic bound is, and it costs one bound evaluation
+// per cell crossed rather than per null collision -- which is why the walks below
+// evaluate this when they ENTER a cell and hold it, rather than at every step.
+// ===========================================================================
+public float gridBound(Medium m, MajorantGrid g, StructuredBuffer<float> bounds,
+                       StructuredBuffer<float2> disp, int3 c, float fallback)
 {
     if (g.enabled == 0) return fallback;
+    if (g.enabled == 2)
+    {
+        float3 lo = g.origin + float3(c) * g.cellExtent;
+        return mediumBound(m, disp, lo, lo + g.cellExtent);
+    }
     if (c.x < 0 || c.y < 0 || c.z < 0 ||
         c.x >= g.dims.x || c.y >= g.dims.y || c.z >= g.dims.z) return fallback;
     return bounds[(c.z * g.dims.y + c.y) * g.dims.x + c.x];
@@ -341,7 +380,12 @@ public void ddaAdvance(inout Dda d)
 // A SINGLE CAP FOR BOTH ESTIMATORS, raised from the prototype's 128/256 and kept high
 // even with the grid in place. The grid is what stops it being approached; the cap is
 // what stops a bad grid from hanging the display driver. See PROGRESS.md.
-public static const int kTrackCap = 1024;
+//
+// 4096 SINCE THE CUMULUS LAYER, whose procedural grid spends an iteration on every box a
+// ray crosses, collision or not. A ray grazing the layer near the horizon crosses about
+// six hundred of them. Nothing that stayed under 1024 changes: the cap is a bound the
+// GPU can see, and a walk that never reaches it runs exactly the same iterations.
+public static const int kTrackCap = 4096;
 
 // ---------------------------------------------------------------------------
 // Transmittance, by ratio tracking
@@ -398,11 +442,16 @@ public float transmittance(Medium m, MajorantGrid g, StructuredBuffer<float> bou
     // Raising the cap converts a silent bias into a visible slowdown, which is the
     // right way round.
     // ===================================================================
+    // THE CELL'S BOUND IS TAKEN ON ENTRY AND HELD, not asked again at every step. For a
+    // stored grid that is a lookup either way; for a procedural one (enabled = 2) it is
+    // a bound evaluation, and paying it per null collision rather than per cell would
+    // hand back much of what the grid saves.
+    float localMaj = gridBound(m, g, bounds, disp, dda.cell, m.majorant);
+
     for (int i = 0; i < kTrackCap; ++i)
     {
         ++steps;
 
-        float localMaj  = gridBound(g, bounds, dda.cell, m.majorant);
         float cellExit  = min(ddaExit(dda), t1);
 
         // AN EMPTY CELL IS CROSSED IN ONE STEP AND COSTS NO RANDOM NUMBER. This is
@@ -415,6 +464,7 @@ public float transmittance(Medium m, MajorantGrid g, StructuredBuffer<float> bou
             if (cellExit >= t1) break;
             t = cellExit;
             ddaAdvance(dda);
+            localMaj = gridBound(m, g, bounds, disp, dda.cell, m.majorant);
             continue;
         }
 
@@ -429,6 +479,7 @@ public float transmittance(Medium m, MajorantGrid g, StructuredBuffer<float> bou
             if (cellExit >= t1) break;
             t = cellExit;
             ddaAdvance(dda);
+            localMaj = gridBound(m, g, bounds, disp, dda.cell, m.majorant);
             continue;
         }
 
@@ -460,16 +511,26 @@ public float transmittance(Medium m, MajorantGrid g, StructuredBuffer<float> bou
 // THE POINT IS THAT IT NEEDS NO INTEGRAL OF DENSITY ALONG THE RAY, which is what
 // makes a heterogeneous medium tractable at all. A majorant below the true maximum
 // biases the result; above it is merely slow.
-public bool sampleFreeFlight(Medium m, MajorantGrid g, StructuredBuffer<float> bounds,
-                             StructuredBuffer<float2> disp,
-                             inout Rng rng, float3 ro, float3 rd,
-                             out float3 scatterPoint, out float distance, inout int steps)
+//
+// `tLimit` STOPS THE SEARCH AT A DISTANCE, which is what makes two layers exact rather
+// than approximate. A medium that is a SUM of two has a free-flight distance that is the
+// MINIMUM of the two layers' own -- the survival probabilities multiply, exp(-A) exp(-B),
+// which is the definition of independent exponential races. So the second layer only
+// needs searching up to where the first one collided; a collision beyond that never
+// happens, because the path scattered first. See sceneFreeFlight in BounceLib.slang.
+public bool sampleFreeFlightUpTo(Medium m, MajorantGrid g, StructuredBuffer<float> bounds,
+                                 StructuredBuffer<float2> disp,
+                                 inout Rng rng, float3 ro, float3 rd, float tLimit,
+                                 out float3 scatterPoint, out float distance, inout int steps)
 {
     scatterPoint = float3(0.0f, 0.0f, 0.0f);
     distance     = 0.0f;
 
     float t0, t1;
     if (!slabRange(m, ro, rd, t0, t1)) return false;
+
+    t1 = min(t1, tLimit);
+    if (!(t1 > t0)) return false;
 
     float t = max(t0, 0.0f);
 
@@ -480,11 +541,12 @@ public bool sampleFreeFlight(Medium m, MajorantGrid g, StructuredBuffer<float> b
     // because the loop ran out before the slab did. Biased towards a THINNER cloud,
     // and in the opposite direction to the transmittance bias -- so the two do not
     // even cancel.
+    float localMaj = gridBound(m, g, bounds, disp, dda.cell, m.majorant);
+
     for (int i = 0; i < kTrackCap; ++i)
     {
         ++steps;
 
-        float localMaj = gridBound(g, bounds, dda.cell, m.majorant);
         float cellExit = min(ddaExit(dda), t1);
 
         if (localMaj <= 0.0f)
@@ -492,6 +554,7 @@ public bool sampleFreeFlight(Medium m, MajorantGrid g, StructuredBuffer<float> b
             if (cellExit >= t1) return false;
             t = cellExit;
             ddaAdvance(dda);
+            localMaj = gridBound(m, g, bounds, disp, dda.cell, m.majorant);
             continue;
         }
 
@@ -502,6 +565,7 @@ public bool sampleFreeFlight(Medium m, MajorantGrid g, StructuredBuffer<float> b
             if (cellExit >= t1) return false;
             t = cellExit;
             ddaAdvance(dda);
+            localMaj = gridBound(m, g, bounds, disp, dda.cell, m.majorant);
             continue;
         }
 
@@ -520,6 +584,17 @@ public bool sampleFreeFlight(Medium m, MajorantGrid g, StructuredBuffer<float> b
     }
 
     return false;
+}
+
+// The whole slab, which is what one layer on its own needs. The limit is far beyond
+// slabRange's own horizontal cap, so min() leaves t1 exactly as it was.
+public bool sampleFreeFlight(Medium m, MajorantGrid g, StructuredBuffer<float> bounds,
+                             StructuredBuffer<float2> disp,
+                             inout Rng rng, float3 ro, float3 rd,
+                             out float3 scatterPoint, out float distance, inout int steps)
+{
+    return sampleFreeFlightUpTo(m, g, bounds, disp, rng, ro, rd, 1e30f,
+                                scatterPoint, distance, steps);
 }
 
 #endif // MISTYTUNE_TRANSPORT_LIB_SLANG

@@ -4,6 +4,106 @@ Tracked against `PLAN.md`. Newest first.
 
 ---
 
+## 2026-09-29 — THE SECOND GENERATOR AND THE SECOND LAYER. Cumulus from cellular convection, with cell polarity, a flat base at the condensation level, and a cirrus deck that shadows it because it is in the same medium. Two firefly sources found and removed on the way, and a majorant grid that was proved correct and then measured to be a loss.
+
+### What was built
+
+**`ConvectionLib.slang`: the density.** A jittered lattice of convective cells, each with
+its own vigour and its own point in a birth-to-death cycle (`27/4 u (1-u)^2`, a polynomial
+because a sine is a cross-platform hazard). Two updraft fields from the same kernels:
+**closed** is the largest kernel minus the second (air rising in the centres, a power
+diagram); **open** is the second-largest kernel (air rising where two cells meet).
+Polarity blends them. Where the updraft beats a moisture threshold a column stands on
+the base and rises under the inversion; billows displace its top and sides.
+
+**The base is not a parameter.** It is the lifting condensation level from surface
+temperature and humidity (`condensationLevel()`: 125 m per kelvin of dew-point
+depression on Earth, scaling as 1/g). Air too dry to saturate under the lid has no
+cumulus, and nobody wrote that rule.
+
+**Two layers, exactly.** `Scene` gains a second medium. Shadows multiply the layers'
+transmittances; free flight takes the nearer of the two layers' collisions (the
+minimum of independent exponential races, which is exact); a scattering event uses its
+own layer's phase function and albedo. The camera-segment sun merges the two layers'
+tentative-collision walks in distance order: the same Mecke argument, and the weights
+still telescope. **With one layer every scene function does exactly the old
+arithmetic: all three goldens stay byte-identical on CPU and GPU.**
+
+### Two firefly sources, each measured
+
+1. **The droplets' diffraction lobe.** At 20 µm, Jendersie-d'Eon's HG term has g = 0.995
+   and carries half the scattering, peaking near 4e4 sr⁻¹. A multiply-scattered path
+   whose direction happens to lie within a degree of the sun returns a spike.
+   **Delta-Eddington truncation** (`truncateDiffraction()`): f = g² of that lobe is
+   treated as unscattered, the extinction drops by it, and the rest becomes HG at
+   g/(1+g), which preserves the asymmetry exactly. The camera ray's single scattering adds
+   the true lobe back (`phaseCamera`), at zero variance because the angle is fixed along
+   the ray, so the silver lining survives.
+2. **Draine sampled from an HG envelope.** Alpha is 27 at 20 µm, so the old weight
+   (1 + a cos²)/norm ran 0.06 to 1.7 and compounded over thirty bounces. Now sampled
+   **exactly by rejection** (1.7 tries on average); every weight is exactly one.
+
+A broad-phase control made the diagnosis: swapping the ice placeholder in cleared the
+first render. What noise remains is ordinary multiple-scattering variance: about 1.6
+relative std per sample, measured, and the same order with the broad phase. That is
+the denoiser's job.
+
+### Measured in slang.convection
+
+| check | result |
+| --- | --- |
+| bound against density, 15,000 boxes, 5 fields | **0 violations** |
+| cloud 60 m up that reaches 0.5 m above the base | 100% (the base is flat) |
+| cloud below the base or above the lid | 0 |
+| open cells, updraft at centres / rims | 0.086 / 0.252 |
+| closed cells, updraft at centres / rims | 0.450 / 0.093 |
+| 3x3 window against 5x5, 300k points | identical to the bit |
+| billow mean | +0.005 (re-centred from +0.20) |
+
+Coverage 0.2 / 0.6 / 1.0 gives 3.4% / 12.7% / 45% of the sky at open polarity; the rest
+is the holes open cells have.
+
+### The majorant grid: correct, and a loss
+
+A procedural grid (`MajorantGrid.enabled = 2`) bounds each box from the generator's
+structure on the fly, since the layer is infinite. It is sound, and grid on/off agree to
+noise. But it is **slower in every scene that has clouds** (640x360, 32 spp):
+
+| | grid | none |
+| --- | --- | --- |
+| empty layer | 0.42 s | 1.10 s |
+| sparse field | 5.86 s | 3.56 s |
+| dense field | 6.62 s | 4.48 s |
+| looking up | 1.90 s | 1.42 s |
+
+A ray near clouds meets one within a kilometre or two, and each box crossed costs about
+what its null collisions would have. Lattice-aligned boxes, taller boxes, and the grid
+for camera rays only were each measured; none changed the verdict. **Off by default**;
+`--conv-grid 1` for A/B. `kTrackCap` went to 4096 so a grazing ray through the layer
+cannot truncate.
+
+### Cost
+
+Cumulus is expensive: about 0.6 µs per pixel-sample in a cloudy view against 0.028 for
+cirrus, so 1080p at 1 spp is roughly 1.3 s. It needs 32 bounces: 16 captures 89% of the
+light, 32 captures 98.5%. Divergence is part of it (sky pixels idle while cloud paths
+take hundreds of steps), with 128 registers per thread and a 728-byte stack frame.
+
+### State
+
+Build 14, minor 6: a Cumulus group inserted between Ice and Physics (on by default,
+matching the spec's two-layer default preset), and the ice group's reserved spare is
+now its on/off switch. 26 ctest suites, including the new slang.convection.
+
+### What needs the host
+
+- **The look.** Default AE scene: cumulus under cirrus. Is it cumulus?
+- **Cell Polarity** from 0 to 1: scattered cumulus to a stratocumulus deck.
+- **Surface Humidity** in Physics moves the base; below about 0.25 the cumulus goes.
+- **Whether Draft is still usable** at ~1.3 s a 1080p sample.
+
+---
+
 ## 2026-09-29 — Build 13 reported good in the host. REPORTED, not measured, like build 7.
 
 The report was that the build looks good. No log and no frame times came back, so this

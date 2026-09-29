@@ -14,6 +14,7 @@
 
 #include "../engine/Atmosphere.h"
 #include "../engine/CloudParams.h"
+#include "../engine/ConvectionField.h"
 #include "../engine/IceField.h"
 
 namespace plugin::kernel {
@@ -126,6 +127,13 @@ struct RenderRequest {
     cloud::Real cellDriftX = 0.0f;
     cloud::Real cellDriftZ = 0.0f;
 
+    // The convection layer's derived half: its base at the condensation level, how tall
+    // its towers may grow, where its cells have drifted and how far through their lives
+    // they are, and its droplets' phase function. `present` is false when there can be
+    // no cumulus at all -- the layer is off, or the air is too dry to saturate under the
+    // lid. See src/engine/ConvectionField.h.
+    cloud::ConvectionDerived convection;
+
     // THE REASON ALL FIVE ARE HERE RATHER THAN COMPUTED WHERE THEY ARE USED: the
     // marshalling into the kernel's structs runs ON THE DEVICE, inside renderPixel,
     // and src/engine/ is host code. A device function cannot call iceFallSpeed(), so
@@ -162,6 +170,25 @@ struct RenderRequest {
     // time. Not a user parameter and not hashed -- it is the renderer's estimator,
     // chosen here once, and 0 survives only so the CLI can A/B it.
     float neeTentativeScale = 1.0f;
+
+    // THE CUMULUS LAYER'S PROCEDURAL MAJORANT GRID, on or off. An A/B knob for the CLI
+    // and nothing else, like neeTentativeScale: any majorant at or above the density is
+    // unbiased, so this moves cost and never the converged image. Not hashed.
+    //
+    // OFF, AND THAT IS A MEASUREMENT. 640x360 at 32 spp, grid on against off:
+    //
+    //     empty layer, low camera     0.42 s  vs  1.10 s
+    //     sparse field, low camera    5.86 s  vs  3.56 s
+    //     dense field, low camera     6.62 s  vs  4.48 s
+    //     dense field, looking up     1.90 s  vs  1.42 s
+    //
+    // It wins only where there is no cloud to render. With clouds near, a camera ray
+    // meets one within a kilometre or two, and each box crossed costs about what the
+    // null collisions it saves would have. Aligning the boxes to the lattice, taller
+    // boxes and giving the grid only to walks that start outside the layer were each
+    // measured and none changed the verdict. The grid stays because it is proved correct
+    // (slang.convection) and a denser or sparser default may yet want it.
+    bool convectionGrid = false;
 
     // Linear radiance, four floats per pixel, persisting across the launches of
     // one frame. Null on the CPU reference path, which accumulates in the

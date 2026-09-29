@@ -107,6 +107,14 @@
 // images. PROGRESS.md carries the numbers.
 //
 // STILL MINOR 5: no parameter or flag changed.
+// MINOR 6, BUILD 14 -- THE CUMULUS LAYER. Cellular convection with cell polarity, a
+// flat base at the condensation level, and cauliflower billows, rendered as a second
+// medium beside the cirrus -- so the cirrus shadows it, rendered rather than faked.
+// The droplets' diffraction lobe is delta-Eddington truncated and their Draine lobe is
+// sampled exactly; each was a firefly source, measured. PROGRESS.md carries it all.
+//
+// A MINOR BUMP BECAUSE THE PARAMETER LIST CHANGED: a Cumulus group was inserted between
+// Ice and Physics, and the ice group's reserved spare became its on/off switch.
 #define PLUGIN_MAJOR 0
-#define PLUGIN_MINOR 5
-#define PLUGIN_BUILD 13
+#define PLUGIN_MINOR 6
+#define PLUGIN_BUILD 14

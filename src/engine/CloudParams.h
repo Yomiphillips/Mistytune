@@ -187,6 +187,70 @@ struct IceParams {
 };
 
 // ---------------------------------------------------------------------------
+// Cellular convection -- the workhorse, and the second generator
+// ---------------------------------------------------------------------------
+
+// Rayleigh-Benard circulation in a moist boundary layer: air rises in some parts of
+// each convective cell and sinks in others, and cloud forms where it rises past the
+// condensation level.
+//
+// CELL POLARITY IS THE ONE PARAMETER THAT MATTERS MOST, per the spec. OPEN cells rise
+// at the rims and sink in the centres: cloud walls around clear holes, which at low
+// moisture break into scattered fair-weather cumulus at the vertices where the rims
+// meet. CLOSED cells rise in the centres and sink at the rims: one cloud per cell,
+// which at high moisture is a stratocumulus deck with clear seams between the cells.
+// One slider, two completely different skies.
+//
+// THE BASE IS NOT A PARAMETER. It is the lifting condensation level, computed from
+// PhysicsParams' surface temperature and humidity -- see condensationLevel() in
+// ConvectionField.h. That is what makes the flat, dark base the spec's craft checklist
+// asks for a consequence of the air rather than a slider, and it is why the Physics
+// tab changes this cloud: dry air lifts the base, and air dry enough to lift it past
+// the inversion has no cumulus at all.
+//
+// WIND IS A BEARING, LIKE THE SHEAR PROFILE: the direction it comes FROM, clockwise
+// from +Z. One steering wind for the whole layer, because a boundary-layer cloud is
+// shallow enough that its shear is the ice generator's business rather than this one's.
+struct ConvectionParams {
+    // OFF IN THE ENGINE'S DEFAULTS, so every existing golden image and every test
+    // written against a lone cirrus keeps meaning what it meant. The effect turns it on
+    // as the spec's default preset -- two layers, cumulus under thin cirrus.
+    bool enabled = false;
+
+    Real cellSize        = 1800.0f;  // m, the spacing of the convective cells
+    Real polarity        = 0.0f;     // 0 = open (rising rims) .. 1 = closed (centres)
+    Real coverage        = 0.45f;    // 0..1, how much of the sky the moisture can fill
+    Real instability     = 0.45f;    // 0..1, humilis -> mediocris -> congestus
+    Real inversionHeight = 2400.0f;  // m, the lid: nothing rises through it
+
+    // Peak extinction inside the cloud, per metre. REAL CUMULUS IS DENSER THAN THIS --
+    // 0.05 to 0.3 per metre -- and every doubling roughly quadruples the scattering
+    // events a path needs to leave. The default is chosen so a mid-sized cumulus is
+    // optically thick (optical depth 20 to 40 across) without costing seconds a frame.
+    Real density         = 0.03f;
+
+    // Billows: how far, in metres, the cauliflower displaces the top and sides, and
+    // the size of the largest lobe. The base is not displaced -- it is the flat
+    // condensation level, and a ragged base reads as fractus rather than cumulus.
+    Real billowAmount    = 350.0f;   // m
+    Real billowScale     = 450.0f;   // m
+    int32_t billowOctaves = 3;
+
+    Real windSpeed       = 6.0f;     // m/s
+    Real windBearing     = 250.0f;   // degrees, where it comes FROM
+
+    // One cell's life, birth to gone, in seconds. Fair-weather cumulus lives about
+    // fifteen to thirty minutes. Each cell is at its own point in the cycle, which is
+    // what stops a timelapse from pulsing in step.
+    Real lifetime        = 1200.0f;
+
+    // Droplet diameter in microns. It selects the Jendersie-d'Eon phase function's
+    // four parameters, so it is what sets the forward peak, the fogbow and the glory.
+    // The fit is valid from 5 to 50 microns and is clamped to that range.
+    Real dropletDiameter = 20.0f;
+};
+
+// ---------------------------------------------------------------------------
 // What is in the sky
 // ---------------------------------------------------------------------------
 
@@ -199,6 +263,7 @@ struct FieldParams {
     PhysicsParams   physics;
     AtmosphereParams atmosphere;
     IceParams       ice;
+    ConvectionParams convection;
 
     // The frame being rendered, in seconds. IN THE FIELD, not the view: the
     // cells advect, so a new time is genuinely a new medium.

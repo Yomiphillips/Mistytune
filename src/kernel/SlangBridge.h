@@ -49,6 +49,35 @@ namespace plugin::kernel {
 // the Phase 3 parameter work rather than smuggled in beside a renderer.
 constexpr float kIceSingleScatterAlbedo = 0.999f;
 
+// The single-scatter albedo of cloud droplets at visible wavelengths.
+//
+// WATER ABSORBS EVEN LESS THAN ICE IN THE VISIBLE, and a cumulus is the case where
+// that matters: a path through one scatters a hundred times or more, so an albedo of
+// 0.999 would lose a tenth of the light to absorption that is not there, and the
+// interior would read grey rather than the bright white a real cumulus is. Real
+// droplets sit around 0.99998 in the green; a hundred bounces at that lose 0.2%.
+constexpr float kWaterSingleScatterAlbedo = 0.99998f;
+
+// How the convection layer's procedural majorant grid is cut, in metres.
+//
+// A QUARTER OF A CELL ACROSS, ALIGNED TO THE CELLS, AND FOUR SLICES DEEP.
+//
+// ALIGNED, because a box inside one lattice slot is bounded by the density's own fixed
+// 3x3 neighbourhood, which the compiler unrolls -- see convUpdraftBound. Unaligned boxes
+// took the general loop, and with it the grid made every cloudy scene slower than no
+// grid at all. So the box is a power-of-two fraction or multiple of the cell spacing,
+// and the lattice is anchored where the pattern is: at its drift, and at the base.
+//
+// A QUARTER, because smaller boxes give a tighter bound: slang.convection measured half
+// a cell proving a tenth of boxes empty, a quarter nearly all of the empty ones.
+//
+// FLOORED AT 400 m, doubling towards it, because a grazing ray crosses the layer for up
+// to 120 km and every box is one iteration of a walk capped at kTrackCap. 120 km at
+// 400 m is about 600 crossings on two axes, with room left for the collisions.
+constexpr float kConvGridFraction  = 0.25f;
+constexpr float kConvGridMinExtent = 400.0f;
+constexpr int   kConvGridSlices    = 4;
+
 // Where Russian roulette starts, counted in scattering events.
 //
 // FOUR, FROM THE PROTOTYPE. Early bounces are the cheap ones and carry most of the
@@ -98,6 +127,16 @@ MT_RENDER void fillSlangScene(const RenderRequest& req, SceneT& s, PhaseT& ph) {
     s.medium_0.majorant_0    = req.densityMajorant;
     s.medium_0.density_0     = 0.0f;
     s.medium_0.mode_0        = 2;          // the ice generator
+
+    // ICE OFF IS AN EMPTY SLAB, and that is the whole of honouring the switch.
+    // IceParams::enabled was hashed from Phase 1 and read by nothing, so the cirrus
+    // could not be turned off. A slab whose top and bottom coincide far below the
+    // ground has no range for any ray: slabRange() refuses it, so every walk through
+    // this layer ends before it draws a number. Nothing else has to know.
+    if (!ice.enabled) {
+        s.medium_0.slabTop_0    = -1.0e6f;
+        s.medium_0.slabBottom_0 = -1.0e6f;
+    }
 
     // Mode 1's Gaussian core, which mode 2 never reads. A RADIUS OF ONE RATHER THAN
     // ZERO: it is a divisor in that branch, and leaving a divisor at zero in a field
@@ -216,6 +255,91 @@ MT_RENDER void fillSlangScene(const RenderRequest& req, SceneT& s, PhaseT& ph) {
     s.neeTentativeScale_0 = req.neeTentativeScale;
 
     // -----------------------------------------------------------------------
+    // The second layer: cellular convection
+    // -----------------------------------------------------------------------
+    //
+    // ABSENT UNLESS THE HOST SAYS THERE CAN BE CLOUD, and absent means the scene
+    // functions in BounceLib.slang do exactly what they did with one layer -- see the
+    // note on Scene.layer2On. `present` is false for a switched-off layer and for air
+    // too dry to saturate under the lid; both render as no cumulus, which is right.
+    const cloud::ConvectionParams&  cv = f.convection;
+    const cloud::ConvectionDerived& cd = req.convection;
+
+    s.layer2On_0 = cd.present ? 1 : 0;
+
+    // CLAMPED HERE, NOT TRUSTED: AE lets an expression drive any slider past its range.
+    // Polarity and coverage outside [0, 1] would make the kernel's bound a weighted sum
+    // with a negative weight, which is not a bound. Spacing and billow scale are
+    // divisors. The octave loop in convBillow stops at four.
+    const float polarity = cv.polarity < 0.0f ? 0.0f : (cv.polarity > 1.0f ? 1.0f : cv.polarity);
+    const float coverage = cv.coverage < 0.0f ? 0.0f : (cv.coverage > 1.0f ? 1.0f : cv.coverage);
+    const float spacing  = cv.cellSize > 1.0f ? cv.cellSize : 1.0f;
+    const float billow   = cv.billowAmount > 0.0f ? cv.billowAmount : 0.0f;
+    const float bScale   = cv.billowScale > 1.0f ? cv.billowScale : 1.0f;
+    const int   octaves  = cv.billowOctaves < 1 ? 1 : (cv.billowOctaves > 4 ? 4 : cv.billowOctaves);
+
+    s.medium2_0.conv_0.cvBase_0        = cd.base;
+    s.medium2_0.conv_0.cvDepth_0       = cd.depth;
+    s.medium2_0.conv_0.cvSpacing_0     = spacing;
+    s.medium2_0.conv_0.cvPolarity_0    = polarity;
+    s.medium2_0.conv_0.cvCoverage_0    = coverage;
+    s.medium2_0.conv_0.cvShape_0       = cd.shape;
+    s.medium2_0.conv_0.cvSigma_0       = cd.sigma;
+    s.medium2_0.conv_0.cvBillow_0      = billow;
+    s.medium2_0.conv_0.cvBillowScale_0 = bScale;
+    s.medium2_0.conv_0.cvOctaves_0     = octaves;
+    s.medium2_0.conv_0.cvDrift_0       = V::v2(cd.driftX, cd.driftZ);
+    s.medium2_0.conv_0.cvAge_0         = cd.age;
+    s.medium2_0.conv_0.cvRise_0        = cd.rise;
+
+    // THE SLAB IS THE TALLEST THE CLOUD CAN BE: the tallest tower plus the biggest
+    // outward billow. convectionDensity() returns zero outside exactly this range.
+    s.medium2_0.slabBottom_0 = cd.base;
+    s.medium2_0.slabTop_0    = cd.base + cd.depth + billow;
+    s.medium2_0.majorant_0   = cd.sigma;
+    s.medium2_0.density_0    = 0.0f;
+    s.medium2_0.mode_0       = 3;          // cellular convection
+
+    // Mode 1's core and mode 2's generator, which mode 3 never reads. The radius and
+    // the ice divisors are left non-zero for the reason given for medium_0 above.
+    s.medium2_0.coreCentre_0  = V::v3(0.0f, 0.0f, 0.0f);
+    s.medium2_0.coreRadius_0  = 1.0f;
+    s.medium2_0.coreDensity_0 = 0.0f;
+    s.medium2_0.gen_0.streakLength_0 = 1.0f;
+    s.medium2_0.gen_0.cellSize_0     = 1.0f;
+    s.medium2_0.gen_0.fallSpeed_0    = 1.0f;
+    s.medium2_0.gen_0.detailScale_0  = 1.0f;
+
+    // THE PROCEDURAL GRID. No storage: gridBound() computes each box's bound from the
+    // generator's structure as the walk enters it. The lattice is anchored at the base
+    // so that its slices line up with the flat bottom, where the density switches on.
+    float across = spacing * kConvGridFraction;
+    for (int k = 0; k < 24 && across < kConvGridMinExtent; ++k) across *= 2.0f;
+    const float slice  = (cd.depth + billow) / static_cast<float>(kConvGridSlices);
+    s.grid2_0.origin_0     = V::v3(cd.driftX, cd.base, cd.driftZ);
+    s.grid2_0.cellExtent_0 = V::v3(across, slice > 1.0f ? slice : 1.0f, across);
+    s.grid2_0.dims_0       = V::i3(1, 1, 1);
+    s.grid2_0.enabled_0    = req.convectionGrid ? 2 : 0;
+
+    s.albedo2_0 = V::v3(kWaterSingleScatterAlbedo,
+                        kWaterSingleScatterAlbedo,
+                        kWaterSingleScatterAlbedo);
+
+    // Droplets, not crystals: the Jendersie-d'Eon fit, from the host's mirror of it.
+    //
+    // DELTA-EDDINGTON TRUNCATED: the diffraction lobe is out of the mixture every event
+    // scatters with, and out of the extinction (cd.sigma already carries that), and
+    // comes back only in the camera ray's single scattering. See truncateDiffraction()
+    // in ConvectionField.h, which says why and what it costs.
+    s.phase2_0.hgG_0         = cd.phase.transport.hgG;
+    s.phase2_0.draineG_0     = cd.phase.transport.draineG;
+    s.phase2_0.draineAlpha_0 = cd.phase.transport.draineAlpha;
+    s.phase2_0.draineW_0     = cd.phase.transport.draineW;
+    s.phase2_0.useIce_0      = 0;
+    s.phase2_0.lobeG_0       = cd.phase.lobeG;
+    s.phase2_0.lobeWeight_0  = cd.phase.lobeWeight;
+
+    // -----------------------------------------------------------------------
     // The phase function
     // -----------------------------------------------------------------------
     //
@@ -232,6 +356,8 @@ MT_RENDER void fillSlangScene(const RenderRequest& req, SceneT& s, PhaseT& ph) {
     ph.draineAlpha_0 = 0.0f;
     ph.draineW_0     = 0.0f;
     ph.useIce_0      = 1;
+    ph.lobeG_0       = 0.0f;   // no truncated lobe: ice is not delta-scaled
+    ph.lobeWeight_0  = 0.0f;
 }
 
 } // namespace plugin::kernel

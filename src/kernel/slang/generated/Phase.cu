@@ -51,6 +51,8 @@ struct PhaseInput_0
     float draineAlpha_0;
     float draineW_0;
     int useIce_0;
+    float lobeG_0;
+    float lobeWeight_0;
 };
 
 static __device__ PhaseInput_0 phaseFromDropletDiameter_0(float diameterMicrons_0, int useIce_1)
@@ -62,6 +64,8 @@ static __device__ PhaseInput_0 phaseFromDropletDiameter_0(float diameterMicrons_
     (&p_0)->draineAlpha_0 = (F32_exp((3.62489008903503418f - 8.29288005828857422f / (d_0 + 5.52825021743774414f))));
     (&p_0)->draineW_0 = (F32_exp((- (0.59908497333526611f / (d_0 - 0.64158302545547485f)) - 0.66588801145553589f)));
     (&p_0)->useIce_0 = useIce_1;
+    (&p_0)->lobeG_0 = 0.0f;
+    (&p_0)->lobeWeight_0 = 0.0f;
     return p_0;
 }
 
@@ -189,79 +193,108 @@ static __device__ float3  sampleHG_0(Rng_0 * rng_1, float3  wo_0, float g_2, flo
     return normalize_0(make_float3 (sinT_0 * (F32_cos((phi_0)))) * u_0 + make_float3 (sinT_0 * (F32_sin((phi_0)))) * cross_0(w_0, u_0) + make_float3 (*cosT_5) * w_0);
 }
 
-static __device__ float3  samplePhaseDir_0(PhaseInput_0 * p_3, Rng_0 * rng_2, float3  wo_1, float * weight_0)
+static __device__ float3  sampleDraine_0(Rng_0 * rng_2, float3  wo_1, float g_3, float a_2, float * cosT_6)
 {
-    float cosT_6;
-    float3  dir_0;
-    float _S22;
+    float3  dir_0 = sampleHG_0(rng_2, wo_1, g_3, cosT_6);
+    if(!(a_2 > 0.0f))
+    {
+        return dir_0;
+    }
+    float3  dir_1 = dir_0;
+    int i_2 = int(0);
+    for(;;)
+    {
+        if(i_2 < int(64))
+        {
+        }
+        else
+        {
+            break;
+        }
+        float _S22 = randFloat_0(rng_2);
+        if((_S22 * (1.0f + a_2)) <= (1.0f + a_2 * *cosT_6 * *cosT_6))
+        {
+            break;
+        }
+        float3  _S23 = sampleHG_0(rng_2, wo_1, g_3, cosT_6);
+        int i_3 = i_2 + int(1);
+        dir_1 = _S23;
+        i_2 = i_3;
+    }
+    return dir_1;
+}
+
+static __device__ float3  samplePhaseDir_0(PhaseInput_0 * p_3, Rng_0 * rng_3, float3  wo_2, float * weight_0)
+{
+    float cosT_7;
+    float3  dir_2;
+    float _S24;
     if((p_3->useIce_0) != int(0))
     {
-        float _S23 = randFloat_0(rng_2);
-        if(_S23 < 0.72000002861022949f)
+        float _S25 = randFloat_0(rng_3);
+        if(_S25 < 0.72000002861022949f)
         {
-            float3  _S24 = sampleHG_0(rng_2, wo_1, 0.85000002384185791f, &cosT_6);
-            dir_0 = _S24;
+            float3  _S26 = sampleHG_0(rng_3, wo_2, 0.85000002384185791f, &cosT_7);
+            dir_2 = _S26;
         }
         else
         {
-            float3  _S25 = sampleHG_0(rng_2, wo_1, 0.0f, &cosT_6);
-            dir_0 = _S25;
+            float3  _S27 = sampleHG_0(rng_3, wo_2, 0.0f, &cosT_7);
+            dir_2 = _S27;
         }
-        float pdf_0 = 0.72000002861022949f * hg_0(cosT_6, 0.85000002384185791f) + 0.02228168956935406f;
+        float pdf_0 = 0.72000002861022949f * hg_0(cosT_7, 0.85000002384185791f) + 0.02228168956935406f;
         if(pdf_0 > 9.99999971718068537e-10f)
         {
-            _S22 = phaseIce_0(cosT_6) / pdf_0;
+            _S24 = phaseIce_0(cosT_7) / pdf_0;
         }
         else
         {
-            _S22 = 0.0f;
+            _S24 = 0.0f;
         }
-        *weight_0 = _S22;
+        *weight_0 = _S24;
     }
     else
     {
-        float _S26 = randFloat_0(rng_2);
-        float _S27 = p_3->draineW_0;
-        if(_S26 < (p_3->draineW_0))
+        float _S28 = randFloat_0(rng_3);
+        if(_S28 < (p_3->draineW_0))
         {
-            float3  _S28 = sampleHG_0(rng_2, wo_1, p_3->draineG_0, &cosT_6);
-            dir_0 = _S28;
+            float3  _S29 = sampleDraine_0(rng_3, wo_2, p_3->draineG_0, p_3->draineAlpha_0, &cosT_7);
+            dir_2 = _S29;
         }
         else
         {
-            float3  _S29 = sampleHG_0(rng_2, wo_1, p_3->hgG_0, &cosT_6);
-            dir_0 = _S29;
+            float3  _S30 = sampleHG_0(rng_3, wo_2, p_3->hgG_0, &cosT_7);
+            dir_2 = _S30;
         }
-        float pdf_1 = _S27 * hg_0(cosT_6, p_3->draineG_0) + (1.0f - _S27) * hg_0(cosT_6, p_3->hgG_0);
-        if(pdf_1 > 9.99999971718068537e-10f)
+        float _S31 = phaseLiquid_0(p_3, cosT_7);
+        if(_S31 > 9.99999971718068537e-10f)
         {
-            float _S30 = phaseLiquid_0(p_3, cosT_6);
-            _S22 = _S30 / pdf_1;
+            _S24 = 1.0f;
         }
         else
         {
-            _S22 = 0.0f;
+            _S24 = 0.0f;
         }
-        *weight_0 = _S22;
+        *weight_0 = _S24;
     }
-    return dir_0;
+    return dir_2;
 }
 
 extern "C" __global__ void phaseSample(float dropletDiameter_1, int useIce_3, RWStructuredBuffer<float> outCos_0, RWStructuredBuffer<float> outWeight_0, uint seed_2, int count_2)
 {
-    int i_2 = int((blockIdx * blockDim + threadIdx).x);
-    if(i_2 >= count_2)
+    int i_4 = int((blockIdx * blockDim + threadIdx).x);
+    if(i_4 >= count_2)
     {
         return;
     }
     PhaseInput_0 params_0 = phaseFromDropletDiameter_0(dropletDiameter_1, useIce_3);
-    Rng_0 rng_3 = makeRng_0(seed_2 + uint(i_2) * 2654435761U);
-    float3  wo_2 = make_float3 (0.0f, 0.0f, 1.0f);
-    PhaseInput_0 _S31 = params_0;
+    Rng_0 rng_4 = makeRng_0(seed_2 + uint(i_4) * 2654435761U);
+    float3  wo_3 = make_float3 (0.0f, 0.0f, 1.0f);
+    PhaseInput_0 _S32 = params_0;
     float weight_1;
-    float3  _S32 = samplePhaseDir_0(&_S31, &rng_3, wo_2, &weight_1);
-    *(&(outCos_0)[i_2]) = clamp_0(dot_0(_S32, wo_2), -1.0f, 1.0f);
-    *(&(outWeight_0)[i_2]) = weight_1;
+    float3  _S33 = samplePhaseDir_0(&_S32, &rng_4, wo_3, &weight_1);
+    *(&(outCos_0)[i_4]) = clamp_0(dot_0(_S33, wo_3), -1.0f, 1.0f);
+    *(&(outWeight_0)[i_4]) = weight_1;
     return;
 }
 

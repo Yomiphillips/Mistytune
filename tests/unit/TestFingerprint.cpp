@@ -79,6 +79,22 @@ std::vector<Mutation> allMutations() {
         { "ice.detailScale",     [](FieldParams& f) { f.ice.detailScale += 10.0f; } },
         { "ice.detailOctaves",   [](FieldParams& f) { f.ice.detailOctaves += 1; } },
 
+        // ConvectionParams
+        { "convection.enabled",         [](FieldParams& f) { f.convection.enabled = !f.convection.enabled; } },
+        { "convection.cellSize",        [](FieldParams& f) { f.convection.cellSize += 100.0f; } },
+        { "convection.polarity",        [](FieldParams& f) { f.convection.polarity += 0.1f; } },
+        { "convection.coverage",        [](FieldParams& f) { f.convection.coverage += 0.05f; } },
+        { "convection.instability",     [](FieldParams& f) { f.convection.instability += 0.05f; } },
+        { "convection.inversionHeight", [](FieldParams& f) { f.convection.inversionHeight += 100.0f; } },
+        { "convection.density",         [](FieldParams& f) { f.convection.density += 0.005f; } },
+        { "convection.billowAmount",    [](FieldParams& f) { f.convection.billowAmount += 10.0f; } },
+        { "convection.billowScale",     [](FieldParams& f) { f.convection.billowScale += 10.0f; } },
+        { "convection.billowOctaves",   [](FieldParams& f) { f.convection.billowOctaves += 1; } },
+        { "convection.windSpeed",       [](FieldParams& f) { f.convection.windSpeed += 1.0f; } },
+        { "convection.windBearing",     [](FieldParams& f) { f.convection.windBearing += 5.0f; } },
+        { "convection.lifetime",        [](FieldParams& f) { f.convection.lifetime += 60.0f; } },
+        { "convection.dropletDiameter", [](FieldParams& f) { f.convection.dropletDiameter += 2.0f; } },
+
         // FieldParams itself
         { "timeSeconds", [](FieldParams& f) { f.timeSeconds += 1.0f; } },
         { "seed",        [](FieldParams& f) { f.seed += 1u; } },

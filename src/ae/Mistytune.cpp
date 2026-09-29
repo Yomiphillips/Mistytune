@@ -312,6 +312,7 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
     data->field.physics    = toPhysics(values);
     data->field.atmosphere = toAtmosphere(values);
     data->field.ice        = toIce(values);
+    data->field.convection = toConvection(values);
     data->field.timeSeconds = currentTimeSeconds(in_data);
     data->quality          = toQuality(values);
 

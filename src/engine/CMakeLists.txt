@@ -57,6 +57,11 @@ add_library(plugin_engine STATIC
     # parameters, which is why it is here and not in the kernel.
     IceField.h
     IceField.cpp
+    # The host's half of the convection generator: the condensation level that IS
+    # the flat base, the steering wind, the cells' clock, and the droplets' phase
+    # function -- each a pure function of the parameters.
+    ConvectionField.h
+    ConvectionField.cpp
 
     # 2D primitives for the contour tracer. What is left of the rigid-body
     # engine's Hull.h once the hull builder went with the solver.

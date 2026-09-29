@@ -1,0 +1,506 @@
+// The cellular convection generator: its bound, its base, its polarity.
+//
+// ===========================================================================
+// THE BOUND IS THE ONE THAT MATTERS, AND IT IS THE ONE A RENDER CANNOT CHECK.
+//
+// convectionBound() is what the procedural majorant grid hands delta tracking. A bound
+// below the density does not render slowly or noisily -- it renders a cloud that is
+// quietly WRONG: the acceptance probability sigma/majorant passes one, the tracker
+// scatters at the first tentative collision it tests, and the cloud comes out denser
+// and harder-edged where the bound is short. That looks like a modelling choice.
+//
+// The bound is built as a chain of inequalities (ConvectionLib.slang says which), so
+// this is not how it is PROVED -- sampling a fractal can only ever find a floor. It is
+// how a slip in the chain is CAUGHT: every box, thousands of points inside it, and not
+// one of them may exceed the box's bound. Half the boxes are thrown at random; half are
+// centred on points already known to be cloud, which is where the thresholds are and
+// where a bound that is right in clear air would be wrong.
+//
+// THE REST are the generator's physical claims, each of which a picture would show only
+// as "looks a bit off":
+//
+//   * the base is FLAT: nothing below the condensation level, and cloud right down to it
+//   * the lid holds: nothing above the tallest tower plus its biggest billow
+//   * POLARITY does what it says: closed cells rise at the centres, open at the rims
+//   * more moisture means more cloud, monotonically
+//   * the 3x3 neighbourhood is the whole field -- a 5x5 one agrees to the bit
+//   * the billows are centred: they bulge about as much as they bite
+// ===========================================================================
+
+#include <cstdio>
+#include <cmath>
+#include <vector>
+#include <algorithm>
+
+#include <cuda_runtime.h>
+
+#include "Convection.cu"
+
+namespace {
+
+// A small deterministic generator for the host's own sampling. The kernel's streams are
+// not involved -- this only decides where to look.
+struct HostRng {
+    unsigned long long s;
+    explicit HostRng(unsigned long long seed) : s(seed * 6364136223846793005ull + 1442695040888963407ull) {}
+    double next() {
+        s = s * 6364136223846793005ull + 1442695040888963407ull;
+        return static_cast<double>((s >> 11) & ((1ull << 53) - 1)) / static_cast<double>(1ull << 53);
+    }
+    float range(float a, float b) { return a + static_cast<float>(next()) * (b - a); }
+};
+
+template <class T>
+struct Device {
+    T* p = nullptr;
+    size_t n = 0;
+    explicit Device(size_t count) : n(count) { cudaMalloc(&p, sizeof(T) * (count ? count : 1)); }
+    ~Device() { cudaFree(p); }
+    void put(const std::vector<T>& v) { cudaMemcpy(p, v.data(), sizeof(T) * v.size(), cudaMemcpyHostToDevice); }
+    std::vector<T> get() const {
+        std::vector<T> v(n);
+        cudaMemcpy(v.data(), p, sizeof(T) * n, cudaMemcpyDeviceToHost);
+        return v;
+    }
+    StructuredBuffer<T> ro() const { StructuredBuffer<T> b; b.data = p; b.count = n; return b; }
+    RWStructuredBuffer<T> rw() const { RWStructuredBuffer<T> b; b.data = p; b.count = n; return b; }
+};
+
+int blocks(size_t n) { return static_cast<int>((n + 63) / 64); }
+
+std::vector<float> densities(const ConvectionInput_0& c, const std::vector<float3>& pts) {
+    Device<float3> in(pts.size());
+    Device<float>  out(pts.size());
+    in.put(pts);
+    convDensityAt<<<blocks(pts.size()), 64>>>(c, in.ro(), out.rw(), static_cast<int>(pts.size()));
+    return out.get();
+}
+
+std::vector<float> bounds(const ConvectionInput_0& c, const std::vector<float3>& lo,
+                          const std::vector<float3>& hi) {
+    Device<float3> dLo(lo.size()), dHi(hi.size());
+    Device<float>  out(lo.size());
+    dLo.put(lo);
+    dHi.put(hi);
+    convBoundOver<<<blocks(lo.size()), 64>>>(c, dLo.ro(), dHi.ro(), out.rw(), static_cast<int>(lo.size()));
+    return out.get();
+}
+
+std::vector<float> updrafts(const ConvectionInput_0& c, const std::vector<float2>& pts, bool wide) {
+    Device<float2> in(pts.size());
+    Device<float>  out(pts.size());
+    in.put(pts);
+    if (wide) convUpdraftWide<<<blocks(pts.size()), 64>>>(c, in.ro(), out.rw(), static_cast<int>(pts.size()));
+    else      convUpdraftAt<<<blocks(pts.size()), 64>>>(c, in.ro(), out.rw(), static_cast<int>(pts.size()));
+    return out.get();
+}
+
+// A cumulus field shaped like the shipping defaults: the base at the condensation level
+// of 15 C at 70%, towers two thirds of the room under a 2.4 km lid, and the transport's
+// truncated extinction.
+ConvectionInput_0 defaults(float polarity) {
+    ConvectionInput_0 c{};
+    c.cvBase_0        = 680.0f;
+    c.cvDepth_0       = 1100.0f;
+    c.cvSpacing_0     = 1800.0f;
+    c.cvPolarity_0    = polarity;
+    c.cvCoverage_0    = 0.55f;
+    c.cvShape_0       = 0.6f;
+    c.cvSigma_0       = 0.015f;
+    c.cvBillow_0      = 350.0f;
+    c.cvBillowScale_0 = 450.0f;
+    c.cvOctaves_0     = 3;
+    c.cvDrift_0       = make_float2(123.0f, -45.0f);
+    c.cvAge_0         = 0.37f;
+    c.cvRise_0        = 50.0f;
+    return c;
+}
+
+} // namespace
+
+int main() {
+    int deviceCount = 0;
+    if (cudaGetDeviceCount(&deviceCount) != cudaSuccess || deviceCount == 0) {
+        std::printf("no CUDA device -- skipping (this test needs a GPU)\n");
+        return 0;
+    }
+
+    int failures = 0;
+
+    // -----------------------------------------------------------------------
+    // 1. The bound is above the density, everywhere anyone has looked
+    // -----------------------------------------------------------------------
+    std::printf("1. The box bound against the density inside each box\n\n");
+    std::printf("  %-26s %7s %9s %11s %12s\n", "field", "boxes", "zero", "violations", "worst ratio");
+
+    struct Case { const char* name; ConvectionInput_0 c; };
+    std::vector<Case> cases;
+    cases.push_back({ "open (polarity 0)",   defaults(0.0f) });
+    cases.push_back({ "closed (polarity 1)", defaults(1.0f) });
+    cases.push_back({ "halfway (0.5)",       defaults(0.5f) });
+    {
+        ConvectionInput_0 c = defaults(0.3f);
+        c.cvCoverage_0 = 1.0f;   // the whole sky: thresholds everywhere
+        c.cvShape_0    = 0.45f;
+        c.cvOctaves_0  = 4;
+        cases.push_back({ "full coverage, 4 octaves", c });
+    }
+    {
+        ConvectionInput_0 c = defaults(0.8f);
+        c.cvSpacing_0 = 250.0f;  // cells smaller than the billows
+        c.cvBillow_0  = 0.0f;
+        cases.push_back({ "small cells, no billow", c });
+    }
+
+    const float extents[] = { 15.0f, 60.0f, 250.0f, 900.0f, 2500.0f };
+    const int   perBox    = 192;
+
+    for (const Case& k : cases) {
+        const ConvectionInput_0& c = k.c;
+        HostRng rng(0xc0ffee);
+
+        const float top = c.cvBase_0 + c.cvDepth_0 + c.cvBillow_0;
+
+        // SEEDS: points already known to be cloud, which the second half of the boxes
+        // centre on. Found by sampling the slab and keeping the ones with density.
+        std::vector<float3> probe(200000);
+        for (float3& p : probe) {
+            p = make_float3(rng.range(-20000.0f, 20000.0f),
+                            rng.range(c.cvBase_0, top),
+                            rng.range(-20000.0f, 20000.0f));
+        }
+        const std::vector<float> probeD = densities(c, probe);
+        std::vector<float3> cloud;
+        for (size_t i = 0; i < probe.size(); ++i) if (probeD[i] > 0.0f) cloud.push_back(probe[i]);
+
+        std::vector<float3> lo, hi, pts;
+        const int nBoxes = 3000;
+        for (int b = 0; b < nBoxes; ++b) {
+            const float ex = extents[b % 5];
+            const float ey = (b / 5) % 3 == 0 ? ex : ((b / 5) % 3 == 1 ? ex * 0.25f : top - c.cvBase_0);
+
+            float3 centre;
+            if (b % 2 == 1 && !cloud.empty()) {
+                centre = cloud[static_cast<size_t>(rng.next() * cloud.size()) % cloud.size()];
+            } else {
+                centre = make_float3(rng.range(-20000.0f, 20000.0f),
+                                     rng.range(c.cvBase_0 - 200.0f, top + 200.0f),
+                                     rng.range(-20000.0f, 20000.0f));
+            }
+            const float3 l = make_float3(centre.x - ex * rng.range(0.0f, 1.0f),
+                                         centre.y - ey * rng.range(0.0f, 1.0f),
+                                         centre.z - ex * rng.range(0.0f, 1.0f));
+            const float3 h = make_float3(l.x + ex, l.y + ey, l.z + ex);
+            lo.push_back(l);
+            hi.push_back(h);
+
+            // The corners, the centre, and the rest at random inside.
+            for (int q = 0; q < perBox; ++q) {
+                float3 p;
+                if (q < 8) {
+                    p = make_float3((q & 1) ? h.x : l.x, (q & 2) ? h.y : l.y, (q & 4) ? h.z : l.z);
+                } else if (q == 8) {
+                    p = make_float3((l.x + h.x) * 0.5f, (l.y + h.y) * 0.5f, (l.z + h.z) * 0.5f);
+                } else {
+                    p = make_float3(rng.range(l.x, h.x), rng.range(l.y, h.y), rng.range(l.z, h.z));
+                }
+                pts.push_back(p);
+            }
+        }
+
+        const std::vector<float> bnd = bounds(c, lo, hi);
+        const std::vector<float> den = densities(c, pts);
+
+        int zeroBoxes = 0, violations = 0;
+        double worst = 0.0;
+        for (int b = 0; b < nBoxes; ++b) {
+            if (bnd[b] <= 0.0f) ++zeroBoxes;
+            for (int q = 0; q < perBox; ++q) {
+                const float d = den[static_cast<size_t>(b) * perBox + q];
+                if (d > bnd[b]) ++violations;
+                if (d > 0.0f) {
+                    const double r = bnd[b] > 0.0f ? d / static_cast<double>(bnd[b]) : 1e30;
+                    worst = std::max(worst, r);
+                }
+            }
+        }
+
+        std::printf("  %-26s %7d %8.1f%% %11d %12.4f\n", k.name, nBoxes,
+                    100.0 * zeroBoxes / nBoxes, violations, worst);
+
+        if (violations > 0) {
+            std::printf("    FAIL: %d samples exceed their box's bound -- the procedural\n", violations);
+            std::printf("          majorant is BELOW the field, and delta tracking is biased\n");
+            ++failures;
+        }
+        if (cloud.size() < 1000) {
+            std::printf("    FAIL: only %zu cloud points found -- the boxes centred on cloud\n", cloud.size());
+            std::printf("          test nothing, and the field is suspiciously empty\n");
+            ++failures;
+        }
+    }
+
+    // THE BOUND MUST ALSO BE USEFUL, or the grid is pure cost. Most random boxes in a
+    // fair-weather field are clear air, and a bound that never says zero skips none of it.
+    {
+        const ConvectionInput_0 c = defaults(0.0f);
+        HostRng rng(7);
+        std::vector<float3> lo, hi;
+        for (int b = 0; b < 4000; ++b) {
+            const float3 l = make_float3(rng.range(-20000.0f, 20000.0f),
+                                         rng.range(c.cvBase_0, c.cvBase_0 + c.cvDepth_0),
+                                         rng.range(-20000.0f, 20000.0f));
+            lo.push_back(l);
+            hi.push_back(make_float3(l.x + 450.0f, l.y + 360.0f, l.z + 450.0f));
+        }
+        const std::vector<float> bnd = bounds(c, lo, hi);
+        int zero = 0;
+        for (float v : bnd) if (v <= 0.0f) ++zero;
+
+        // AGAINST THE FRACTION THAT IS ACTUALLY EMPTY, which is the ceiling a bound can
+        // reach: sample each box and count the ones where no sample found cloud.
+        std::vector<float3> inside;
+        const int per = 64;
+        for (size_t b = 0; b < lo.size(); ++b)
+            for (int q = 0; q < per; ++q)
+                inside.push_back(make_float3(rng.range(lo[b].x, hi[b].x), rng.range(lo[b].y, hi[b].y),
+                                             rng.range(lo[b].z, hi[b].z)));
+        const std::vector<float> den = densities(c, inside);
+        int empty = 0;
+        for (size_t b = 0; b < lo.size(); ++b) {
+            bool any = false;
+            for (int q = 0; q < per; ++q) any = any || den[b * per + q] > 0.0f;
+            if (!any) ++empty;
+        }
+        std::printf("\n  shipping-sized boxes (450 x 360 x 450 m): proved empty %.1f%%, "
+                    "found empty by sampling %.1f%%\n",
+                    100.0 * zero / bnd.size(), 100.0 * empty / bnd.size());
+        if (zero == 0) {
+            std::printf("    FAIL: the bound never says zero -- the grid skips nothing\n");
+            ++failures;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 2. The base is flat, and the lid holds
+    // -----------------------------------------------------------------------
+    std::printf("\n2. The base and the lid\n\n");
+    {
+        const ConvectionInput_0 c = defaults(0.0f);
+        const int side = 300;
+        std::vector<float3> below, justAbove, higher, overLid;
+        for (int j = 0; j < side; ++j) {
+            for (int i = 0; i < side; ++i) {
+                const float x = -15000.0f + 30000.0f * (i + 0.5f) / side;
+                const float z = -15000.0f + 30000.0f * (j + 0.5f) / side;
+                below.push_back(make_float3(x, c.cvBase_0 - 0.5f, z));
+                justAbove.push_back(make_float3(x, c.cvBase_0 + 0.5f, z));
+                higher.push_back(make_float3(x, c.cvBase_0 + 60.0f, z));
+                overLid.push_back(make_float3(x, c.cvBase_0 + c.cvDepth_0 + c.cvBillow_0 + 1.0f, z));
+            }
+        }
+        const std::vector<float> dBelow = densities(c, below);
+        const std::vector<float> dJust  = densities(c, justAbove);
+        const std::vector<float> dHigh  = densities(c, higher);
+        const std::vector<float> dOver  = densities(c, overLid);
+
+        int belowCount = 0, overCount = 0, cloudy = 0, reachesBase = 0;
+        for (size_t i = 0; i < dBelow.size(); ++i) {
+            if (dBelow[i] > 0.0f) ++belowCount;
+            if (dOver[i]  > 0.0f) ++overCount;
+            if (dHigh[i]  > 0.0f) {
+                ++cloudy;
+                if (dJust[i] > 0.0f) ++reachesBase;
+            }
+        }
+        const double flat = cloudy ? static_cast<double>(reachesBase) / cloudy : 0.0;
+        std::printf("  columns with cloud 60 m up: %d; of those, cloud 0.5 m up: %.1f%%\n",
+                    cloudy, 100.0 * flat);
+        std::printf("  columns with cloud below the base: %d; above the lid: %d\n",
+                    belowCount, overCount);
+
+        if (belowCount > 0 || overCount > 0) {
+            std::printf("    FAIL: cloud outside [base, top]\n");
+            ++failures;
+        }
+        // THE BASE IS THE CONDENSATION LEVEL, so a column that is cloud a little way up
+        // is cloud all the way down to it. Not quite all: a billow biting into a thin
+        // column near its footprint's edge can open it from below.
+        if (cloudy < 1000 || flat < 0.9) {
+            std::printf("    FAIL: the base is not flat -- cloud stops short of the\n");
+            std::printf("          condensation level in %.1f%% of cloudy columns\n",
+                        100.0 * (1.0 - flat));
+            ++failures;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 3. Polarity: closed cells rise at the centres, open cells at the rims
+    // -----------------------------------------------------------------------
+    std::printf("\n3. Polarity\n\n");
+    {
+        // The cells in a patch, read back from the kernel: centre and vigour.
+        const int n = 40;
+        std::vector<int2> slots;
+        for (int j = 0; j < n; ++j) for (int i = 0; i < n; ++i) slots.push_back(make_int2(i - 20, j - 20));
+
+        const ConvectionInput_0 base = defaults(0.0f);
+        Device<int2>   dSlots(slots.size());
+        Device<float3> dCells(slots.size());
+        dSlots.put(slots);
+        convCells<<<blocks(slots.size()), 64>>>(base, dSlots.ro(), dCells.rw(), static_cast<int>(slots.size()));
+        const std::vector<float3> cells = dCells.get();
+
+        // Centres of vigorous cells, and midpoints between vigorous neighbours along x.
+        //
+        // WELL-SEPARATED PAIRS ONLY. Two jittered neighbours can sit 0.3 slots apart,
+        // and then each one's centre IS near the rim between them -- the geometry, not
+        // the field, puts rising air there. The claim is about a cell's middle against
+        // its edge, so the pairs are ones where those are different places.
+        std::vector<float2> centres, midpoints;
+        for (int j = 0; j < n; ++j) {
+            for (int i = 0; i + 1 < n; ++i) {
+                const float3 a = cells[j * n + i];
+                const float3 b = cells[j * n + i + 1];
+                if (a.z < 0.3f || b.z < 0.3f) continue;
+                const float sep = std::sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y));
+                if (sep < 0.9f) continue;
+                centres.push_back(make_float2(a.x * base.cvSpacing_0, a.y * base.cvSpacing_0));
+                midpoints.push_back(make_float2((a.x + b.x) * 0.5f * base.cvSpacing_0,
+                                                (a.y + b.y) * 0.5f * base.cvSpacing_0));
+            }
+        }
+
+        auto mean = [](const std::vector<float>& v) {
+            double s = 0.0; for (float x : v) s += x; return v.empty() ? 0.0 : s / v.size();
+        };
+
+        const double openC   = mean(updrafts(defaults(0.0f), centres, false));
+        const double openM   = mean(updrafts(defaults(0.0f), midpoints, false));
+        const double closedC = mean(updrafts(defaults(1.0f), centres, false));
+        const double closedM = mean(updrafts(defaults(1.0f), midpoints, false));
+
+        std::printf("  %zu vigorous neighbour pairs\n", centres.size());
+        std::printf("  %-10s %12s %12s\n", "", "at centres", "on the rims");
+        std::printf("  %-10s %12.3f %12.3f\n", "open",   openC,   openM);
+        std::printf("  %-10s %12.3f %12.3f\n", "closed", closedC, closedM);
+
+        // THE OPEN FIELD'S UPPER PERCENTILES, which is where kConvOpenNorm comes from: a
+        // vigorous rim should sit near one, not far past it (clamped flat) and not far
+        // below it (so the whole field is weak against the moisture threshold).
+        {
+            HostRng r3(3);
+            std::vector<float2> anywhere(200000);
+            for (float2& p : anywhere) p = make_float2(r3.range(-40000.0f, 40000.0f), r3.range(-40000.0f, 40000.0f));
+            std::vector<float> v = updrafts(defaults(0.0f), anywhere, false);
+            std::sort(v.begin(), v.end());
+            int clamped = 0; for (float x : v) if (x >= 1.0f) ++clamped;
+            std::printf("  open field: p50 %.3f, p90 %.3f, p99 %.3f, at the clamp %.2f%%\n",
+                        v[v.size() / 2], v[v.size() * 9 / 10], v[v.size() * 99 / 100],
+                        100.0 * clamped / v.size());
+        }
+
+        if (centres.size() < 50) {
+            std::printf("    FAIL: too few vigorous pairs to say anything\n");
+            ++failures;
+        }
+        if (!(openM > 2.0 * openC)) {
+            std::printf("    FAIL: open cells do not rise at the rims\n");
+            ++failures;
+        }
+        if (!(closedC > 2.0 * closedM)) {
+            std::printf("    FAIL: closed cells do not rise at the centres\n");
+            ++failures;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 4. The 3x3 neighbourhood is the whole field
+    // -----------------------------------------------------------------------
+    std::printf("\n4. The 3x3 window against a 5x5 one\n\n");
+    {
+        HostRng rng(99);
+        std::vector<float2> pts(100000);
+        for (float2& p : pts) p = make_float2(rng.range(-50000.0f, 50000.0f), rng.range(-50000.0f, 50000.0f));
+
+        for (float pol : { 0.0f, 0.5f, 1.0f }) {
+            const ConvectionInput_0 c = defaults(pol);
+            const std::vector<float> a = updrafts(c, pts, false);
+            const std::vector<float> b = updrafts(c, pts, true);
+            int differ = 0;
+            for (size_t i = 0; i < a.size(); ++i) if (a[i] != b[i]) ++differ;
+            std::printf("  polarity %.1f: %d of %zu points differ\n", pol, differ, a.size());
+            if (differ > 0) {
+                std::printf("    FAIL: a cell two slots away reaches the point -- the 3x3\n");
+                std::printf("          window is not the whole field, and the bound's slot\n");
+                std::printf("          range is not all the cells that can reach a box\n");
+                ++failures;
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 5. More moisture, more cloud
+    // -----------------------------------------------------------------------
+    std::printf("\n5. Coverage against cloud fraction, 100 m above the base\n\n");
+    {
+        HostRng rng(5);
+        std::vector<float3> pts(200000);
+        double previous = -1.0;
+        for (float cover : { 0.2f, 0.4f, 0.6f, 0.8f, 1.0f }) {
+            ConvectionInput_0 c = defaults(0.0f);
+            c.cvCoverage_0 = cover;
+            HostRng r2(5);
+            for (float3& p : pts) p = make_float3(r2.range(-30000.0f, 30000.0f), c.cvBase_0 + 100.0f,
+                                                  r2.range(-30000.0f, 30000.0f));
+            const std::vector<float> d = densities(c, pts);
+            int cloudy = 0;
+            for (float v : d) if (v > 0.0f) ++cloudy;
+            const double frac = static_cast<double>(cloudy) / d.size();
+            std::printf("  coverage %.1f: %5.1f%% of the sky\n", cover, 100.0 * frac);
+            if (!(frac > previous)) {
+                std::printf("    FAIL: more moisture did not make more cloud\n");
+                ++failures;
+            }
+            previous = frac;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 6. The billows are centred
+    // -----------------------------------------------------------------------
+    std::printf("\n6. The billow's distribution\n\n");
+    {
+        const ConvectionInput_0 c = defaults(0.0f);
+        HostRng rng(11);
+        std::vector<float3> pts(400000);
+        for (float3& p : pts) p = make_float3(rng.range(-5000.0f, 5000.0f), rng.range(0.0f, 3000.0f),
+                                              rng.range(-5000.0f, 5000.0f));
+        Device<float3> in(pts.size());
+        Device<float>  out(pts.size());
+        in.put(pts);
+        convBillowAt<<<blocks(pts.size()), 64>>>(c, in.ro(), out.rw(), static_cast<int>(pts.size()));
+        const std::vector<float> v = out.get();
+
+        double s = 0.0, s2 = 0.0; int atTop = 0, atBottom = 0;
+        for (float x : v) { s += x; s2 += x * x; if (x >= 1.0f) ++atTop; if (x <= -1.0f) ++atBottom; }
+        const double m  = s / v.size();
+        const double sd = std::sqrt(std::max(0.0, s2 / v.size() - m * m));
+        std::printf("  mean %+.3f, std %.3f, clamped at +1: %.1f%%, at -1: %.1f%%\n",
+                    m, sd, 100.0 * atTop / v.size(), 100.0 * atBottom / v.size());
+        if (std::fabs(m) > 0.25) {
+            std::printf("    FAIL: the billows are off-centre -- they %s the cloud on average\n",
+                        m > 0 ? "inflate" : "shrink");
+            ++failures;
+        }
+    }
+
+    const cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        std::printf("\nCUDA error: %s\n", cudaGetErrorString(err));
+        ++failures;
+    }
+
+    std::printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "PASSED", failures, failures == 1 ? "" : "s");
+    return failures ? 1 : 0;
+}

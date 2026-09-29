@@ -31,6 +31,11 @@ add_executable(plugin_tests
     # than an error, and was found by looking at a picture.
     unit/TestIceField.cpp
 
+    # The convection layer's host half. The condensation level is the flat base, and
+    # it is checked three independent ways -- a tabulated dew point, the 125 m/K rule,
+    # and its 1/g scaling -- because a wrong one puts the cloud at a plausible height.
+    unit/TestConvection.cpp
+
     # Ordered contours out of a matte: the front half of pareidolia.
     unit/TestContour.cpp
 

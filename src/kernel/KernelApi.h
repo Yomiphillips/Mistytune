@@ -88,6 +88,8 @@ inline void deriveRenderInputs(RenderRequest& req) {
 
     cloud::cellDriftAt(req.field.ice, req.field.timeSeconds,
                        req.cellDriftX, req.cellDriftZ);
+
+    cloud::deriveConvection(req.field, req.convection);
 }
 
 // Was this binary built with a CUDA toolkit, and is a usable device present?

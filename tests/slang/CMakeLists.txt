@@ -22,6 +22,7 @@ set(SLANG_RNG        "${SLANG_DIR}/Rng.slang")
 set(SLANG_PHASE_LIB  "${SLANG_DIR}/PhaseLib.slang")
 set(SLANG_XPORT_LIB  "${SLANG_DIR}/TransportLib.slang")
 set(SLANG_GEN_LIB    "${SLANG_DIR}/GeneratorLib.slang")
+set(SLANG_CONV_LIB   "${SLANG_DIR}/ConvectionLib.slang")
 set(SLANG_SKY_LIB    "${SLANG_DIR}/SkyLib.slang")
 set(SLANG_BOUNCE_LIB "${SLANG_DIR}/BounceLib.slang")
 
@@ -132,7 +133,7 @@ add_test(NAME slang.phase COMMAND slang_phase_parity)
 slang_generate("${SLANG_DIR}/Transport.slang"
                "${GENERATED_DIR}/Transport.cu"
                "../prelude/slang-cuda-prelude.h"
-               ${SLANG_RNG} ${SLANG_XPORT_LIB} ${SLANG_GEN_LIB})
+               ${SLANG_RNG} ${SLANG_XPORT_LIB} ${SLANG_GEN_LIB} ${SLANG_CONV_LIB})
 
 add_executable(slang_transport TransportMain.cu "${GENERATED_DIR}/Transport.cu")
 
@@ -184,6 +185,35 @@ target_compile_options(slang_generator PRIVATE
 add_test(NAME slang.generator COMMAND slang_generator)
 
 # ---------------------------------------------------------------------------
+# The convection generator: its procedural bound, its flat base, its polarity
+# ---------------------------------------------------------------------------
+#
+# THE BOUND IS WHAT THIS IS FOR. convectionBound() feeds the procedural majorant grid,
+# and a bound below the density renders a cloud that is quietly too hard-edged rather
+# than slow or noisy. The chain of inequalities in ConvectionLib.slang is the proof;
+# this is the sweep that catches a slip in it.
+slang_generate("${SLANG_DIR}/Convection.slang"
+               "${GENERATED_DIR}/Convection.cu"
+               "../prelude/slang-cuda-prelude.h"
+               ${SLANG_GEN_LIB} ${SLANG_CONV_LIB})
+
+add_executable(slang_convection ConvectionMain.cu "${GENERATED_DIR}/Convection.cu")
+
+set_source_files_properties("${GENERATED_DIR}/Convection.cu" PROPERTIES HEADER_FILE_ONLY ON)
+
+target_include_directories(slang_convection PRIVATE "${GENERATED_DIR}")
+
+set_target_properties(slang_convection PROPERTIES
+    CUDA_ARCHITECTURES "${PLUGIN_CUDA_ARCHITECTURES}"
+    LINKER_LANGUAGE CUDA)
+
+target_compile_options(slang_convection PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:-diag-suppress=1444>
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/wd4996>)
+
+add_test(NAME slang.convection COMMAND slang_convection)
+
+# ---------------------------------------------------------------------------
 # The bounce loop: a conservative medium in a uniform source must return the source
 # ---------------------------------------------------------------------------
 #
@@ -199,7 +229,7 @@ add_test(NAME slang.generator COMMAND slang_generator)
 slang_generate("${SLANG_DIR}/Bounce.slang"
                "${GENERATED_DIR}/Bounce.cu"
                "../prelude/slang-cuda-prelude.h"
-               ${SLANG_RNG} ${SLANG_PHASE_LIB} ${SLANG_XPORT_LIB} ${SLANG_GEN_LIB}
+               ${SLANG_RNG} ${SLANG_PHASE_LIB} ${SLANG_XPORT_LIB} ${SLANG_GEN_LIB} ${SLANG_CONV_LIB}
                ${SLANG_BOUNCE_LIB} ${SLANG_SKY_LIB})
 
 add_executable(slang_bounce BounceMain.cu "${GENERATED_DIR}/Bounce.cu")
@@ -254,7 +284,7 @@ add_test(NAME slang.bounce COMMAND slang_bounce)
 slang_generate_cpp("${SLANG_DIR}/CpuParity.slang"
                    "${GENERATED_DIR}/CpuParity.cpp"
                    "../prelude/slang-cpp-prelude.h"
-                   ${SLANG_RNG} ${SLANG_XPORT_LIB} ${SLANG_GEN_LIB})
+                   ${SLANG_RNG} ${SLANG_XPORT_LIB} ${SLANG_GEN_LIB} ${SLANG_CONV_LIB})
 
 if(EXISTS "${GENERATED_DIR}/CpuParity.cpp")
     add_executable(slang_cpu_parity CpuParityMain.cu
@@ -295,7 +325,7 @@ add_test(NAME slang.regenerates
         -DFP_MODE=${PLUGIN_SLANG_FP_MODE}
         -DPRELUDE=../prelude/slang-cuda-prelude.h
         -DREWRITE=${CMAKE_SOURCE_DIR}/cmake/SlangRewriteInclude.cmake
-        -DSOURCES=MathParity|Sky|Phase|Transport|Generator|Bounce|Render
+        -DSOURCES=MathParity|Sky|Phase|Transport|Generator|Convection|Bounce|Render
         -DCPP_SOURCES=CpuParity|RenderCpu
         -DCPP_PRELUDE=../prelude/slang-cpp-prelude.h
         -P ${CMAKE_SOURCE_DIR}/cmake/SlangCheckRegenerated.cmake)
@@ -317,5 +347,5 @@ add_test(NAME slang.regenerates
 add_test(NAME slang.fieldNames
     COMMAND ${CMAKE_COMMAND}
         -DGENERATED_DIR=${GENERATED_DIR}
-        -DFILES=MathParity.cu|Sky.cu|Phase.cu|Transport.cu|Generator.cu|Bounce.cu|Render.cu|CpuParity.cpp|RenderCpu.cpp
+        -DFILES=MathParity.cu|Sky.cu|Phase.cu|Transport.cu|Generator.cu|Convection.cu|Bounce.cu|Render.cu|CpuParity.cpp|RenderCpu.cpp
         -P ${CMAKE_SOURCE_DIR}/cmake/SlangCheckFieldNames.cmake)
