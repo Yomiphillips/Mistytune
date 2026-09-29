@@ -163,6 +163,15 @@ public struct Scene
 
     int maxBounces;         // scattering events allowed before the path is abandoned
     int rrStartBounce;      // Russian roulette begins at this event. 4 in the prototype
+
+    // THE SUN ALONG THE CAMERA RAY, AS A SUM RATHER THAN A COIN TOSS. Zero is plain
+    // delta tracking: one next event, at the first real collision, if there is one.
+    // Above zero, cameraSegmentSun() replaces that single estimate with a continuous
+    // one over tentative collisions along the camera segment, drawn at this multiple
+    // of the majorant -- 1 at the least, whatever is asked, because below it the
+    // estimate is biased. Same expectation, and slang.bounce holds it to the same
+    // closed form. See cameraSegmentSun for why, and PROGRESS.md for what it buys.
+    float neeTentativeScale;
 };
 
 // A STRUCTURAL CEILING, SEPARATE FROM THE PARAMETER. A GPU loop wants a bound the
@@ -181,6 +190,189 @@ public struct TraceResult
     int    capped;          // nonzero: the path was still alive when the budget ran out
     int    trackingSteps;           // tracking iterations, summed over free flight and shadows
 };
+
+// The sun's irradiance arriving at a point in the medium, before the cloud's own
+// shadow. ONE HOME FOR THE NUMBER, shared by both next-event estimators below.
+//
+// MODE 0 IS UNTOUCHED AND MUST STAY SO. slang.bounce's furnace and its analytic
+// next-event reference both run in a uniform environment where `sunIrradiance` is
+// the whole answer by construction; multiplying an atmospheric term into that case
+// would change what those tests measure.
+//
+// MODE 1 IGNORES `s.sunIrradiance` ENTIRELY AND TAKES THE NUMBER FROM THE SKY, so
+// the sun's brightness has exactly one home. A host that computed it separately
+// would be free to disagree with the sky behind the cloud, and the symptom of that is
+// a layer that sits at the wrong exposure for a reason no parameter explains.
+//
+// THE SUN IS ATTENUATED BY THE AIR BETWEEN THE CRYSTAL AND SPACE, not only by the
+// cloud. Leaving that out lights a backlit cirrus with a white sun while the sky
+// behind it goes orange.
+float3 sunIrradianceAt(Scene s, float3 p)
+{
+    if (s.environment.envMode == 1)
+    {
+        return sunIrradianceTop(s.environment.sky) * sunTransmittanceAt(s.environment.sky, p);
+    }
+    return s.sunIrradiance;
+}
+
+// ---------------------------------------------------------------------------
+// The sun along the camera ray, as a sum rather than a coin toss
+// ---------------------------------------------------------------------------
+//
+// ===========================================================================
+// WHY THIS EXISTS: A 4 spp CIRRUS IS SPARSE BRIGHT DOTS, AND THE DOTS ARE THE
+// ESTIMATOR.
+//
+// Under delta tracking the sun reaches a camera ray only if that ray has a real
+// collision -- a yes-or-no with probability 1 - T, which in thin cirrus is small. So
+// most rays bring back the sky and a few bring back the forward-peaked sun, and the
+// pixel is whichever happened. PROGRESS.md (2026-09-29) measured that this is what
+// the denoiser mistakes for detail, and that blue-noise sampling cannot reach it:
+// the yes-or-no depends on ten or more draws at once.
+//
+// THIS REPLACES THE YES-OR-NO WITH A SUM. Tentative collisions x_k are drawn along
+// the whole camera segment as a Poisson process of rate `mu` (a multiple of the
+// majorant), and each contributes
+//
+//     (sigma(x_k) / mu) * T_k * albedo * phase * shadow(x_k) * sun(x_k)
+//
+// where T_k is the RATIO-TRACKED transmittance over the points before it. By the
+// Mecke formula -- the points before x_k are themselves a Poisson process of rate mu,
+// independent of x_k -- the expectation of that sum is
+//
+//     integral of mu * (sigma/mu) * exp(-integral of sigma) * f  dt
+//   = integral of sigma(t) T(t) f(t) dt
+//
+// which is exactly what delta tracking's one next event estimates. Unbiased, for ANY
+// rate at or above the density; slang.bounce holds it to the same closed form and the
+// same majorant sweep as the estimator it replaces.
+//
+// WHAT CHANGES IS THE VARIANCE. Every ray that passes through ice now brings back
+// some sun in proportion to how much ice it passed, instead of all or nothing. A
+// higher rate samples the density more finely -- more points, smaller weights.
+//
+// ONE SHADOW RAY, NOT ONE PER POINT, AND THAT WAS MEASURED BEFORE IT WAS WRITTEN.
+// The literal sum casts a shadow ray from every point that lands in ice, and cirrus
+// is ice almost everywhere inside its slab: 6x the frame time at scale 1, 15x at 4.
+// But the weights b_k = T_k * sigma_k / mu TELESCOPE -- T_{k+1} = T_k (1 - sigma_k/mu),
+// so b_k = T_k - T_{k+1} and their sum B is the ratio-tracked estimate of 1 - T, the
+// probability that the ray scatters at all. So the sum is resampled: one point J is
+// kept with probability b_J / B by a streaming reservoir, and the estimate is
+//
+//     B * albedo * phase * sun(x_J) * shadow(x_J)
+//
+// whose expectation over J is the sum above -- unbiased, with one shadow ray. It
+// reads as what it is: HOW LIKELY the ray is to scatter, estimated continuously, times
+// the sun seen from WHERE it would scatter. Delta tracking estimates the first factor
+// with a coin toss, and that coin toss was the dots.
+//
+// THE SELECTION WEIGHTS CARRY NO SUN, deliberately, so the number of draws depends
+// only on the field and the ray, never on the sun's brightness -- see the note on
+// shadow rays in trace(). The sun's slow change along the segment rides in sun(x_J).
+//
+// ONLY THE CAMERA SEGMENT, AND ONLY THE SUN. The path still scatters where delta
+// tracking says it does and carries on from there; its later next events and its
+// escapes are untouched. Those are the rare, dim part of a thin cirrus -- the dots
+// were the first event.
+//
+// POINTS IN EMPTY AIR COST NOTHING: a zero weight draws nothing and leaves T alone.
+// ===========================================================================
+float3 cameraSegmentSun(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
+                        StructuredBuffer<float2> drift,
+                        inout Rng rng, float3 ro, float3 rd, inout int steps)
+{
+    const float3 none = float3(0.0f, 0.0f, 0.0f);
+
+    float t0, t1;
+    if (!slabRange(s.medium, ro, rd, t0, t1)) return none;
+    t0 = max(t0, 0.0f);
+
+    // THE GLOBAL MAJORANT, EVEN WITH THE GRID ON. Any rate at or above the density is
+    // unbiased here, so the grid would only be a cost optimisation -- and SlangBridge.h
+    // records that it is not one for cirrus.
+    //
+    // NEVER BELOW THE MAJORANT. Under it, sigma/rate can exceed 1, the clamp on
+    // (1 - w) below turns a negative ratio into zero, and the estimate goes dark with
+    // nothing to say so. A scale of 0.5 was measured before this clamp existed; it
+    // looked plausible, which is the problem.
+    float rate = s.medium.majorant * max(s.neeTentativeScale, 1.0f);
+    if (!(rate > 0.0f)) return none;
+
+    // The scattering angle is fixed along a straight segment, so the phase is too.
+    // dot(rd, sunDir) for the same reason as in trace(), which reads like a sign
+    // error and is not.
+    float ph0 = phaseAt(ph, dot(rd, s.sunDir));
+
+    float  tr      = 1.0f;
+    float  t       = t0;
+    float  total   = 0.0f;                       // B, the sum of the weights so far
+    float  kept    = 0.0f;                       // b_J
+    float3 keptAt  = float3(0.0f, 0.0f, 0.0f);   // x_J
+
+    // kTrackCap FOR THE SAME REASON AS EVERY OTHER WALK: a bound the GPU can see.
+    // Hitting it truncates the sum, which is biased dark, so it must stay unreachable
+    // -- at the shipping majorant a camera ray takes about five steps per unit scale.
+    for (int i = 0; i < kTrackCap; ++i)
+    {
+        ++steps;
+
+        // THREE DRAWS PER STEP, EVERY STEP, whether or not they are used. Step k's
+        // point, keep test and roulette then come from the same numbers on every
+        // frame, so as the cloud drifts the points stay where they were and only the
+        // density under them changes -- which is what keeps this estimate's noise
+        // still in screen space. Drawing only when needed would shift every later
+        // draw whenever one point crossed the edge of a streak.
+        float uStep = randFloat(rng);
+        float uKeep = randFloat(rng);
+        float uLive = randFloat(rng);
+
+        t -= log(max(1.0f - uStep, 1e-7f)) / rate;
+        if (t >= t1) break;
+
+        float3 p     = ro + rd * t;
+        float  sigma = densityAt(s.medium, drift, p);
+        if (sigma <= 0.0f) continue;
+
+        float w = sigma / rate;
+
+        // T_k is the product over the points BEFORE this one, so it is used first and
+        // updated after. The other order drops this point's own extinction into its
+        // own weight and is biased dark by exactly that.
+        float b = tr * w;
+        if (b > 0.0f)
+        {
+            // THE RESERVOIR: after k candidates, each has been kept with probability
+            // b_i / B_k, which is what makes B * f(x_J) unbiased for the sum.
+            total += b;
+            if (uKeep * total < b)
+            {
+                kept   = b;
+                keptAt = p;
+            }
+        }
+
+        tr *= max(0.0f, 1.0f - w);
+
+        // Russian roulette once the remaining light is negligible, as transmittance()
+        // does. Unbiased: the survivors are doubled, which the reservoir sees as
+        // doubled weights from here on.
+        if (tr < 0.01f)
+        {
+            if (uLive > 0.5f) break;
+            tr *= 2.0f;
+        }
+    }
+
+    if (!(total > 0.0f) || !(kept > 0.0f)) return none;
+
+    float shadow = transmittance(s.medium, s.grid, bounds, drift, rng,
+                                 keptAt + s.sunDir * s.shadowOffset, s.sunDir, steps);
+
+    // b_J * (B / b_J) = B: the kept point's own weight cancels, which is why `kept` is
+    // only checked and never multiplied.
+    return total * s.albedo * ph0 * shadow * sunIrradianceAt(s, keptAt);
+}
 
 // ---------------------------------------------------------------------------
 // The path
@@ -201,6 +393,25 @@ public TraceResult trace(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
     float3 throughput = float3(1.0f, 1.0f, 1.0f);
 
     int budget = min(s.maxBounces, kBounceCeiling);
+
+    // THE CAMERA SEGMENT'S SUN, AS A SUM, when asked for -- and then the first
+    // collision's own next event below is skipped, because this replaces it. Taken
+    // before the free flight and whether or not the path ever scatters: it is an
+    // estimate of the whole segment. Only while the budget allows a first event at
+    // all, which is when delta tracking would have made one.
+    //
+    // ON ITS OWN STREAM, split from the path's without advancing it. Its draw count
+    // depends on the medium, and on the path's own stream that would hand every later
+    // event fresh numbers whenever the cloud moved -- see splitRng. The path below
+    // therefore draws exactly what it drew before this estimator existed, less the
+    // first event's shadow ray.
+    bool sunAlongCamera = s.neeTentativeScale > 0.0f && budget > 0;
+    if (sunAlongCamera)
+    {
+        Rng segmentRng = splitRng(rng, 0x5e6u);
+        r.pathRadiance += throughput * cameraSegmentSun(s, ph, bounds, drift, segmentRng,
+                                                        ro, rd, r.trackingSteps);
+    }
 
     for (int bounce = 0; bounce < kBounceCeiling; ++bounce)
     {
@@ -243,38 +454,25 @@ public TraceResult trace(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
         // decorrelate -- and PLAN.md's determinism tripwire is that the same inputs
         // give the same bits. It is a real cost and the right place to pay it is a
         // host-side decision not to trace a black sun at all.
-        float  shadow = transmittance(s.medium, s.grid, bounds, drift, rng,
-                                      p + s.sunDir * s.shadowOffset, s.sunDir, r.trackingSteps);
-        if (shadow > 0.0f)
+        //
+        // SKIPPED AT THE FIRST EVENT WHEN cameraSegmentSun HAS ALREADY COUNTED IT. That
+        // is a Scene setting, fixed for the frame, so the draw count still does not
+        // depend on the sun.
+        if (!(bounce == 0 && sunAlongCamera))
         {
-            // `rd` is still the INCOMING direction. The scattering angle is between the
-            // light's direction of travel (-sunDir) and the camera's (-rd), so its
-            // cosine is dot(rd, sunDir) -- which reads like a sign error and is not.
-            float ph0 = phaseAt(ph, dot(rd, s.sunDir));
-
-            // THE SUN IS ATTENUATED BY THE AIR BETWEEN THE CRYSTAL AND SPACE, not
-            // only by the cloud. `shadow` is the cloud's own transmittance along the
-            // shadow ray; this is the atmosphere's, and leaving it out lights a
-            // backlit cirrus with a white sun while the sky behind it goes orange.
-            //
-            // MODE 0 IS UNTOUCHED AND MUST STAY SO. slang.bounce's furnace and its
-            // analytic next-event reference both run in a uniform environment where
-            // `sunIrradiance` is the whole answer by construction; multiplying an
-            // atmospheric term into that case would change what those tests measure.
-            //
-            // MODE 1 IGNORES `s.sunIrradiance` ENTIRELY AND TAKES THE NUMBER FROM THE
-            // SKY, so the sun's brightness has exactly one home. A host that computed
-            // it separately would be free to disagree with the sky behind the cloud,
-            // and the symptom of that is a layer that sits at the wrong exposure for
-            // a reason no parameter explains.
-            float3 sunE = s.sunIrradiance;
-            if (s.environment.envMode == 1)
+            float  shadow = transmittance(s.medium, s.grid, bounds, drift, rng,
+                                          p + s.sunDir * s.shadowOffset, s.sunDir, r.trackingSteps);
+            if (shadow > 0.0f)
             {
-                sunE = sunIrradianceTop(s.environment.sky)
-                     * sunTransmittanceAt(s.environment.sky, p);
-            }
+                // `rd` is still the INCOMING direction. The scattering angle is between the
+                // light's direction of travel (-sunDir) and the camera's (-rd), so its
+                // cosine is dot(rd, sunDir) -- which reads like a sign error and is not.
+                float ph0 = phaseAt(ph, dot(rd, s.sunDir));
 
-            r.pathRadiance += throughput * s.albedo * ph0 * shadow * sunE;
+                // `shadow` is the cloud's own transmittance along the shadow ray;
+                // sunIrradianceAt is the air's, and says why both are needed.
+                r.pathRadiance += throughput * s.albedo * ph0 * shadow * sunIrradianceAt(s, p);
+            }
         }
 
         // Scatter, and carry on. THIS LOOP IS THE MULTIPLE SCATTERING -- no

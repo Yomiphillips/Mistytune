@@ -85,6 +85,11 @@ void printUsage() {
         "  --gpu-band-rows <n>  render the GPU frame in bands of n rows (0 = one\n"
         "                   launch). Must not change the image.\n"
         "  --threads <n>    CPU worker threads (0 = choose). Must not change the image.\n"
+        "  --nee-scale <k>  the camera ray's sun: 0 = one next event at the first real\n"
+        "                   collision (delta tracking); k >= 1 = a continuous estimate\n"
+        "                   over tentative collisions drawn at k x the majorant\n"
+        "                   (default 1). Unbiased either way, so it changes noise,\n"
+        "                   flicker and cost -- never the converged image.\n"
         "  --resolve-check  render, then regenerate the image from the accumulated\n"
         "                   radiance with ZERO new samples, and require the result to\n"
         "                   be byte-identical. That is what FieldCache's ResolveOnly\n"
@@ -329,7 +334,9 @@ int main(int argc, char** argv) {
         else if (argIs(a, "--require-gpu"))          requireGpu = true;
         else if (argIs(a, "--gpu-band-rows") && hasNext) gpuBandRows = std::atoi(argv[++i]);
         else if (argIs(a, "--majorant") && hasNext)      req.quality.densityMajorant = static_cast<float>(std::atof(argv[++i]));
-        else if (argIs(a, "--sample-chunk") && hasNext)  sampleChunk = std::atoi(argv[++i]);        else if (argIs(a, "--window") && i + 4 < argc) {
+        else if (argIs(a, "--sample-chunk") && hasNext)  sampleChunk = std::atoi(argv[++i]);
+        else if (argIs(a, "--nee-scale") && hasNext)     req.neeTentativeScale = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--window") && i + 4 < argc) {
             windowX = std::atoi(argv[++i]);
             windowY = std::atoi(argv[++i]);
             windowW = std::atoi(argv[++i]);

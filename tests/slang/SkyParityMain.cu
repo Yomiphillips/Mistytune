@@ -86,8 +86,8 @@ int main() {
     cudaMemcpy(dLut, lut.data(), lut.size() * sizeof(float), cudaMemcpyHostToDevice);
 
     SkyInput_0 slangIn;
-    slangIn.transmittance_0.data  = dLut;
-    slangIn.transmittance_0.count = lut.size();
+    slangIn.transmittanceLut_0.data  = dLut;
+    slangIn.transmittanceLut_0.count = lut.size();
     slangIn.planetRadius_0     = field.physics.planetRadius;
     slangIn.scaleHeight_0      = field.physics.scaleHeight;
     slangIn.turbidity_0        = field.atmosphere.turbidity;

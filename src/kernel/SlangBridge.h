@@ -174,9 +174,9 @@ MT_RENDER void fillSlangScene(const RenderRequest& req, SceneT& s, PhaseT& ph) {
     // A NULL TABLE IS DESCRIBED AS EMPTY RATHER THAN AS A NULL WITH A COUNT, so the
     // kernel's one guard -- a count below the table's size -- catches it. A count set
     // beside a null pointer would sail past that check and index nothing.
-    s.environment_0.sky_0.transmittance_0.data =
+    s.environment_0.sky_0.transmittanceLut_0.data =
         const_cast<float*>(static_cast<const float*>(req.transmittanceBuffer));
-    s.environment_0.sky_0.transmittance_0.count =
+    s.environment_0.sky_0.transmittanceLut_0.count =
         req.transmittanceBuffer ? static_cast<size_t>(cloud::kTransmittanceFloats) : 0;
     s.environment_0.envMode_0                = 1;
 
@@ -210,6 +210,10 @@ MT_RENDER void fillSlangScene(const RenderRequest& req, SceneT& s, PhaseT& ph) {
 
     s.maxBounces_0    = req.quality.maxBounces;
     s.rrStartBounce_0 = kRussianRouletteStart;
+
+    // The camera segment's sun as a sum rather than a coin toss. See
+    // cameraSegmentSun in BounceLib.slang and RenderRequest::neeTentativeScale.
+    s.neeTentativeScale_0 = req.neeTentativeScale;
 
     // -----------------------------------------------------------------------
     // The phase function

@@ -73,4 +73,20 @@ public Rng makeRngForIndex(uint seed, int index)
     return makeRng((s >> 22u) ^ s ^ seed);
 }
 
+// A SECOND STREAM FOR THE SAME PATH, split off without advancing the first.
+//
+// FOR TEMPORAL COHERENCE, NOT FOR QUALITY. An estimator whose draw count depends on
+// the medium -- any walk that skips empty air -- shifts every draw after it when the
+// cloud moves a little between frames, so everything downstream gets fresh numbers
+// and noise that was stable in screen space starts to crawl. Giving that estimator
+// its own stream keeps the rest of the path on exactly the numbers it had before.
+// PROGRESS.md measured the difference on the camera-segment estimator.
+public Rng splitRng(Rng r, uint salt)
+{
+    uint s = r.state ^ (salt * 2654435761u);
+    s = s * 747796405u + 2891336453u;
+    s = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+    return makeRng((s >> 22u) ^ s);
+}
+
 #endif // MISTYTUNE_RNG_SLANG

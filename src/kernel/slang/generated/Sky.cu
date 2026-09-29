@@ -61,7 +61,7 @@ struct SkyInput_0
     float sunIntensity_0;
     float sunAngularRadius_0;
     float groundAlbedo_0;
-    StructuredBuffer<float> transmittance_0;
+    StructuredBuffer<float> transmittanceLut_0;
 };
 
 static __device__ float3  sunDirection_0(SkyInput_0 * p_0)
@@ -161,8 +161,8 @@ static __device__ float lutMuFor_0(float3  geocentric_0, float3  sun_0)
 
 static __device__ float3  sampleTransmittanceLut_0(SkyInput_0 * p_1, float altitude_1, float mu_0)
 {
-    StructuredBuffer<float> _S8 = p_1->transmittance_0;
-    if(uint(StructuredBuffer_getCount_0(p_1->transmittance_0)) < 49152U)
+    StructuredBuffer<float> _S8 = p_1->transmittanceLut_0;
+    if(uint(StructuredBuffer_getCount_0(p_1->transmittanceLut_0)) < 49152U)
     {
         return make_float3 (1.0f, 1.0f, 1.0f);
     }
@@ -405,9 +405,9 @@ static __device__ float3  skyRadiance_0(SkyInput_0 * p_3, float originAltitude_0
         float depthM_1 = depthM_0 + dM_0;
         float3  _S36 = sampleTransmittanceLut_0(p_3, hc_0, lutMuFor_0(make_float3 (rayDir_0.x * tMid_0, _S28 + _S29 * tMid_0, rayDir_0.z * tMid_0), _S25));
         float _S37 = betaMExt_0 * depthM_1;
-        float3  transmittance_1 = make_float3 ((F32_exp((- (betaR_0.x * depthR_1 + _S37)))), (F32_exp((- (betaR_0.y * depthR_1 + _S37)))), (F32_exp((- (betaR_0.z * depthR_1 + _S37))))) * _S36;
-        float3  _S38 = sumM_0 + transmittance_1 * make_float3 (dM_0);
-        sumR_0 = sumR_0 + transmittance_1 * make_float3 (dR_0);
+        float3  transmittance_0 = make_float3 ((F32_exp((- (betaR_0.x * depthR_1 + _S37)))), (F32_exp((- (betaR_0.y * depthR_1 + _S37)))), (F32_exp((- (betaR_0.z * depthR_1 + _S37))))) * _S36;
+        float3  _S38 = sumM_0 + transmittance_0 * make_float3 (dM_0);
+        sumR_0 = sumR_0 + transmittance_0 * make_float3 (dR_0);
         sumM_0 = _S38;
         depthR_0 = depthR_1;
         depthM_0 = depthM_1;

@@ -97,6 +97,16 @@
 //
 // STILL MINOR 5: no parameter or flag changed. Denoise and Denoise Amount moved from
 // the sampling hash to the resolve hash, which AE never sees.
+// BUILD 13 -- the sun along the camera ray is estimated continuously. Delta tracking
+// brought the sun back only for the few rays that happened to scatter, which is what
+// made a low-spp cirrus a field of bright dots and what the denoiser shimmered on.
+// Measured at 1 spp denoised: flicker down 42%, RMSE down 42%, 78% of the true fine
+// detail kept against 53%, for 2.2x the time per sample -- better than the old
+// estimator at 3 spp on every measure. It moves every noisy pixel, and the three
+// goldens were re-blessed after both estimators were shown to converge on the same
+// images. PROGRESS.md carries the numbers.
+//
+// STILL MINOR 5: no parameter or flag changed.
 #define PLUGIN_MAJOR 0
 #define PLUGIN_MINOR 5
-#define PLUGIN_BUILD 12
+#define PLUGIN_BUILD 13

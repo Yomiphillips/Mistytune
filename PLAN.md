@@ -121,6 +121,21 @@ Still open, and each needs an answer before the phase that consumes it:
   work — the majorant tightening, then the transmittance table — moved it; see
   PROGRESS.md for the A/B of each.
 
+  **BUILD 13 MADE A SAMPLE 2.2x DEARER AND WORTH MORE THAN THREE OF THE OLD ONES.**
+  The continuous camera-ray estimator (see *Denoiser flicker* below), measured back to
+  back on one binary by the same fit, at the CLI's default scene:
+
+  | | ns per pixel-sample | 1080p, 1 spp | 1080p, 4 spp | 960x540, 1 spp |
+  | --- | --- | --- | --- | --- |
+  | delta tracking (before) | 12.7 | 26 ms | 105 ms | 7 ms |
+  | continuous (build 13) | 27.6 | 57 ms | 229 ms | 15 ms |
+
+  With the transform and a CUDA denoise that is about **97 ms at 1080p, 1 spp** —
+  still interactive — and it is better on every measure than the old estimator's
+  3 spp. **The old estimator's 12.7 ns is itself below the 20.7 recorded above**, by
+  the same method with the same intercept. That gap is not explained, and the ratio is
+  the number to carry until it is.
+
 
 ## Where we are starting from
 
@@ -358,10 +373,17 @@ temporal. Judge it on a moving 48-frame render, never on a still.
 were built through the shipping kernel and swept from 0 to 16 draws, and the error
 stayed white. Under delta tracking, whether a camera ray scatters depends jointly on
 ten or more draws, beyond what per-dimension dithering can shape. The noise comes from
-the estimator's yes-or-no, not from the sampler. So the next thing to measure is a
-continuous primary-ray estimator: next event at every tentative collision, weighted by
-the ratio-tracked transmittance. Aux buffers only help if their coverage feature comes
-from a continuous estimate too. See PROGRESS.md.
+the estimator's yes-or-no, not from the sampler. Aux buffers only help if their
+coverage feature comes from a continuous estimate too. See PROGRESS.md.
+
+**The continuous camera-ray estimator shipped in build 13, and it is the mitigation
+that worked.** It estimates how likely the camera ray is to scatter by ratio tracking
+instead of a coin toss, and asks for the sun from one point resampled along the ray
+(`cameraSegmentSun` in BounceLib.slang). Measured at 1 spp denoised: flicker down 42%,
+RMSE down 42%, 78% of the true fine detail kept against 53%. It costs 2.2x per sample
+and beats the old estimator at 3 spp on every measure. Unbiased, and slang.bounce
+holds it to the same closed form. **Still to be judged on a moving 48-frame render in
+the host**, which no metric here replaces.
 
 **Camera-only changes must not re-solve.** The cache is keyed on a fingerprint of
 every non-camera input, with Gravitune's `sizeof` tripwire kept so that adding a

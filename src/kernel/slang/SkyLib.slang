@@ -65,8 +65,14 @@ public struct SkyInput
     //
     // AN EMPTY BUFFER IS A LEGAL STATE and means "no table" -- see
     // sampleTransmittanceLut, which falls back rather than indexing null.
+    //
+    // NAMED transmittanceLut AND NOT transmittance, for the reason Environment.envMode
+    // gives: TransportLib has a FUNCTION called transmittance, and slangc numbers
+    // functions and fields from one counter. This field was transmittance_0 only
+    // because it happened to be emitted first; the camera-segment estimator in
+    // BounceLib moved the function ahead of it and the host's binding broke.
     // ===================================================================
-    StructuredBuffer<float> transmittance;
+    StructuredBuffer<float> transmittanceLut;
 };
 
 // The table's shape. MIRRORS src/engine/Atmosphere.h's kTransmittance* constants.
@@ -167,7 +173,7 @@ float altitudeFromQ(float q, float planetRadius)
 // ===========================================================================
 float3 sampleTransmittanceLut(SkyInput p, float altitude, float mu)
 {
-    if (p.transmittance.getCount() < uint(kLutFloats)) return float3(1.0f, 1.0f, 1.0f);
+    if (p.transmittanceLut.getCount() < uint(kLutFloats)) return float3(1.0f, 1.0f, 1.0f);
 
     float scaleHeight = p.scaleHeight > 1.0f ? p.scaleHeight : 1.0f;
     float topAltitude = scaleHeight * kAtmosphereEFoldings;
@@ -205,8 +211,8 @@ float3 sampleTransmittanceLut(SkyInput p, float altitude, float mu)
     float3 out = float3(0.0f, 0.0f, 0.0f);
     for (int c = 0; c < kLutChannels; ++c)
     {
-        float a = p.transmittance[i00 + c] * (1.0f - tx) + p.transmittance[i10 + c] * tx;
-        float b = p.transmittance[i01 + c] * (1.0f - tx) + p.transmittance[i11 + c] * tx;
+        float a = p.transmittanceLut[i00 + c] * (1.0f - tx) + p.transmittanceLut[i10 + c] * tx;
+        float b = p.transmittanceLut[i01 + c] * (1.0f - tx) + p.transmittanceLut[i11 + c] * tx;
         float r = a * (1.0f - ty) + b * ty;
 
         if (c == 0)      out.x = r;

@@ -67,6 +67,7 @@ double kahanSum(const std::vector<float>& v) {
 // What one sweep of the bounce loop returns.
 struct Run {
     double meanRadiance;     // channel x
+    double stdevRadiance;    // per path, channel x -- what a variance technique moves
     double cappedFraction;
     double meanEvents;
     double maxChannelSpread; // the largest |x-y| or |x-z| seen, for a swizzle bug
@@ -141,6 +142,13 @@ Run runTrace(Scratch& s, Scene_0 scene, PhaseInput_0 phase,
 
     Run r;
     r.meanRadiance     = kahanSum(x) / n;
+
+    double sq = 0.0;
+    for (int i = 0; i < n; ++i) {
+        const double d = static_cast<double>(x[i]) - r.meanRadiance;
+        sq += d * d;
+    }
+    r.stdevRadiance    = n > 1 ? std::sqrt(sq / (n - 1)) : 0.0;
     r.cappedFraction   = static_cast<double>(cappedCount) / n;
     r.meanEvents       = static_cast<double>(eventSum) / n;
     r.maxChannelSpread = spread;
@@ -609,6 +617,216 @@ int main() {
         }
         std::printf("  so the prototype's 1 m offset is +0.24%% of light at EVERY event.\n");
         std::printf("  the shipped value is 0, and Bounce.slang says why\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // 6. The camera segment's sun as a sum: the same answers, less noise
+    // -----------------------------------------------------------------------
+    //
+    // cameraSegmentSun replaces delta tracking's single next event at the first real
+    // collision with a continuous estimate over the tentative collisions, weighted by
+    // the ratio-tracked transmittance. It claims to be unbiased for any rate at or
+    // above the density, so it is held to EVERYTHING section 4 holds the original to
+    // -- the closed form at three angles, the majorant sweep, a real droplet phase --
+    // and then to one thing more: that it is actually a variance technique, since an
+    // estimator that matched the closed form by doing nothing different would pass
+    // all the rest.
+    //
+    // THE STDEV RATIO BELOW IS PRINTED, NOT ASSERTED, AND IT IS ABOUT 1 ON PURPOSE.
+    // This slab is optically THICK (tau 2.5): nearly every ray scatters, so delta
+    // tracking's coin toss was never the noise here -- the depth of the scatter point,
+    // and so its shadow, is. The resampled estimate draws that depth the same way.
+    // The regime the estimator is for is the thin one, and the control is there.
+    std::printf("\nTHE CAMERA SEGMENT'S SUN AS A SUM -- the closed form again\n");
+    std::printf("  %8s %6s %14s %14s %10s %10s %10s\n",
+                "mu", "scale", "measured", "analytic", "rel err", "stdev", "vs delta");
+    for (double mu : muSweep) {
+        const double sa = std::sqrt(1.0 - mu * mu);
+        const float3 dir = make_float3(static_cast<float>(sa), static_cast<float>(mu), 0.0f);
+        const double an  = neeAnalytic(albedo, isoPhase, E, sigma, thickness, mu);
+
+        Scene_0 delta = nee;
+        delta.medium_0.majorant_0 = sigma * 2.0f;
+        const Run rd = runTrace(scratch, delta, iso, bottom, dir, 0x7E57u, trials);
+
+        const float scaleSweep[] = { 1.0f, 4.0f };
+        for (float k : scaleSweep) {
+            Scene_0 s = delta;
+            s.neeTentativeScale_0 = k;
+
+            const Run r = runTrace(scratch, s, iso, bottom, dir, 0x7E57u, trials);
+            const double rel = (r.meanRadiance - an) / an;
+
+            std::printf("  %8.2f %6.0f %14.8f %14.8f %+9.3f%% %10.6f %9.2fx\n",
+                        mu, static_cast<double>(k), r.meanRadiance, an, rel * 100.0,
+                        r.stdevRadiance, rd.stdevRadiance / r.stdevRadiance);
+
+            if (std::fabs(rel) > 0.015) {
+                std::printf("    FAIL: the summed estimator is off by %.2f%% at mu = %.2f,\n"
+                            "          scale %.0f -- it is not estimating the same integral\n",
+                            rel * 100.0, mu, static_cast<double>(k));
+                ++failures;
+            }
+        }
+    }
+
+    // THE REGIME IT IS FOR, AND THE CONTROL. Optically thin -- tau 0.1 -- under a
+    // majorant fifty times the density, so a ray crosses several tentative points
+    // and most of them are null. That is a cirrus: a bound set by the densest streak,
+    // and a ray that mostly passes through thin ice. Delta tracking returns the sun
+    // for about one ray in seven and nothing for the rest; the continuous estimate
+    // returns a little for nearly every ray.
+    //
+    // 3x IN STDEV, against 7.3x measured when written (53x in variance): loose
+    // enough not to flake, tight enough that an estimator which had quietly fallen
+    // back to a coin toss would fail it.
+    {
+        const float thinSigma = 0.0001f;   // tau 0.1 across the slab
+        const double mu = 0.7;
+        const double sa = std::sqrt(1.0 - mu * mu);
+        const float3 dir = make_float3(static_cast<float>(sa), static_cast<float>(mu), 0.0f);
+        const double an  = neeAnalytic(albedo, isoPhase, E, thinSigma, thickness, mu);
+
+        Scene_0 delta = nee;
+        delta.medium_0.density_0  = thinSigma;
+        delta.medium_0.majorant_0 = thinSigma * 50.0f;
+
+        Scene_0 summed = delta;
+        summed.neeTentativeScale_0 = 1.0f;
+
+        const Run rd = runTrace(scratch, delta,  iso, bottom, dir, 0x7E58u, trials);
+        const Run rs = runTrace(scratch, summed, iso, bottom, dir, 0x7E58u, trials);
+        const double relD = (rd.meanRadiance - an) / an;
+        const double relS = (rs.meanRadiance - an) / an;
+        const double gain = rd.stdevRadiance / rs.stdevRadiance;
+
+        std::printf("\n  thin slab (tau 0.1) under a 50x majorant, mu 0.7, scale 1:\n");
+        std::printf("    delta tracking %.8f (%+.3f%%)  stdev %.6f\n",
+                    rd.meanRadiance, relD * 100.0, rd.stdevRadiance);
+        std::printf("    continuous     %.8f (%+.3f%%)  stdev %.6f  -- %.2fx less\n",
+                    rs.meanRadiance, relS * 100.0, rs.stdevRadiance, gain);
+
+        if (std::fabs(relS) > 0.015) {
+            std::printf("    FAIL: off the closed form by %.2f%% in the thin slab\n", relS * 100.0);
+            ++failures;
+        }
+        if (gain < 3.0) {
+            std::printf("    FAIL: only %.2fx less spread than delta tracking, in the regime\n"
+                        "          the estimator exists for\n", gain);
+            ++failures;
+        }
+    }
+
+    // The majorant sweep again. At scale 1 the tentative rate IS the majorant, so a
+    // loose one means more, lighter points -- and the answer must not move. Stops at
+    // 20x: at 100x a 1000 m slab at mu 0.7 needs ~360 tentative points and that is
+    // still inside kTrackCap, but it tests the cap rather than the estimator.
+    std::printf("\n  and the majorant must not reach the answer (mu = 0.7, scale 1)\n");
+    {
+        const double mu = 0.7;
+        const double sa = std::sqrt(1.0 - mu * mu);
+        const float3 dir = make_float3(static_cast<float>(sa), static_cast<float>(mu), 0.0f);
+        const double an  = neeAnalytic(albedo, isoPhase, E, sigma, thickness, mu);
+
+        const float scales[] = { 1.0f, 2.0f, 5.0f, 20.0f };
+        for (float k : scales) {
+            Scene_0 s = nee;
+            s.medium_0.majorant_0 = sigma * k;
+            s.neeTentativeScale_0 = 1.0f;
+
+            const Run r = runTrace(scratch, s, iso, bottom, dir, 0x7E57u, trials);
+            const double rel = (r.meanRadiance - an) / an;
+
+            std::printf("  %12.0fx %14.8f %14.8f %+9.3f%%\n",
+                        static_cast<double>(k), r.meanRadiance, an, rel * 100.0);
+
+            if (std::fabs(rel) > 0.015) {
+                std::printf("    FAIL: the summed estimator moved with the majorant --\n"
+                            "          %.2f%% at %.0fx\n", rel * 100.0, static_cast<double>(k));
+                ++failures;
+            }
+        }
+    }
+
+    // A real droplet phase, so the forward peak is weighted at every point too.
+    {
+        const double mu = 0.7;
+        const double sa = std::sqrt(1.0 - mu * mu);
+        const float3 dir = make_float3(static_cast<float>(sa), static_cast<float>(mu), 0.0f);
+
+        const PhaseInput_0 ph = dropletPhase(20.0f);
+        const double an = neeAnalytic(albedo, phaseValue(ph, mu), E, sigma, thickness, mu);
+
+        Scene_0 s = nee;
+        s.medium_0.majorant_0 = sigma * 2.0f;
+        s.neeTentativeScale_0 = 4.0f;
+
+        const Run r = runTrace(scratch, s, ph, bottom, dir, 0x7E57u, trials);
+        const double rel = (r.meanRadiance - an) / an;
+        std::printf("\n  droplet phase, 20 microns, scale 4: measured %.8f against %.8f (%+.3f%%)\n",
+                    r.meanRadiance, an, rel * 100.0);
+        if (std::fabs(rel) > 0.015) {
+            std::printf("    FAIL: the summed estimator is off by %.2f%% with a real phase\n",
+                        rel * 100.0);
+            ++failures;
+        }
+    }
+
+    // THE FURNACE, WITH THE SUM ON. The sun is black here, so the sum adds nothing --
+    // but it consumes draws and it switches off the first event's own next event, and
+    // the per-path identity must survive both exactly.
+    {
+        Scene_0 s = base;
+        s.maxBounces_0        = 64;
+        s.neeTentativeScale_0 = 4.0f;
+
+        const Run r = runTrace(scratch, s, iso, mid, up, 0xB0117CEu, trials);
+        const double shortfall = 1.0 - r.meanRadiance;
+        const double diff      = std::fabs(shortfall - r.cappedFraction);
+        std::printf("\n  furnace, scale 4, 64 bounces: %.6f (capped %.6f, |diff| %.2e)\n",
+                    r.meanRadiance, r.cappedFraction, diff);
+        if (diff > 1e-6) {
+            std::printf("    FAIL: the furnace identity broke with the sum on\n");
+            ++failures;
+        }
+    }
+
+    // THE WHOLE PATH, NOT ONLY THE FIRST EVENT. A lit, absorbing, multiple-scattering
+    // scene with a sky: the sum replaces one term of many, and skipping the first
+    // event's own next event is only right if nothing else was skipped with it. So the
+    // two estimators must agree on the complete answer, within their joint error.
+    {
+        const double mu = 0.7;
+        const double sa = std::sqrt(1.0 - mu * mu);
+        const float3 dir = make_float3(static_cast<float>(sa), static_cast<float>(mu), 0.0f);
+
+        Scene_0 s = nee;
+        s.environment_0.uniformRadiance_0 = make_float3(0.3f, 0.3f, 0.3f);
+        s.medium_0.majorant_0 = sigma * 2.0f;
+        s.maxBounces_0        = 64;
+
+        const PhaseInput_0 ph = dropletPhase(20.0f);
+
+        Scene_0 on = s;
+        on.neeTentativeScale_0 = 4.0f;
+
+        const Run rOff = runTrace(scratch, s,  ph, bottom, dir, 0xA11u, dropletTrials);
+        const Run rOn  = runTrace(scratch, on, ph, bottom, dir, 0xA12u, dropletTrials);
+
+        const double se = std::sqrt(rOff.stdevRadiance * rOff.stdevRadiance +
+                                    rOn.stdevRadiance  * rOn.stdevRadiance) /
+                          std::sqrt(static_cast<double>(dropletTrials));
+        const double z  = (rOn.meanRadiance - rOff.meanRadiance) / se;
+
+        std::printf("\n  full path, sky 0.3, 64 bounces, droplet phase:\n");
+        std::printf("    delta tracking %.7f (stdev %.5f)\n", rOff.meanRadiance, rOff.stdevRadiance);
+        std::printf("    summed, x4     %.7f (stdev %.5f)   %.2f standard errors apart\n",
+                    rOn.meanRadiance, rOn.stdevRadiance, z);
+        if (std::fabs(z) > 5.0) {
+            std::printf("    FAIL: the two estimators disagree on the whole path --\n"
+                        "          something besides the first next event was dropped\n");
+            ++failures;
+        }
     }
 
     std::printf("\n%s\n", failures == 0

@@ -4,6 +4,156 @@ Tracked against `PLAN.md`. Newest first.
 
 ---
 
+## 2026-09-29 — Build 13 reported good in the host. REPORTED, not measured, like build 7.
+
+The report was that the build looks good. No log and no frame times came back, so this
+entry weighs less than the ones with numbers in them.
+
+| | status |
+| --- | --- |
+| The picture reads right with the new estimator | **Settled.** A person is the right judge of that |
+| A moving 48-frame render is calm enough | Consistent with "looks good". It was not reported as watched in motion |
+| Draft still feels interactive at 2.2x per sample | Not reported either way |
+| Denoise Amount 0.8 against 0.9 | **Left at 0.8.** Nothing in the report asked for a change |
+
+---
+
+## 2026-09-29 — THE SUN ALONG THE CAMERA RAY IS ESTIMATED, NOT GAMBLED ON. At 1 spp denoised: flicker down 42%, RMSE down 42%, fine detail from 53% of the truth to 78%, for 2.2x the time per sample. The dots were the estimator's coin toss, as the entry below predicted. Getting there took a 6x-too-slow first version, a flicker regression from sharing one random stream, and a field name that moved.
+
+### What it is
+
+`cameraSegmentSun` in `BounceLib.slang`. Delta tracking brings the sun back to a
+camera ray only if the ray has a real collision, a yes-or-no with probability `1 - T`.
+In thin cirrus that is small, so a 4 spp frame is sky with bright dots.
+
+The replacement walks tentative collisions along the whole camera segment at the
+majorant rate and forms, by ratio tracking, a **continuous** estimate `B` of how likely
+the ray is to scatter. It then asks for the sun from one point `J` resampled along the
+ray. The estimate is `B · albedo · phase · sun(x_J) · shadow(x_J)`. The first real
+collision's own next event is skipped, since this replaces it. Everything after that
+(the continued path, later events, escapes) is unchanged.
+
+**Why it is unbiased.** A next event at every tentative point, weighted by `σ/μ` and
+the ratio-tracked transmittance of the points before it, has expectation
+`∫ σ T f dt` by the Mecke formula. That is exactly what delta tracking's single next
+event estimates. The weights `b_k = T_k σ_k/μ` telescope (`b_k = T_k − T_{k+1}`), so
+their sum `B` is the ratio-tracked `1 − T`. Resampling one point with probability
+`b_J/B` by a streaming reservoir keeps the expectation.
+
+### Three things that went wrong on the way, each measured
+
+**1. One shadow ray per point was 6x the frame time (15x at scale 4).** Cirrus is ice
+almost everywhere inside its slab, so nearly every tentative point paid for a shadow
+ray. The telescoping above is what made one shadow ray enough: 2.2x.
+
+**2. It made the flicker WORSE until the random streams were split.** The walk skips
+empty air, so its draw count depends on the medium. On the path's own stream, every
+later draw shifted whenever the cloud moved, and noise that had been still in screen
+space began to crawl. The walk now draws from `splitRng(rng, salt)`, three draws per
+step whether it uses them or not, so step k's point sits in the same place every
+frame and the rest of the path draws exactly what it drew before.
+
+**3. `SkyInput.transmittance` became `transmittance_1`.** It shared its name with the
+function `transmittance()`, and it had been `_0` only because of emission order. The
+new code moved the function ahead, and the host binding stopped compiling. Renamed to
+`transmittanceLut`, the fix SlangCheckFieldNames.cmake prescribes, and the third
+instance of this hazard in the project.
+
+**Also: a scale below 1 is refused.** Under the majorant, `σ/rate` can exceed 1 and the
+`max(0, 1 − w)` clamp biases the estimate dark. A scale-0.5 row was measured before the
+clamp existed and looked plausible, which is the problem.
+
+### Proved
+
+In `slang.bounce`, held to everything the original estimator is held to:
+
+- the single-scatter closed form at three angles and two rates, all within 0.37%;
+- the majorant sweep (1x to 20x) without moving;
+- a real droplet phase (+0.08%);
+- the furnace identity, exact to 0;
+- a full lit, absorbing, multiple-scattering path agreeing with delta tracking to
+  0.19 standard errors.
+
+**The variance control is in the regime the estimator is for:** optical depth 0.1 under
+a 50x majorant. There the per-path spread is **7.3x lower (53x in variance)**, and the
+test fails below 3x. In the thick test slab (τ 2.5) the ratio is about 1. Nearly every
+ray scatters there, so the coin toss was never the noise; that ratio is printed and
+not asserted, with the reason beside it.
+
+**The goldens were re-blessed on evidence.** Rendered at 8192 spp by both estimators,
+the three scenes agree to a signed mean of −0.002, +0.003 and −0.0006 levels. 8x8
+blocks agree within half a level, and the worst single pixels differ in both
+directions. That is noise, not bias. All 25 ctest suites then pass, including the CUDA
+goldens against the CPU references and every determinism check.
+
+### Measured in the image
+
+The shimmer scene (`-w 240 -h 135 --pitch 12`, 8 frames 0.5 s apart). **Flicker is now
+measured against a per-frame 4096-spp truth**, as the mean change of the ERROR between
+frames. The old frame-to-frame metric counted the cloud's real motion (0.117 in the
+truth) as shimmer, and would have scored an image that finally shows a moving cloud as
+flickering more than one showing static dots.
+
+| 1 spp, denoised 1.0 | flicker | RMSE | fine detail vs truth |
+| --- | --- | --- | --- |
+| delta tracking | 0.474 | 8.25 | 53% |
+| delta tracking, 3 spp (more time) | 0.435 | 5.81 | 62% |
+| **continuous, scale 1** | **0.276** | **4.78** | **78%** |
+
+| 4 spp, denoised 1.0 | flicker | RMSE | fine detail vs truth |
+| --- | --- | --- | --- |
+| delta tracking | 0.432 | 5.32 | 66% |
+| delta tracking, 8 spp (≈ same time) | 0.381 | 4.40 | 71% |
+| **continuous, scale 1** | **0.267** | **3.40** | **84%** |
+| continuous, scale 4 | 0.261 | 3.20 | 83% |
+
+Raw 4 spp RMSE falls from 17.5 to 8.0; delta tracking at 16 spp reaches only 11.9.
+**Scale 1 ships**: scale 2 buys about 5% for 15% more time, and scale 4 about 6% for
+40% more.
+
+### Cost
+
+Back to back, same binary, least-squares over 1–32 spp at the CLI default scene:
+**27.6 ns per pixel-sample against 12.7**, so 1080p at 1 spp is 57 ms of kernel
+against 26. PLAN.md carries the table. **The old estimator's 12.7 ns is itself below
+the 20.7 recorded when throughput was first measured**, by the same method with the
+same 0.2 s intercept. That gap is unexplained; the ratio does not depend on it.
+
+A cheaper version is possible and deliberately not built yet. At scale 1 the delta
+free flight and this walk draw from the same process and could share their points,
+which would save most of one walk's density evaluations. It re-couples two streams
+that item 2 above separated, so it wants its own flicker measurement.
+
+### Denoise Amount's default is now off by the criterion that chose it
+
+0.8 was fitted to "fine detail closest to the truth" when a full denoise kept only a
+third of it. With this estimator a full denoise keeps 78–84%, and the same criterion
+lands near **0.9**:
+
+| scale 1, denoised | 0.8 | 0.9 | 1.0 |
+| --- | --- | --- | --- |
+| 1 spp detail / flicker | 121% / 0.268 | **97%** / 0.271 | 78% / 0.276 |
+| 4 spp detail / flicker | 107% / 0.255 | **95%** / 0.261 | 84% / 0.267 |
+
+**Not changed.** It is a judgement about pictures, it needs PARAMS_SETUP to re-run, and
+the host is where to make it.
+
+### State
+
+Build 13, minor 5 (no parameter or flag changed). 146 unit tests, 25 ctest suites.
+`--nee-scale 0` keeps the old estimator reachable from the CLI for A/B.
+
+### What needs the host
+
+- **A moving 48-frame render, watched for shimmer.** PLAN.md's standing rule. The
+  numbers above say it should be markedly calmer; only a moving render says whether it
+  is calm enough.
+- **Whether Draft still feels interactive** at 2.2x the per-sample cost, about 97 ms
+  at 1080p 1 spp with the denoise.
+- **Denoise Amount 0.8 against 0.9** on the new picture.
+
+---
+
 ## 2026-09-29 — BLUE-NOISE OFFSETS DO NOTHING FOR THIS RENDERER, MEASURED AND REVERTED. PLAN.md's first flicker mitigation was built through the shipping path, swept from 0 to 16 blue-noise draws, and left every metric within noise; a sanity render proves the wiring was right and names why it cannot work under delta tracking.
 
 ### Why this was next

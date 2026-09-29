@@ -149,6 +149,20 @@ struct RenderRequest {
     int firstSample = 0;
     int sampleCount = 1;
 
+    // THE CAMERA SEGMENT'S SUN: 0 is delta tracking's single next event at the first
+    // real collision; 1 or more is a continuous estimate over tentative collisions
+    // along the camera ray, drawn at this multiple of the majorant (values between 0
+    // and 1 are raised to 1, because below it the estimate is biased). Both are
+    // unbiased; they differ in noise, flicker and cost. See cameraSegmentSun in
+    // BounceLib.slang.
+    //
+    // 1, AND MEASURED (PROGRESS.md, 2026-09-29): at 1 spp denoised it cuts the
+    // flicker by 42% and the RMSE by 42% for 2.2x the time per sample, and beats
+    // delta tracking at 3 spp on every measure. Scale 2 buys ~5% more for 15% more
+    // time. Not a user parameter and not hashed -- it is the renderer's estimator,
+    // chosen here once, and 0 survives only so the CLI can A/B it.
+    float neeTentativeScale = 1.0f;
+
     // Linear radiance, four floats per pixel, persisting across the launches of
     // one frame. Null on the CPU reference path, which accumulates in the
     // destination surface directly because it has nowhere else to put it.
