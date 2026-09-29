@@ -118,10 +118,43 @@ void disposePreRenderData(void* p) {
 // lock or needs not to exist.
 //
 // Phase 1 chooses "not to exist": the render path is stateless, so there is nothing
-// to protect. The FieldCache below is the thing that will need the lock in Phase 2,
-// when it starts describing a real GPU allocation -- and it is declared here now,
-// unused for caching, so that the place the lock goes is already decided rather than
-// being invented under pressure later.
+// to protect.
+//
+// ===========================================================================
+// THE FieldCache BELOW IS IN THE WRONG PLACE, AND A LOCK IS NOT THE FIX.
+//
+// This comment used to say the cache "will need the lock in Phase 2, when it starts
+// describing a real GPU allocation". That is the wrong answer, and knowing why is
+// worth more than the lock would have been.
+//
+// A CACHE MUST LIVE WHERE THE MEMORY IT DESCRIBES LIVES. Sequence data is shared
+// across every render thread AE has in flight for this layer. The accumulators it
+// would describe are NOT: both of them are `thread_local` --
+// `g_accum` in CpuRender.cpp and the DeviceScratch of the same name in Mistytune.cu.
+//
+// So a shared cache describing per-thread buffers is wrong even WITH a lock. Thread A
+// adopts a key and records 32 samples; thread B asks, is told "Accumulate", and
+// accumulates into ITS OWN empty accumulator while the cache still claims 32 samples
+// are in it. The result is a frame that is darker or noisier than its neighbours for
+// no visible reason, arriving only under multi-frame rendering. A mutex makes that
+// race deterministic; it does not make it correct.
+//
+// WHERE IT BELONGS is beside the accumulator, thread_local, in the kernel library --
+// and then no lock is needed at all, because nothing is shared. A thread that has not
+// rendered this key sees an empty cache and renders the frame from scratch, which is
+// exactly today's behaviour. THE DESIGN FAILS SAFE: the worst case of a cache miss is
+// a slow frame, never a wrong one.
+//
+// WHAT STILL BLOCKS IT is the GPU accumulator's SIZE rather than its lifetime. The CPU
+// one is already full-frame; the CUDA one is BAND-sized (`rowBytes * bandRows` in
+// renderCudaToHost), so it is overwritten by each band and cannot carry a frame across
+// renders. Making it frame-sized means indexing it by the band's offset into the frame
+// -- which is precisely the band-as-window arithmetic this project has got wrong three
+// times, and it should be written where a host can be watched rather than blind.
+//
+// The member stays here for now because nothing reads it, and moving it before the
+// accumulator question is settled would just relocate the problem.
+// ===========================================================================
 struct SequenceData {
     sim::FieldCache cache;
 };

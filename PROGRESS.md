@@ -4,6 +4,69 @@ Tracked against `PLAN.md`. Newest first.
 
 ---
 
+## 2026-09-29 — THE FIELD CACHE IS IN THE WRONG PLACE, AND A LOCK IS NOT THE FIX. Found while going to wire it; the planned mitigation would have made a real race deterministic without making it correct.
+
+`SequenceData` has carried a `FieldCache` since Phase 1, with a comment saying it "will
+need the lock in Phase 2, when it starts describing a real GPU allocation". Going to
+wire it up: **the lock is the wrong answer, and the reason is worth more than the lock
+would have been.**
+
+### A CACHE MUST LIVE WHERE THE MEMORY IT DESCRIBES LIVES
+
+Sequence data is **shared** across every render thread AE has in flight for a layer.
+The accumulators the cache would describe are **not**: both are `thread_local` --
+`g_accum` in `CpuRender.cpp`, and the `DeviceScratch` of the same name in
+`Mistytune.cu`.
+
+So a shared cache over per-thread buffers is wrong *with* a mutex:
+
+> Thread A adopts a key and records 32 samples. Thread B asks, is told **Accumulate**,
+> and accumulates into **its own empty accumulator** while the cache still claims 32
+> samples are in it.
+
+The frame comes out darker or noisier than its neighbours, only under multi-frame
+rendering, for no visible reason. A mutex makes that race deterministic. It does not
+make it correct.
+
+### WHERE IT BELONGS, AND THE LOCK DISAPPEARS
+
+Beside the accumulator: `thread_local`, in the kernel library. Then nothing is shared
+and no lock is needed.
+
+**IT FAILS SAFE BY CONSTRUCTION**, which is the property that matters for something
+that cannot be tested outside the host. A thread that has not rendered this key sees an
+empty cache and renders from scratch -- which is exactly today's behaviour. The worst
+case of a cache miss is a slow frame, never a wrong one. That is a much better place to
+be than "correct as long as the lock is held in all four paths".
+
+### WHAT ACTUALLY BLOCKS IT IS THE ACCUMULATOR'S SIZE, NOT ITS LIFETIME
+
+The CPU accumulator is already full-frame and would carry a frame across renders
+unchanged. **The CUDA one is BAND-sized** -- `rowBytes * bandRows` in
+`renderCudaToHost` -- so each band overwrites the last and there is nothing to carry.
+
+Making it frame-sized means indexing it by the band's offset into the frame. That is
+precisely the band-as-window arithmetic this project has got wrong **three times**: the
+reduced-resolution render that drew the top-left third of the sky, the Region of
+Interest that drew the top-left corner, and the band offset in `renderCudaToHost`
+itself. Each one rendered a plausible picture and read as a broken effect rather than as
+a units mistake.
+
+**SO IT SHOULD BE WRITTEN WHERE A HOST CAN BE WATCHED**, not blind. The policy
+(`FieldCache`, 123 unit tests) and the mechanism (`resolve.reproducesTheRender`) are
+both done and tested; what is left is the one part whose failure mode is a picture that
+looks fine until you compare it with its neighbours.
+
+The member stays in `SequenceData` for now because nothing reads it. Moving it before
+the accumulator question is settled would relocate the problem rather than fix it.
+
+### State
+
+123 unit tests, 23 ctest suites, all green. The only change here is the comment that
+said a lock was the plan, which is now the paragraph above.
+
+---
+
 ## 2026-09-29 — THE VIEW HASH SPLITS IN TWO, and an exposure change stops costing a re-render. The mechanism turns out to need NO new kernel code, which is the finding; and a comment that was right when written is now the reason for doing the opposite.
 
 PLAN.md's Phase 2 exit has four clauses. Two were done, one was closed by the
