@@ -161,6 +161,23 @@ MT_RENDER void fillSlangScene(const RenderRequest& req, SceneT& s, PhaseT& ph) {
     s.environment_0.sky_0.sunIntensity_0     = atm.sunIntensity;
     s.environment_0.sky_0.sunAngularRadius_0 = atm.sunAngularRadius;
     s.environment_0.sky_0.groundAlbedo_0     = atm.groundAlbedo;
+
+    // THE TRANSMITTANCE TABLE, AS A POINTER AND A COUNT -- the same two fields the
+    // drift table above is handed through, because the prelude generates every
+    // StructuredBuffer<T> as { T* data; size_t count; } on both backends.
+    //
+    // WHICHEVER MEMORY THE REQUEST IS POINTING AT. deriveRenderInputs left the host
+    // cache's pointer there; renderCuda has already replaced it with a device one by
+    // the time this runs on that path. This function does not know or care which, and
+    // that is the same contract driftBuffer is under.
+    //
+    // A NULL TABLE IS DESCRIBED AS EMPTY RATHER THAN AS A NULL WITH A COUNT, so the
+    // kernel's one guard -- a count below the table's size -- catches it. A count set
+    // beside a null pointer would sail past that check and index nothing.
+    s.environment_0.sky_0.transmittance_0.data =
+        const_cast<float*>(static_cast<const float*>(req.transmittanceBuffer));
+    s.environment_0.sky_0.transmittance_0.count =
+        req.transmittanceBuffer ? static_cast<size_t>(cloud::kTransmittanceFloats) : 0;
     s.environment_0.envMode_0                = 1;
 
     // Mode 0's uniform radiance, unread at mode 1 and zeroed rather than left as

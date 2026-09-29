@@ -183,6 +183,12 @@ void renderCpu(const RenderRequest& req, int threads, int rowBegin, int rowEnd) 
     deriveRenderInputs(work);
     work.driftBuffer = work.drift.xz;
 
+    // THE TRANSMITTANCE TABLE NEEDS NOTHING DOING TO IT HERE, and that asymmetry with
+    // the CUDA path is worth a line rather than silence: deriveRenderInputs left the
+    // cache's HOST pointer in the request, and this engine can dereference it. The
+    // drift table above needs the assignment only because its storage is a by-value
+    // member of the request rather than a cache.
+
     const bool split = req.samplesAlreadyDone > 0 || req.sampleCount < req.quality.samplesPerPixel;
     if (split) {
         const int pitchPx = req.dest.pitchPx > 0 ? req.dest.pitchPx : req.dest.widthPx;

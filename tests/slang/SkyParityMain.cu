@@ -38,12 +38,13 @@ using plugin::kernel::vec3;
 
 // The reference, wrapped in a kernel so it runs on the same device as the other.
 __global__ void handWrittenSky(plugin::cloud::FieldParams field,
+                               const float* lut,
                                const float3* dirs, float3* out, int count) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= count) return;
 
     const Vec3 d = vec3(dirs[i].x, dirs[i].y, dirs[i].z);
-    const Vec3 r = plugin::kernel::skyRadiance(field, d);
+    const Vec3 r = plugin::kernel::skyRadiance(field, d, lut);
     out[i] = make_float3(r.x, r.y, r.z);
 }
 
@@ -61,7 +62,31 @@ int main() {
     field.atmosphere.sunAzimuth   = 135.0f;
     field.atmosphere.turbidity    = 2.2f;
 
+    // ===================================================================
+    // ONE TABLE, BUILT ONCE, HANDED TO BOTH SIDES -- which is the same rule the
+    // parameters above are under and matters more here, not less.
+    //
+    // The sun-transmittance inner march is a table lookup on both sides now, so if
+    // each side built its own table this test would compare two samplers over two
+    // tables and would pass while the port read a different atmosphere. Building it
+    // once means a divergence can only be in the sampler or the sky integral, which
+    // is what this test is for.
+    // ===================================================================
+    std::vector<float> lut(static_cast<size_t>(plugin::cloud::kTransmittanceFloats));
+    plugin::cloud::buildTransmittanceLut(
+        plugin::cloud::transmittanceParamsFrom(field.physics, field.atmosphere),
+        lut.data(), plugin::cloud::kTransmittanceFloats);
+
+    float* dLut = nullptr;
+    if (cudaMalloc(&dLut, lut.size() * sizeof(float)) != cudaSuccess) {
+        std::printf("FAIL: could not allocate the transmittance table\n");
+        return 1;
+    }
+    cudaMemcpy(dLut, lut.data(), lut.size() * sizeof(float), cudaMemcpyHostToDevice);
+
     SkyInput_0 slangIn;
+    slangIn.transmittance_0.data  = dLut;
+    slangIn.transmittance_0.count = lut.size();
     slangIn.planetRadius_0     = field.physics.planetRadius;
     slangIn.scaleHeight_0      = field.physics.scaleHeight;
     slangIn.turbidity_0        = field.atmosphere.turbidity;
@@ -118,7 +143,7 @@ int main() {
     sOut.count = static_cast<size_t>(count);
 
     skyMain<<<grid, block>>>(slangIn, sDirs, sOut, count);
-    handWrittenSky<<<grid, block>>>(field, dDirs, dHand, count);
+    handWrittenSky<<<grid, block>>>(field, dLut, dDirs, dHand, count);
 
     const cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {

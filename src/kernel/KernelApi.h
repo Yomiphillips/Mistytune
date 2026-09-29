@@ -12,6 +12,8 @@
 
 #include "RenderRequest.h"
 
+#include <vector>
+
 namespace plugin::kernel {
 
 // ---------------------------------------------------------------------------
@@ -31,8 +33,47 @@ namespace plugin::kernel {
 //
 // HOST ONLY. It calls into src/engine/, which is host code, which is exactly why the
 // results have to travel to the kernel as data -- see the note in RenderRequest.h.
+// The transmittance table for these parameters, built at most once per change.
+//
+// ===========================================================================
+// THREAD-LOCAL, WHICH IS THE POINT RATHER THAN A DETAIL.
+//
+// PF_OutFlag2_SUPPORTS_THREADED_RENDERING means several frames are in flight in one
+// process, and a shared cache would need a lock on the render path -- which PLAN.md's
+// MFR row names as the thing to avoid. One table per worker is 196 KB times the
+// worker count; at sixteen workers that is 3 MB, which is nothing against the 33 MB
+// accumulator a single 1080p frame already carries.
+//
+// GROW-NOTHING, REBUILD-RARELY. The key is the three parameters the table actually
+// depends on, compared exactly -- see TransmittanceParams, and note that the sun is
+// deliberately NOT among them, because dragging the sun is the one thing an artist
+// does continuously and it must not cost a rebuild.
+//
+// THE FIRST CALL ON EACH THREAD PAYS FOR IT, about a million exp() calls. That is
+// roughly one frame's worth of the march it replaces, and then it is free.
+inline const cloud::Real* cachedTransmittanceLut(const cloud::TransmittanceParams& params) {
+    static thread_local std::vector<cloud::Real> table;
+    static thread_local cloud::TransmittanceParams built;
+    static thread_local bool haveBuilt = false;
+
+    if (!haveBuilt || built != params) {
+        table.resize(static_cast<size_t>(cloud::kTransmittanceFloats));
+        cloud::buildTransmittanceLut(params, table.data(), cloud::kTransmittanceFloats);
+        built = params;
+        haveBuilt = true;
+    }
+    return table.data();
+}
+
 inline void deriveRenderInputs(RenderRequest& req) {
     cloud::buildDriftTable(req.field.ice, req.drift);
+
+    // THE HOST POINTER, which renderCuda replaces with a device one after uploading.
+    // Left here rather than asked of the caller for the same reason everything else
+    // in this function is: three call sites today, and the failure mode of a caller
+    // that forgets is a null table and a black sky.
+    req.transmittanceBuffer = cachedTransmittanceLut(
+        cloud::transmittanceParamsFrom(req.field.physics, req.field.atmosphere));
 
     // A PINNED MAJORANT WINS, and it is allowed to be wrong. QualityParams calls it
     // "0 = derive from the field", so a positive value is the user overriding the

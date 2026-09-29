@@ -29,6 +29,11 @@
 
 #include "Atmosphere.h"
 
+// The KERNEL's copies of the sampler and of the march the table replaces. plugin_tests
+// links plugin_kernel, and on the host Shading.h pulls in no CUDA header -- the same
+// arrangement TestCamera.cpp and TestOutputConvert.cpp already use.
+#include "Shading.h"
+
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -235,15 +240,11 @@ PL_TEST(TheAltitudeWarpRoundTrips) {
 
     const double topAltitude = double(p.scaleHeight) * 8.0;
 
-    // ONE ASSERTION AFTER THE SWEEP, NOT ONE INSIDE IT. Measured by injecting the
-    // fault this test exists for -- dropping the square root -- and watching an
-    // earlier version report sixty-four times. The same lesson
-    // TheQuantiserIsExactlyClampScaleAndRound records, and the third time this
-    // project has had to learn it in a loop-driven test.
-    int    checked = 0;
-    int    mismatches = 0;
-    int    firstRow = -1;
-    double firstGot = 0.0, firstWant = 0.0;
+    // ONE ASSERTION AFTER THE SWEEP, NOT ONE INSIDE IT -- and it is pltest::Sweep
+    // doing it rather than four locals, because this was the THIRD hand-rolled copy
+    // of the same counting and the third time the lesson had to be relearned by
+    // injecting a fault and watching the output scroll. See TestFramework.h.
+    PL_SWEEP(sweep, "sampled texels");
 
     for (int yi = 0; yi < kTransmittanceAltitudeSize; ++yi) {
         const double v = (double(yi) + 0.5) / double(kTransmittanceAltitudeSize);
@@ -259,23 +260,10 @@ PL_TEST(TheAltitudeWarpRoundTrips) {
         const Real want[3] = { lut[idx + 0], lut[idx + 1], lut[idx + 2] };
         const Real have[3] = { got.r, got.g, got.b };
 
-        for (int c = 0; c < 3; ++c) {
-            if (std::fabs(double(have[c]) - double(want[c])) > 1e-5 && mismatches++ == 0) {
-                firstRow  = yi;
-                firstGot  = double(have[c]);
-                firstWant = double(want[c]);
-            }
-        }
-        ++checked;
+        for (int c = 0; c < 3; ++c) sweep.check(have[c], want[c], 1e-5, yi);
     }
 
-    if (mismatches > 0) {
-        std::printf("      %d of %d sampled texels missed the row they were built for.\n"
-                    "      first: row %d -- got %.9g, wanted %.9g\n",
-                    mismatches, checked * 3, firstRow, firstGot, firstWant);
-    }
-    PL_CHECK_EQ(mismatches == 0, 1);
-    PL_CHECK_EQ(checked, kTransmittanceAltitudeSize);
+    sweep.finish(kTransmittanceAltitudeSize * 3);
 }
 
 // OUT OF RANGE CLAMPS AND DOES NOT WRAP. A wrap on the mu axis fetches the opposite
@@ -378,4 +366,144 @@ PL_TEST(TheTableIsBitIdenticalAcrossBuilds) {
         if (a[i] != b[i]) ++differing;
     }
     PL_CHECK_EQ(differing, 0);
+}
+
+// ---------------------------------------------------------------------------
+// The three copies of the sampler, and the march the table replaces
+// ---------------------------------------------------------------------------
+
+// ===========================================================================
+// THE SAMPLER EXISTS THREE TIMES AND EACH COPY IS PINNED TO ANOTHER.
+//
+//   src/engine/Atmosphere.cpp   host, double -- the reference these tests use
+//   src/kernel/Shading.h        device-compilable, float -- the C++/CUDA reference
+//   src/kernel/slang/SkyLib.slang  device, float -- what actually renders
+//
+// The last two are compared BITWISE by slang.skyParity. This test pins the first to
+// the second, which closes the chain.
+//
+// ONE DEFINITION IS NOT AVAILABLE, which is why this is a test rather than a refactor:
+// one copy has to compile for CUDA, one has to be reachable from src/engine/ which
+// holds no kernel headers, and one is written in another language.
+//
+// THE TOLERANCE IS 1e-6 AND BOTH ANSWERS ARE FLOAT. The engine computes the
+// interpolation in double and the kernel in float, so they are allowed to differ in
+// the last bits and nowhere else.
+// ===========================================================================
+PL_TEST(LutAgreesWithTheHostSampler) {
+    const TransmittanceParams p = earth();
+    const std::vector<Real> lut = buildFor(p);
+
+    PL_SWEEP(sweep, "sampler channels");
+
+    for (int hi = 0; hi <= 20; ++hi) {
+        const Real h = kTopAltitude * static_cast<Real>(hi) / 20.0f;
+        for (int mi = 0; mi <= 40; ++mi) {
+            const Real mu = -1.0f + static_cast<Real>(mi) * 0.05f;
+
+            const Rgb host = sampleAt(lut, p, h, mu);
+            const plugin::kernel::Vec3 kern =
+                plugin::kernel::sampleTransmittanceLut(lut.data(), p.scaleHeight, h, mu);
+
+            sweep.check(host.r, kern.x, 1e-6, mu);
+            sweep.check(host.g, kern.y, 1e-6, mu);
+            sweep.check(host.b, kern.z, 1e-6, mu);
+        }
+    }
+
+    sweep.finish(21 * 41 * 3);
+}
+
+// ===========================================================================
+// THE TABLE AGAINST THE INTEGRAL IT IS A PRECOMPUTATION OF.
+//
+// `sunOpticalDepth` in Shading.h is the eight-step quadrature that used to run inside
+// the view march. It is no longer on the render path and is kept precisely so this
+// comparison can exist -- two independent derivations of the same physical quantity,
+// which is the only way to check a lookup table against something other than itself.
+//
+// THEY ARE NOT EXPECTED TO AGREE EXACTLY, AND WHICH ONE IS RIGHT IS THE POINT. The
+// march is 8 steps with quadratic spacing in float; the table is 64 uniform steps in
+// double, then bilinearly interpolated. Where they differ, the table is the better
+// number -- so this test is not "the port changed nothing", it is "the port changed
+// nothing by MORE than the accuracy it was buying".
+//
+// THE TOLERANCE IS SET BY MEASUREMENT, not by caution. MEASURED worst case: 0.0350,
+// at the TOP of the atmosphere looking 0.1 below level -- a grazing path through the
+// whole depth of the air, which is precisely where an 8-step quadrature is worst and
+// where the table's 64 uniform steps earn themselves. 0.04 leaves 14% headroom: close
+// enough that changing either step count trips it, loose enough not to be fragile.
+//
+// AND IT PREDICTS WHICH GOLDEN MOVED. The only scene in tests/golden/ that changed
+// when the table replaced the march is `sunset`, at sun elevation 2 degrees -- the one
+// whose light arrives along exactly this grazing path. `midday` and `horizon` did not
+// move at all. Two independent measurements agreeing on where the difference lives is
+// what turns "the picture changed" into "the picture got more accurate, here.
+//
+// THE HORIZON BAND IS EXCLUDED DELIBERATELY. Within about a degree of the geometric
+// horizon the two disagree by construction rather than by accuracy: the table stores
+// exactly zero for a blocked texel and interpolates that zero outwards, while the
+// march returns a finite optical depth right up to the tangent. That is a real and
+// intended difference -- it is the ground shadow being resolved at texel resolution --
+// and folding it in here would measure the table's resolution rather than its accuracy.
+// ===========================================================================
+PL_TEST(LutAgreesWithTheMarchItReplaces) {
+    const TransmittanceParams p = earth();
+    const std::vector<Real> lut = buildFor(p);
+
+    const float planetRadius = p.planetRadius;
+    const float scaleHeight  = p.scaleHeight;
+    const float atmosphereHeight = scaleHeight * 8.0f;
+
+    // The extinction coefficients the march's depths are combined with, matching
+    // Shading.h's own.
+    const float betaR[3] = { 5.802e-6f, 13.558e-6f, 33.1e-6f };
+    const float betaMExt = 3.996e-6f * (p.turbidity / 2.2f) * 1.11f;
+
+    int    compared = 0;
+    double worst = 0.0;
+    double worstAlt = 0.0, worstMu = 0.0;
+
+    for (int hi = 0; hi <= 16; ++hi) {
+        const float h = kTopAltitude * static_cast<float>(hi) / 16.0f;
+        const float radius = planetRadius + h;
+
+        // The geometric horizon at this altitude; everything below it is blocked.
+        const double horizon = -std::sqrt(1.0 - double(planetRadius) * double(planetRadius)
+                                                / (double(radius) * double(radius)));
+
+        for (int mi = 0; mi <= 60; ++mi) {
+            const float mu = -1.0f + static_cast<float>(mi) * (2.0f / 60.0f);
+
+            // Skip the band where the difference is resolution, not accuracy.
+            if (double(mu) < horizon + 0.02) continue;
+
+            float sunR = 0.0f, sunM = 0.0f;
+            plugin::kernel::sunOpticalDepth(h, mu * radius, planetRadius,
+                                            atmosphereHeight, scaleHeight, sunR, sunM);
+
+            const plugin::kernel::Vec3 table =
+                plugin::kernel::sampleTransmittanceLut(lut.data(), scaleHeight, h, mu);
+
+            const float march[3] = {
+                std::exp(-(betaR[0] * sunR + betaMExt * sunM)),
+                std::exp(-(betaR[1] * sunR + betaMExt * sunM)),
+                std::exp(-(betaR[2] * sunR + betaMExt * sunM))
+            };
+            const float got[3] = { table.x, table.y, table.z };
+
+            for (int c = 0; c < 3; ++c) {
+                const double d = std::fabs(double(got[c]) - double(march[c]));
+                if (d > worst) { worst = d; worstAlt = h; worstMu = mu; }
+            }
+            ++compared;
+        }
+    }
+
+    std::printf("      table vs 8-step march: worst %.6f at altitude %.0f m, mu %.3f "
+                "(%d points)\n",
+                worst, worstAlt, worstMu, compared);
+
+    PL_CHECK(compared > 500);
+    PL_CHECK(worst < 0.04);
 }

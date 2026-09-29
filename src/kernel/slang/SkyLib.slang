@@ -43,7 +43,42 @@ public struct SkyInput
     float sunIntensity;
     float sunAngularRadius;  // degrees
     float groundAlbedo;
+
+    // ===================================================================
+    // THE TRANSMITTANCE TABLE, CARRIED IN THE STRUCT RATHER THAN THREADED THROUGH
+    // EVERY SIGNATURE BETWEEN HERE AND renderSample.
+    //
+    // A StructuredBuffer is legal as a struct member on the cuda and cpp targets --
+    // checked with slangc before this was written, not assumed -- and generates as
+    // the prelude's { T* data; size_t count; }, which is exactly what the host
+    // already fills for the drift table.
+    //
+    // THE ALTERNATIVE WAS THE INVASIVE ONE. skyRadiance is reached through
+    // environmentRadiance from inside the bounce loop, so passing the table as an
+    // argument means adding a parameter to every function on that path -- in a file
+    // whose whole discipline is that its expression structure is preserved so a
+    // bitwise parity test stays meaningful.
+    //
+    // 256 x 64 x 3 FLOATS, indexed [ (y * 256 + x) * 3 + channel ], x on mu and y on
+    // a SQUARED altitude axis. The host builds it in src/engine/Atmosphere.cpp and
+    // the layout is declared there; this is the reader.
+    //
+    // AN EMPTY BUFFER IS A LEGAL STATE and means "no table" -- see
+    // sampleTransmittanceLut, which falls back rather than indexing null.
+    // ===================================================================
+    StructuredBuffer<float> transmittance;
 };
+
+// The table's shape. MIRRORS src/engine/Atmosphere.h's kTransmittance* constants.
+//
+// WHAT STOPS THE TWO DRIFTING IS slang.skyParity, which compares this file's generated
+// CUDA against Shading.h bitwise -- and Shading.h reads the engine's constants
+// directly. A stride mismatch here would read the right memory at the wrong offsets
+// and diverge on the first sample, which is exactly what that test is for.
+static const int kLutMuSize       = 256;
+static const int kLutAltitudeSize = 64;
+static const int kLutChannels     = 3;
+static const int kLutFloats       = kLutMuSize * kLutAltitudeSize * kLutChannels;
 
 static const float kMieScaleHeight      = 1200.0f;
 static const float kAtmosphereEFoldings = 8.0f;
@@ -106,6 +141,93 @@ float altitudeFromQ(float q, float planetRadius)
     float R  = planetRadius;
     float rr = R * R + q;
     return q / (R + sqrt(rr > 0.0f ? rr : 0.0f));
+}
+
+// ===========================================================================
+// THE TABLE LOOKUP THAT REPLACES THE INNER SUN MARCH.
+//
+// A LINE-FOR-LINE MIRROR of sampleTransmittance() in src/engine/Atmosphere.cpp, which
+// is the reference the table's own tests are written against. The host computes in
+// double and this computes in float; that is the only intended difference, and it is
+// the same arrangement Shading.h and this file are already in.
+//
+// THE WARP AND ITS INVERSE ARE THE THING TO GET RIGHT. The build distributes altitude
+// by v*v so the texels land in the low atmosphere where the function actually moves;
+// this inverts with a square root. If either changed alone the sky would still be
+// smooth and would be wrong everywhere -- TheAltitudeWarpRoundTrips is the test that
+// holds them together, and it is the only one that catches it, because a mismatched
+// warp is still monotonic.
+//
+// CLAMPED AT BOTH EDGES, NOT WRAPPED. mu = -1 is straight down and +1 straight up;
+// a wrap would fetch the opposite hemisphere, so the zenith would sample the ground.
+//
+// AN EMPTY BUFFER RETURNS ONE -- unattenuated -- rather than zero. It cannot happen
+// when the host has run deriveRenderInputs, and if it ever does, an over-bright sky
+// still shows the geometry and the generator, while a black one reads as "the
+// renderer produces nothing" and sends the reader to the transport.
+// ===========================================================================
+float3 sampleTransmittanceLut(SkyInput p, float altitude, float mu)
+{
+    if (p.transmittance.getCount() < uint(kLutFloats)) return float3(1.0f, 1.0f, 1.0f);
+
+    float scaleHeight = p.scaleHeight > 1.0f ? p.scaleHeight : 1.0f;
+    float topAltitude = scaleHeight * kAtmosphereEFoldings;
+
+    float h = clampf(altitude, 0.0f, topAltitude);
+    float v = sqrt(h / topAltitude);
+
+    float m = clampf(mu, -1.0f, 1.0f);
+    float u = (m + 1.0f) * 0.5f;
+
+    // TEXEL CENTRES, matching the build: coordinate u maps to texel u*size - 0.5.
+    float fx = u * float(kLutMuSize) - 0.5f;
+    float fy = v * float(kLutAltitudeSize) - 0.5f;
+    if (fx < 0.0f) fx = 0.0f;
+    if (fy < 0.0f) fy = 0.0f;
+
+    int x0 = int(fx);
+    int y0 = int(fy);
+    if (x0 > kLutMuSize - 1)       x0 = kLutMuSize - 1;
+    if (y0 > kLutAltitudeSize - 1) y0 = kLutAltitudeSize - 1;
+
+    int x1 = x0 + 1;
+    int y1 = y0 + 1;
+    if (x1 > kLutMuSize - 1)       x1 = kLutMuSize - 1;
+    if (y1 > kLutAltitudeSize - 1) y1 = kLutAltitudeSize - 1;
+
+    float tx = fx - float(x0);
+    float ty = fy - float(y0);
+
+    int i00 = (y0 * kLutMuSize + x0) * kLutChannels;
+    int i10 = (y0 * kLutMuSize + x1) * kLutChannels;
+    int i01 = (y1 * kLutMuSize + x0) * kLutChannels;
+    int i11 = (y1 * kLutMuSize + x1) * kLutChannels;
+
+    float3 out = float3(0.0f, 0.0f, 0.0f);
+    for (int c = 0; c < kLutChannels; ++c)
+    {
+        float a = p.transmittance[i00 + c] * (1.0f - tx) + p.transmittance[i10 + c] * tx;
+        float b = p.transmittance[i01 + c] * (1.0f - tx) + p.transmittance[i11 + c] * tx;
+        float r = a * (1.0f - ty) + b * ty;
+
+        if (c == 0)      out.x = r;
+        else if (c == 1) out.y = r;
+        else             out.z = r;
+    }
+    return out;
+}
+
+// The lookup's mu, from a geocentric position and the sun.
+//
+// mu IS THE COSINE OF THE SUN'S ZENITH ANGLE AT THAT POINT, which is the dot of the
+// sun direction with the local UP -- and local up is the normalised geocentric
+// position, not world +Y. At the observer they are the same vector, which is exactly
+// why getting this wrong renders a correct-looking sky overhead and a wrong one
+// towards the horizon, where the curvature has actually turned the ground.
+float lutMuFor(float3 geocentric, float3 sun)
+{
+    float len = length(geocentric);
+    return len > 1.0f ? dot(geocentric, sun) / len : dot(geocentric, sun);
 }
 
 void sunOpticalDepth(float altitude, float bSun,
@@ -245,14 +367,22 @@ public float3 skyRadiance(SkyInput p, float3 rayDir, bool includeSunDisc)
         depthR += dR;
         depthM += dM;
 
-        float sunR, sunM;
-        sunOpticalDepth(hc, bSun, planetRadius, atmosphereHeight, scaleHeight, sunR, sunM);
+        // THE INNER MARCH IS A TABLE LOOKUP NOW. This used to be
+        // sunOpticalDepth(hc, bSun, ...), eight steps of quadrature run at every one
+        // of the twenty-four steps of THIS loop -- 192 exp() pairs per sky ray, for a
+        // quantity that does not depend on the view direction at all.
+        //
+        // FACTORED RATHER THAN SUMMED, and it is the same number. The old line
+        // exponentiated (view + sun) together; exp(-(a+b)) is exp(-a)*exp(-b), so
+        // splitting them is what lets the sun half come from the table while the view
+        // half stays an accumulation along this ray.
+        float3 sunT = sampleTransmittanceLut(p, hc, lutMuFor(pt, sun));
 
-        float tauX = betaR.x * (depthR + sunR) + betaMExt * (depthM + sunM);
-        float tauY = betaR.y * (depthR + sunR) + betaMExt * (depthM + sunM);
-        float tauZ = betaR.z * (depthR + sunR) + betaMExt * (depthM + sunM);
+        float3 viewT = float3(exp(-(betaR.x * depthR + betaMExt * depthM)),
+                              exp(-(betaR.y * depthR + betaMExt * depthM)),
+                              exp(-(betaR.z * depthR + betaMExt * depthM)));
 
-        float3 transmittance = float3(exp(-tauX), exp(-tauY), exp(-tauZ));
+        float3 transmittance = viewT * sunT;
 
         sumR = sumR + transmittance * dR;
         sumM = sumM + transmittance * dM;
@@ -270,13 +400,8 @@ public float3 skyRadiance(SkyInput p, float3 rayDir, bool includeSunDisc)
         float3 groundNormal = normalizeExact(groundPoint);
         float  nDotL = clampf(dot(groundNormal, sun), 0.0f, 1.0f);
 
-        float sunR, sunM;
-        sunOpticalDepth(0.0f, dot(groundPoint, sun), planetRadius, atmosphereHeight,
-                        scaleHeight, sunR, sunM);
-
-        float3 sunT = float3(exp(-(betaR.x * sunR + betaMExt * sunM)),
-                             exp(-(betaR.y * sunR + betaMExt * sunM)),
-                             exp(-(betaR.z * sunR + betaMExt * sunM)));
+        // ALTITUDE ZERO, because this point is on the ground by construction.
+        float3 sunT = sampleTransmittanceLut(p, 0.0f, lutMuFor(groundPoint, sun));
 
         float3 viewT = float3(exp(-(betaR.x * depthR + betaMExt * depthM)),
                               exp(-(betaR.y * depthR + betaMExt * depthM)),
@@ -344,19 +469,10 @@ public float3 sunTransmittanceAt(SkyInput p, float3 worldPos)
     float altitude = worldPos.y > 0.0f ? worldPos.y : 0.0f;
 
     float3 geocentric = float3(worldPos.x, planetRadius + worldPos.y, worldPos.z);
-    float  bSun = dot(geocentric, sun);
 
-    float sunR, sunM;
-    sunOpticalDepth(altitude, bSun, planetRadius, atmosphereHeight, scaleHeight,
-                    sunR, sunM);
-
-    float3 betaR    = rayleighCoefficients();
-    float  betaMExt = mieCoefficient(p.turbidity) * 1.11f;
-
-    // The same per-channel extinction the sky integral uses, spelled out rather than
-    // vectorised, because Sky.slang's transcription rule is that the expression
-    // structure is preserved and the parity test compares bitwise.
-    return float3(exp(-(betaR.x * sunR + betaMExt * sunM)),
-                  exp(-(betaR.y * sunR + betaMExt * sunM)),
-                  exp(-(betaR.z * sunR + betaMExt * sunM)));
+    // ONE LOOKUP, AND THIS IS THE HOTTER OF THE TWO CALL SITES. The sky march runs
+    // once per camera ray; this runs at EVERY scattering event in the bounce loop,
+    // for the next-event estimate. Eight steps of quadrature there was the single
+    // most-executed loop in the renderer.
+    return sampleTransmittanceLut(p, altitude, lutMuFor(geocentric, sun));
 }

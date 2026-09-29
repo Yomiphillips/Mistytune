@@ -12,6 +12,7 @@
 // It is the reason src/kernel/ is a separate directory from src/ae/ rather than a
 // file inside it.
 
+#include "../engine/Atmosphere.h"
 #include "../engine/CloudParams.h"
 #include "../engine/IceField.h"
 
@@ -88,6 +89,26 @@ struct RenderRequest {
     // reason: this file describes a render, and where its memory lives is part of
     // the description rather than something the kernel should have to guess.
     const void* driftBuffer = nullptr;
+
+    // ===================================================================
+    // THE TRANSMITTANCE TABLE, AND IT IS A POINTER RATHER THAN A MEMBER FOR A REASON
+    // THAT IS NOT STYLE.
+    //
+    // THIS STRUCT GOES TO THE DEVICE AS A KERNEL ARGUMENT BLOCK, which CUDA caps at
+    // 4 KB. The table is 256 x 64 x 3 floats -- 196 KB. Putting it here by value, the
+    // way DriftTable's 264 bytes sit above, would not fail at runtime: it would fail
+    // at LAUNCH, as an invalid configuration, on every frame.
+    //
+    // WHERE THE STORAGE ACTUALLY IS: a thread-local cache owned by the kernel
+    // library, keyed on the three parameters the table depends on -- see
+    // deriveRenderInputs() in KernelApi.h. It is rebuilt only when turbidity, planet
+    // radius or scale height move, which is what makes it affordable at all; a table
+    // rebuilt per launch would cost more than the march it replaces.
+    //
+    // SAME TWO-MEMORIES RULE AS driftBuffer. deriveRenderInputs() leaves the HOST
+    // pointer here; renderCuda uploads from it and overwrites this with the device
+    // pointer before the launch. A caller never sets it.
+    const void* transmittanceBuffer = nullptr;
 
     // A sound upper bound on the medium's density per metre, resolved from
     // quality.densityMajorant when the user pinned one and derived structurally

@@ -46,6 +46,14 @@
 // MINOR STAYS AT 3: out_flags, out_flags2 and the parameter list are untouched. The
 // output conversion moved into src/engine/OutputConvert.h and toImageView's fallback
 // narrowed, both of which are internal to the render path.
+//
+// BUILD 7 -- the atmosphere's inner sun march became a precomputed transmittance
+// table. It is the only change since build 6 that moves a pixel: 1.47x faster, and
+// more accurate at low sun, where the 8-step quadrature it replaces was worst. The
+// diagnostic log also names the working-space colour profile now.
+//
+// STILL MINOR 3: no parameter was added, no flag changed. The table reaches the
+// kernel as a pointer in RenderRequest, which AE never sees.
 #define PLUGIN_MAJOR 0
 #define PLUGIN_MINOR 3
-#define PLUGIN_BUILD 6
+#define PLUGIN_BUILD 7

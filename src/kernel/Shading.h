@@ -305,6 +305,20 @@ MT_DEVICE float altitudeFromQ(float q, float planetRadius) {
 // TAKES THE SAMPLE'S ALTITUDE AND THE DOT PRODUCT RATHER THAN THE POINT, so that
 // the caller -- which already knows both accurately -- does not force this function
 // to recover them by subtracting planet-sized numbers. See the ray-sphere note.
+// ===========================================================================
+// NO LONGER ON THE RENDER PATH, AND KEPT ON PURPOSE AS THE REFERENCE THE TABLE IS
+// CHECKED AGAINST.
+//
+// The sky march below reads src/engine/Atmosphere.cpp's precomputed table instead.
+// This is the integral that table is a precomputation OF, so the two are a genuine
+// cross-check -- LutAgreesWithTheMarchItReplaces in tests/unit/ compares them, and
+// that comparison is only meaningful while this remains an independent second
+// derivation rather than a call into the same code.
+//
+// The eight-step quadrature and its quadratic spacing are unchanged, so the
+// comparison is also a statement about how much the table's 64 uniform steps in
+// double improved on it.
+// ===========================================================================
 MT_DEVICE void sunOpticalDepth(float altitude, float bSun,
                                float planetRadius, float atmosphereHeight,
                                float rayleighScaleHeight,
@@ -356,8 +370,86 @@ MT_DEVICE void sunOpticalDepth(float altitude, float bSun,
     }
 }
 
+// ---------------------------------------------------------------------------
+// The transmittance table, read
+// ---------------------------------------------------------------------------
+
+// A LINE-FOR-LINE MIRROR of sampleTransmittanceLut() in src/kernel/slang/SkyLib.slang,
+// which is the production copy, and of sampleTransmittance() in
+// src/engine/Atmosphere.cpp, which is the host reference the table's tests use.
+//
+// THREE COPIES IS TWO MORE THAN ANYONE WANTS, and each one is pinned: slang.skyParity
+// compares this against the generated Slang bitwise, and LutAgreesWithTheHostSampler
+// compares it against the engine's. The alternative -- one definition -- is not
+// available, because one has to compile for CUDA, one has to be reachable from
+// src/engine/ which holds no kernel headers, and one is written in another language.
+//
+// THE SHAPE COMES FROM THE ENGINE rather than being redeclared, so at least the
+// strides cannot drift.
+MT_DEVICE Vec3 sampleTransmittanceLut(const float* lut, float scaleHeight,
+                                      float altitude, float mu) {
+    // AN ABSENT TABLE RETURNS ONE -- unattenuated -- rather than zero. See
+    // SkyLib.slang: an over-bright sky still shows the geometry, while a black one
+    // reads as a dead renderer and sends the reader to the transport.
+    if (lut == nullptr) return vec3(1.0f, 1.0f, 1.0f);
+
+    const float sh  = scaleHeight > 1.0f ? scaleHeight : 1.0f;
+    const float top = sh * kAtmosphereEFoldings;
+
+    const float h = clampf(altitude, 0.0f, top);
+    const float v = sqrtf(h / top);
+
+    const float m = clampf(mu, -1.0f, 1.0f);
+    const float u = (m + 1.0f) * 0.5f;
+
+    float fx = u * static_cast<float>(cloud::kTransmittanceMuSize) - 0.5f;
+    float fy = v * static_cast<float>(cloud::kTransmittanceAltitudeSize) - 0.5f;
+    if (fx < 0.0f) fx = 0.0f;
+    if (fy < 0.0f) fy = 0.0f;
+
+    int x0 = static_cast<int>(fx);
+    int y0 = static_cast<int>(fy);
+    if (x0 > cloud::kTransmittanceMuSize - 1)       x0 = cloud::kTransmittanceMuSize - 1;
+    if (y0 > cloud::kTransmittanceAltitudeSize - 1) y0 = cloud::kTransmittanceAltitudeSize - 1;
+
+    int x1 = x0 + 1;
+    int y1 = y0 + 1;
+    if (x1 > cloud::kTransmittanceMuSize - 1)       x1 = cloud::kTransmittanceMuSize - 1;
+    if (y1 > cloud::kTransmittanceAltitudeSize - 1) y1 = cloud::kTransmittanceAltitudeSize - 1;
+
+    const float tx = fx - static_cast<float>(x0);
+    const float ty = fy - static_cast<float>(y0);
+
+    const int i00 = (y0 * cloud::kTransmittanceMuSize + x0) * cloud::kTransmittanceChannels;
+    const int i10 = (y0 * cloud::kTransmittanceMuSize + x1) * cloud::kTransmittanceChannels;
+    const int i01 = (y1 * cloud::kTransmittanceMuSize + x0) * cloud::kTransmittanceChannels;
+    const int i11 = (y1 * cloud::kTransmittanceMuSize + x1) * cloud::kTransmittanceChannels;
+
+    float out[3] = { 0.0f, 0.0f, 0.0f };
+    for (int c = 0; c < cloud::kTransmittanceChannels; ++c) {
+        const float a = lut[i00 + c] * (1.0f - tx) + lut[i10 + c] * tx;
+        const float b = lut[i01 + c] * (1.0f - tx) + lut[i11 + c] * tx;
+        out[c] = a * (1.0f - ty) + b * ty;
+    }
+    return vec3(out[0], out[1], out[2]);
+}
+
+// The lookup's mu: the cosine of the sun's zenith angle at a geocentric point.
+//
+// LOCAL UP IS THE NORMALISED GEOCENTRIC POSITION, not world +Y. The two agree at the
+// observer and diverge towards the horizon, which is exactly where getting this wrong
+// renders a plausible sky overhead and a wrong one where it matters.
+MT_DEVICE float lutMuFor(Vec3 geocentric, Vec3 sun) {
+    const float len = sqrtf(dot(geocentric, geocentric));
+    return len > 1.0f ? dot(geocentric, sun) / len : dot(geocentric, sun);
+}
+
 // Radiance along one ray, in the same linear units throughout.
-MT_DEVICE Vec3 skyRadiance(const cloud::FieldParams& field, Vec3 rayDir) {
+//
+// TAKES THE TABLE, because the sun-transmittance inner march is now a lookup. A null
+// table is legal and means "no atmospheric extinction towards the sun".
+MT_DEVICE Vec3 skyRadiance(const cloud::FieldParams& field, Vec3 rayDir,
+                           const float* transmittanceLut) {
     const cloud::AtmosphereParams& atm = field.atmosphere;
     const Vec3 sun = sunDirection(atm);
 
@@ -478,15 +570,22 @@ MT_DEVICE Vec3 skyRadiance(const cloud::FieldParams& field, Vec3 rayDir) {
         depthR += dR;
         depthM += dM;
 
-        float sunR = 0.0f, sunM = 0.0f;
-        sunOpticalDepth(hc, bSun, planetRadius, atmosphereHeight, scaleHeight, sunR, sunM);
+        // THE INNER MARCH IS A TABLE LOOKUP NOW -- eight steps of quadrature, run at
+        // every one of the twenty-four steps of this loop, for a quantity that does
+        // not depend on the view direction at all.
+        //
+        // FACTORED RATHER THAN SUMMED, AND IT IS THE SAME NUMBER. The old line
+        // exponentiated (view + sun) together; exp(-(a+b)) is exp(-a)*exp(-b), so
+        // splitting them is what lets the sun half come from the table while the view
+        // half stays an accumulation along this ray.
+        const Vec3 sunT = sampleTransmittanceLut(transmittanceLut, scaleHeight,
+                                                 hc, lutMuFor(p, sun));
 
-        // Transmittance from the sun to p, and from p back to the viewer.
-        const float tauX = betaR.x * (depthR + sunR) + betaMExt * (depthM + sunM);
-        const float tauY = betaR.y * (depthR + sunR) + betaMExt * (depthM + sunM);
-        const float tauZ = betaR.z * (depthR + sunR) + betaMExt * (depthM + sunM);
+        const Vec3 viewT = vec3(expf(-(betaR.x * depthR + betaMExt * depthM)),
+                                expf(-(betaR.y * depthR + betaMExt * depthM)),
+                                expf(-(betaR.z * depthR + betaMExt * depthM)));
 
-        const Vec3 transmittance = vec3(expf(-tauX), expf(-tauY), expf(-tauZ));
+        const Vec3 transmittance = viewT * sunT;
 
         sumR = sumR + transmittance * dR;
         sumM = sumM + transmittance * dM;
@@ -513,13 +612,9 @@ MT_DEVICE Vec3 skyRadiance(const cloud::FieldParams& field, Vec3 rayDir) {
         const Vec3 groundNormal = normalize(groundPoint);
         const float nDotL = clampf(dot(groundNormal, sun), 0.0f, 1.0f);
 
-        float sunR = 0.0f, sunM = 0.0f;
-        sunOpticalDepth(0.0f, dot(groundPoint, sun), planetRadius, atmosphereHeight,
-                        scaleHeight, sunR, sunM);
-
-        const Vec3 sunT = vec3(expf(-(betaR.x * sunR + betaMExt * sunM)),
-                               expf(-(betaR.y * sunR + betaMExt * sunM)),
-                               expf(-(betaR.z * sunR + betaMExt * sunM)));
+        // ALTITUDE ZERO, because this point is on the ground by construction.
+        const Vec3 sunT = sampleTransmittanceLut(transmittanceLut, scaleHeight,
+                                                 0.0f, lutMuFor(groundPoint, sun));
 
         // Transmittance from the viewer to the ground, which is what gives distant
         // ground its aerial perspective.

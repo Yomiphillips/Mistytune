@@ -175,6 +175,26 @@ thread_local DeviceScratch g_accum;
 // thread because DeviceScratch is grow-only.
 thread_local DeviceScratch g_drift;
 
+// The transmittance table, uploaded once per launch.
+//
+// ===========================================================================
+// A FOURTH BUFFER, AND THIS ONE IS 196 KB RATHER THAN 264 BYTES -- SO THE "PASS IT
+// INSIDE RenderRequest" OPTION IS NOT MERELY WASTEFUL HERE, IT IS ILLEGAL.
+//
+// The kernel argument block is capped at 4 KB. A 196 KB member would fail the LAUNCH
+// as an invalid configuration, on every frame, rather than degrading.
+//
+// UPLOADED PER LAUNCH RATHER THAN WHEN IT CHANGES, which is a deliberate trade. At
+// about 6 GB/s that is roughly 30 microseconds against a launch sized to ~190 ms of
+// work -- under two ten-thousandths. Tracking dirtiness would mean a second copy of
+// the cache key on this side of the wall and a way to invalidate it when the
+// thread-local host cache rebuilds, which is more state than the copy costs.
+//
+// THE HOST SIDE REBUILDS RARELY, WHICH IS WHERE THE REAL SAVING IS. This uploads
+// whatever cachedTransmittanceLut() last built; that function is the one keyed on the
+// parameters, and it is the million exp() calls that would actually hurt.
+thread_local DeviceScratch g_transmittance;
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -319,6 +339,29 @@ bool renderCuda(const RenderRequest& req) {
         return false;
     }
     work.driftBuffer = driftDev;
+
+    // THE TRANSMITTANCE TABLE: HOST POINTER IN, DEVICE POINTER OUT.
+    //
+    // deriveRenderInputs left the thread-local cache's host pointer in the request.
+    // Read it before overwriting -- that is the only copy of where the table is.
+    //
+    // A NULL TABLE IS NOT A REASON TO FAIL THE LAUNCH, and that is a judgement rather
+    // than laziness: the sky reads it, the cloud transport does not, so a missing
+    // table costs the atmosphere and not the frame. The kernel's sampler treats a
+    // zero count as "no table" and falls back rather than indexing null.
+    const void* lutHost = work.transmittanceBuffer;
+    if (lutHost) {
+        const size_t lutBytes = sizeof(cloud::Real) * static_cast<size_t>(cloud::kTransmittanceFloats);
+        void* lutDev = g_transmittance.reserve(lutBytes);
+        if (!lutDev) return false;   // reserve() has already set the error
+
+        const cudaError_t lutErr = cudaMemcpy(lutDev, lutHost, lutBytes, cudaMemcpyHostToDevice);
+        if (lutErr != cudaSuccess) {
+            setError("transmittance table upload", lutErr);
+            return false;
+        }
+        work.transmittanceBuffer = lutDev;
+    }
 
     const dim3 block(kBlockX, kBlockY, 1);
     const dim3 grid(static_cast<unsigned>(divideRoundUp(req.dest.widthPx,  kBlockX)),
