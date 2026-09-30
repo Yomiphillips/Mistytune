@@ -43,6 +43,13 @@ add_executable(plugin_tests
     # in AE came back flat blue; see the file's own header on why it could not have
     # caught that, and what it does guard instead.
     unit/TestCamera.cpp
+    # The sun-camera presets. The row that matters is the one directly under the
+    # hero: looking straight up has no forward heading, and a preset that flipped
+    # there would swing the sun across the sky between two frames of one tilt.
+    unit/TestSunPlacement.cpp
+    # The classifier readout. The contract is AE's 31-character parameter name,
+    # swept across the parameter space; the rest pin each atlas rule to a scene.
+    unit/TestClassifier.cpp
 
     # The output conversion: 8, 16 and 32 bpc, the sRGB curve and the alpha rule.
     # PLAN.md's Phase 1 exit asks for all three bit depths to be CORRECT, and until

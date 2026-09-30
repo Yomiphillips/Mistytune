@@ -135,6 +135,17 @@
 //
 // A MINOR BUMP BECAUSE THE PARAMETER LIST CHANGED: eight rows were inserted into the
 // Camera group, and a default changed.
+// MINOR 9, BUILD 17 -- THE AIR IN FRONT OF THE CLOUD, THE SUN THAT FOLLOWS THE LENS, AND
+// A NAME FOR THE SKY. Aerial perspective on the clouds (missing since build 9) and their
+// shadows in that air, which the Cloud Shadows In Air checkbox had promised since Phase
+// 1 without anything reading it. The sky's own march is fixed on the way: it dimmed each
+// step by all of its own depth rather than half, and was 16.5% dark at the horizon. Sun
+// Placement puts the sun relative to the camera, backlit by default. The classifier
+// readout names the sky at the top of the panel.
+//
+// A MINOR BUMP BECAUSE THE PARAMETER LIST AND THE FLAGS CHANGED: the readout moved to
+// the top, Sun Placement was inserted at the top of Sun and Sky, thirty controls gained
+// PF_ParamFlag_SUPERVISE, and out_flags gained PF_OutFlag_SEND_UPDATE_PARAMS_UI.
 #define PLUGIN_MAJOR 0
-#define PLUGIN_MINOR 8
-#define PLUGIN_BUILD 16
+#define PLUGIN_MINOR 9
+#define PLUGIN_BUILD 17

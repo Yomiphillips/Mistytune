@@ -58,7 +58,12 @@
 #      declaring something false today.
 #
 # PF_OutFlag_DEEP_COLOR_AWARE (1 << 25) = 33554432
-math(EXPR MT_EFFECT_OUT_FLAGS "1024 | 33554432")
+#
+# PF_OutFlag_SEND_UPDATE_PARAMS_UI (1 << 26) = 67108864
+#   -- build 17. PF_Cmd_UPDATE_PARAMS_UI is what names the classifier readout when
+#      the Effect Controls open and when a project loads. Without it the readout
+#      says "--" until a supervised control is touched.
+math(EXPR MT_EFFECT_OUT_FLAGS "1024 | 33554432 | 67108864")
 
 # PF_OutFlag2_I_USE_3D_CAMERA              (1 << 1)  = 2
 #   -- required before AEGP_GetEffectCameraMatrix will return anything, and the

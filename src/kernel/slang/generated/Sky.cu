@@ -401,11 +401,13 @@ static __device__ float3  skyRadiance_0(SkyInput_0 * p_3, float originAltitude_0
         float _S35 = - hc_0;
         float dR_0 = (F32_exp((_S35 / scaleHeight_2))) * dt_0;
         float dM_0 = (F32_exp((_S35 / 1200.0f))) * dt_0;
+        float midR_0 = depthR_0 + 0.5f * dR_0;
+        float midM_0 = depthM_0 + 0.5f * dM_0;
         float depthR_1 = depthR_0 + dR_0;
         float depthM_1 = depthM_0 + dM_0;
         float3  _S36 = sampleTransmittanceLut_0(p_3, hc_0, lutMuFor_0(make_float3 (rayDir_0.x * tMid_0, _S28 + _S29 * tMid_0, rayDir_0.z * tMid_0), _S25));
-        float _S37 = betaMExt_0 * depthM_1;
-        float3  transmittance_0 = make_float3 ((F32_exp((- (betaR_0.x * depthR_1 + _S37)))), (F32_exp((- (betaR_0.y * depthR_1 + _S37)))), (F32_exp((- (betaR_0.z * depthR_1 + _S37))))) * _S36;
+        float _S37 = betaMExt_0 * midM_0;
+        float3  transmittance_0 = make_float3 ((F32_exp((- (betaR_0.x * midR_0 + _S37)))), (F32_exp((- (betaR_0.y * midR_0 + _S37)))), (F32_exp((- (betaR_0.z * midR_0 + _S37))))) * _S36;
         float3  _S38 = sumM_0 + transmittance_0 * make_float3 (dM_0);
         sumR_0 = sumR_0 + transmittance_0 * make_float3 (dR_0);
         sumM_0 = _S38;
@@ -472,6 +474,350 @@ extern "C" __global__ void skyMain(SkyInput_0 params_0, float originAltitude_1, 
     SkyInput_0 _S46 = params_0;
     float3  _S47 = skyRadiance_0(&_S46, originAltitude_1, _S45, true);
     *_S44 = _S47;
+    return;
+}
+
+struct AirSegment_0
+{
+    float3  airIn_0;
+    float3  airT_0;
+    float shadowAt_0;
+};
+
+static __device__ AirSegment_0 airSegment_0(SkyInput_0 * p_4, float originAltitude_2, float3  rayDir_1, float dist_0, float u1_0, float u2_0)
+{
+    AirSegment_0 seg_0;
+    float3  _S48 = make_float3 (0.0f, 0.0f, 0.0f);
+    (&seg_0)->airIn_0 = _S48;
+    (&seg_0)->airT_0 = make_float3 (1.0f, 1.0f, 1.0f);
+    (&seg_0)->shadowAt_0 = -1.0f;
+    float3  _S49 = sunDirection_0(p_4);
+    float _S50 = p_4->planetRadius_0;
+    float planetRadius_4;
+    if((p_4->planetRadius_0) > 1000.0f)
+    {
+        planetRadius_4 = _S50;
+    }
+    else
+    {
+        planetRadius_4 = 1000.0f;
+    }
+    float _S51 = p_4->scaleHeight_0;
+    float scaleHeight_3;
+    if((p_4->scaleHeight_0) > 1.0f)
+    {
+        scaleHeight_3 = _S51;
+    }
+    else
+    {
+        scaleHeight_3 = 1.0f;
+    }
+    float atmosphereHeight_1 = scaleHeight_3 * 8.0f;
+    float observerAltitude_1;
+    if(originAltitude_2 > 0.0f)
+    {
+        observerAltitude_1 = originAltitude_2;
+    }
+    else
+    {
+        observerAltitude_1 = 0.0f;
+    }
+    float _S52 = planetRadius_4 + observerAltitude_1;
+    float _S53 = rayDir_1.y;
+    float b_3 = _S52 * _S53;
+    float cGround_1 = shellC_0(observerAltitude_1, planetRadius_4, 0.0f);
+    float tTop_1 = shellExit_0(b_3, shellC_0(observerAltitude_1, planetRadius_4, atmosphereHeight_1));
+    bool _S54;
+    if(tTop_1 <= 0.0f)
+    {
+        _S54 = true;
+    }
+    else
+    {
+        _S54 = !(dist_0 > 0.0f);
+    }
+    if(_S54)
+    {
+        return seg_0;
+    }
+    float tGround_1 = shellEnter_0(b_3, cGround_1);
+    float tMax_0;
+    if(tGround_1 > 0.0f)
+    {
+        tMax_0 = tGround_1;
+    }
+    else
+    {
+        tMax_0 = tTop_1;
+    }
+    if(dist_0 < tMax_0)
+    {
+        tMax_0 = dist_0;
+    }
+    float3  betaR_1 = rayleighCoefficients_0();
+    float betaM_1 = mieCoefficient_0(p_4->turbidity_0);
+    float betaMExt_1 = betaM_1 * 1.11000001430511475f;
+    float cosTheta_1 = clampf_0(dot_0(rayDir_1, _S49), -1.0f, 1.0f);
+    float phaseR_1 = 0.05968309938907623f * (1.0f + cosTheta_1 * cosTheta_1);
+    float g_1 = clampf_0(p_4->mieAnisotropy_0, -0.94999998807907104f, 0.94999998807907104f);
+    float _S55 = g_1 * g_1;
+    float hgDenom_1 = 1.0f + _S55 - 2.0f * g_1 * cosTheta_1;
+    float _S56 = 1.0f - _S55;
+    float _S57 = 12.56637096405029297f * hgDenom_1;
+    if(hgDenom_1 > 9.99999997475242708e-07f)
+    {
+        observerAltitude_1 = hgDenom_1;
+    }
+    else
+    {
+        observerAltitude_1 = 9.99999997475242708e-07f;
+    }
+    float phaseM_1 = _S56 / (_S57 * (F32_sqrt((observerAltitude_1))));
+    float tPrev_1 = 0.0f;
+    float3  sumR_1 = _S48;
+    float3  sumM_1 = _S48;
+    float u_0 = u1_0;
+    float pickedFrom_0 = -1.0f;
+    float pickedSpan_0 = 0.0f;
+    int i_2 = int(0);
+    float depthR_2 = 0.0f;
+    float depthM_2 = 0.0f;
+    float lumTotal_0 = 0.0f;
+    for(;;)
+    {
+        if(i_2 < int(24))
+        {
+        }
+        else
+        {
+            break;
+        }
+        int _S58 = i_2 + int(1);
+        float tNext_1 = tMax_0 * float(_S58 * _S58) * 0.00173611112404615f;
+        float dt_1 = tNext_1 - tPrev_1;
+        float tMid_1 = (tPrev_1 + tNext_1) * 0.5f;
+        float u_1;
+        float pickedFrom_1;
+        float pickedSpan_1;
+        if(dt_1 <= 0.0f)
+        {
+            u_1 = u_0;
+            pickedFrom_1 = pickedFrom_0;
+            pickedSpan_1 = pickedSpan_0;
+            tPrev_1 = tNext_1;
+            u_0 = u_1;
+            pickedFrom_0 = pickedFrom_1;
+            pickedSpan_0 = pickedSpan_1;
+            i_2 = _S58;
+            continue;
+        }
+        float h_1 = altitudeFromQ_0(cGround_1 + 2.0f * tMid_1 * b_3 + tMid_1 * tMid_1, planetRadius_4);
+        float hc_1;
+        if(h_1 < 0.0f)
+        {
+            hc_1 = 0.0f;
+        }
+        else
+        {
+            hc_1 = h_1;
+        }
+        float _S59 = - hc_1;
+        float dR_1 = (F32_exp((_S59 / scaleHeight_3))) * dt_1;
+        float dM_1 = (F32_exp((_S59 / 1200.0f))) * dt_1;
+        float midR_1 = depthR_2 + 0.5f * dR_1;
+        float midM_1 = depthM_2 + 0.5f * dM_1;
+        float depthR_3 = depthR_2 + dR_1;
+        float depthM_3 = depthM_2 + dM_1;
+        float3  _S60 = sampleTransmittanceLut_0(p_4, hc_1, lutMuFor_0(make_float3 (rayDir_1.x * tMid_1, _S52 + _S53 * tMid_1, rayDir_1.z * tMid_1), _S49));
+        float _S61 = betaMExt_1 * midM_1;
+        float3  transmittance_1 = make_float3 ((F32_exp((- (betaR_1.x * midR_1 + _S61)))), (F32_exp((- (betaR_1.y * midR_1 + _S61)))), (F32_exp((- (betaR_1.z * midR_1 + _S61))))) * _S60;
+        float3  _S62 = sumR_1 + transmittance_1 * make_float3 (dR_1);
+        float3  _S63 = sumM_1 + transmittance_1 * make_float3 (dM_1);
+        float3  c_3 = transmittance_1 * (betaR_1 * make_float3 (phaseR_1 * dR_1) + make_float3 (betaM_1 * (phaseM_1 * dM_1)));
+        float lum_0 = c_3.x + c_3.y + c_3.z;
+        float lumTotal_1;
+        if(lum_0 > 0.0f)
+        {
+            float lumTotal_2 = lumTotal_0 + lum_0;
+            float keep_0 = lum_0 / lumTotal_2;
+            if(u_0 < keep_0)
+            {
+                u_1 = u_0 / keep_0;
+                pickedFrom_1 = tPrev_1;
+                pickedSpan_1 = dt_1;
+            }
+            else
+            {
+                u_1 = (u_0 - keep_0) / (1.0f - keep_0);
+                pickedFrom_1 = pickedFrom_0;
+                pickedSpan_1 = pickedSpan_0;
+            }
+            lumTotal_1 = lumTotal_2;
+        }
+        else
+        {
+            u_1 = u_0;
+            pickedFrom_1 = pickedFrom_0;
+            pickedSpan_1 = pickedSpan_0;
+            lumTotal_1 = lumTotal_0;
+        }
+        sumR_1 = _S62;
+        sumM_1 = _S63;
+        depthR_2 = depthR_3;
+        depthM_2 = depthM_3;
+        lumTotal_0 = lumTotal_1;
+        tPrev_1 = tNext_1;
+        u_0 = u_1;
+        pickedFrom_0 = pickedFrom_1;
+        pickedSpan_0 = pickedSpan_1;
+        i_2 = _S58;
+    }
+    float _S64 = sunIrradianceTop_0(p_4);
+    (&seg_0)->airIn_0 = (sumR_1 * betaR_1 * make_float3 (phaseR_1) + sumM_1 * make_float3 (betaM_1 * phaseM_1)) * make_float3 (_S64);
+    float _S65 = betaMExt_1 * depthM_2;
+    (&seg_0)->airT_0 = make_float3 ((F32_exp((- (betaR_1.x * depthR_2 + _S65)))), (F32_exp((- (betaR_1.y * depthR_2 + _S65)))), (F32_exp((- (betaR_1.z * depthR_2 + _S65)))));
+    if(pickedFrom_0 >= 0.0f)
+    {
+        (&seg_0)->shadowAt_0 = pickedFrom_0 + clampf_0(u2_0, 0.0f, 1.0f) * pickedSpan_0;
+    }
+    return seg_0;
+}
+
+static __device__ float3  airTransmittance_0(SkyInput_0 * p_5, float originAltitude_3, float3  rayDir_2, float dist_1)
+{
+    float _S66 = p_5->planetRadius_0;
+    float planetRadius_5;
+    if((p_5->planetRadius_0) > 1000.0f)
+    {
+        planetRadius_5 = _S66;
+    }
+    else
+    {
+        planetRadius_5 = 1000.0f;
+    }
+    float _S67 = p_5->scaleHeight_0;
+    float scaleHeight_4;
+    if((p_5->scaleHeight_0) > 1.0f)
+    {
+        scaleHeight_4 = _S67;
+    }
+    else
+    {
+        scaleHeight_4 = 1.0f;
+    }
+    float atmosphereHeight_2 = scaleHeight_4 * 8.0f;
+    float observerAltitude_2;
+    if(originAltitude_3 > 0.0f)
+    {
+        observerAltitude_2 = originAltitude_3;
+    }
+    else
+    {
+        observerAltitude_2 = 0.0f;
+    }
+    float b_4 = (planetRadius_5 + observerAltitude_2) * rayDir_2.y;
+    float cGround_2 = shellC_0(observerAltitude_2, planetRadius_5, 0.0f);
+    float tTop_2 = shellExit_0(b_4, shellC_0(observerAltitude_2, planetRadius_5, atmosphereHeight_2));
+    bool _S68;
+    if(tTop_2 <= 0.0f)
+    {
+        _S68 = true;
+    }
+    else
+    {
+        _S68 = !(dist_1 > 0.0f);
+    }
+    if(_S68)
+    {
+        return make_float3 (1.0f, 1.0f, 1.0f);
+    }
+    float tGround_2 = shellEnter_0(b_4, cGround_2);
+    float tMax_1;
+    if(tGround_2 > 0.0f)
+    {
+        tMax_1 = tGround_2;
+    }
+    else
+    {
+        tMax_1 = tTop_2;
+    }
+    if(dist_1 < tMax_1)
+    {
+        tMax_1 = dist_1;
+    }
+    float3  betaR_2 = rayleighCoefficients_0();
+    float betaMExt_2 = mieCoefficient_0(p_5->turbidity_0) * 1.11000001430511475f;
+    float tPrev_2 = 0.0f;
+    int i_3 = int(0);
+    float depthR_4 = 0.0f;
+    float depthM_4 = 0.0f;
+    for(;;)
+    {
+        if(i_3 < int(24))
+        {
+        }
+        else
+        {
+            break;
+        }
+        int _S69 = i_3 + int(1);
+        float tNext_2 = tMax_1 * float(_S69 * _S69) * 0.00173611112404615f;
+        float dt_2 = tNext_2 - tPrev_2;
+        float tMid_2 = (tPrev_2 + tNext_2) * 0.5f;
+        if(dt_2 <= 0.0f)
+        {
+            tPrev_2 = tNext_2;
+            i_3 = _S69;
+            continue;
+        }
+        float h_2 = altitudeFromQ_0(cGround_2 + 2.0f * tMid_2 * b_4 + tMid_2 * tMid_2, planetRadius_5);
+        float hc_2;
+        if(h_2 < 0.0f)
+        {
+            hc_2 = 0.0f;
+        }
+        else
+        {
+            hc_2 = h_2;
+        }
+        float _S70 = - hc_2;
+        float depthM_5 = depthM_4 + (F32_exp((_S70 / 1200.0f))) * dt_2;
+        depthR_4 = depthR_4 + (F32_exp((_S70 / scaleHeight_4))) * dt_2;
+        depthM_4 = depthM_5;
+        tPrev_2 = tNext_2;
+        i_3 = _S69;
+    }
+    float _S71 = betaMExt_2 * depthM_4;
+    return make_float3 ((F32_exp((- (betaR_2.x * depthR_4 + _S71)))), (F32_exp((- (betaR_2.y * depthR_4 + _S71)))), (F32_exp((- (betaR_2.z * depthR_4 + _S71)))));
+}
+
+extern "C" __global__ void airMain(SkyInput_0 params_1, float originAltitude_4, StructuredBuffer<float3 > directions_1, StructuredBuffer<float> distances_0, StructuredBuffer<float2 > uniforms_0, RWStructuredBuffer<float3 > airIn_1, RWStructuredBuffer<float3 > airT_1, RWStructuredBuffer<float3 > trans_0, RWStructuredBuffer<float> shadowAt_1, RWStructuredBuffer<float3 > sky_0, int count_1)
+{
+    int i_4 = int((blockIdx * blockDim + threadIdx).x);
+    if(i_4 >= count_1)
+    {
+        return;
+    }
+    float3  _S72 = slang_ldg_0((&(directions_1)[i_4]));
+    float _S73 = __ldg((&(distances_0)[i_4]));
+    float2  _S74 = __ldg((&(uniforms_0)[i_4]));
+    float _S75 = _S74.x;
+    float2  _S76 = __ldg((&(uniforms_0)[i_4]));
+    float _S77 = _S76.y;
+    SkyInput_0 _S78 = params_1;
+    AirSegment_0 _S79 = airSegment_0(&_S78, originAltitude_4, _S72, _S73, _S75, _S77);
+    *(&(airIn_1)[i_4]) = _S79.airIn_0;
+    *(&(airT_1)[i_4]) = _S79.airT_0;
+    *(&(shadowAt_1)[i_4]) = _S79.shadowAt_0;
+    float3  * _S80 = (&(trans_0)[i_4]);
+    float _S81 = __ldg((&(distances_0)[i_4]));
+    SkyInput_0 _S82 = params_1;
+    float3  _S83 = airTransmittance_0(&_S82, originAltitude_4, _S72, _S81);
+    *_S80 = _S83;
+    float3  * _S84 = (&(sky_0)[i_4]);
+    SkyInput_0 _S85 = params_1;
+    float3  _S86 = skyRadiance_0(&_S85, originAltitude_4, _S72, false);
+    *_S84 = _S86;
     return;
 }
 

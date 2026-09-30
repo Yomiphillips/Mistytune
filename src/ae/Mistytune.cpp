@@ -409,6 +409,20 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
                 static_cast<double>(data->view.observerZ));
     }
 
+    // THE SUN, PLACED RELATIVE TO THE CAMERA JUST RESOLVED -- and before the fingerprint
+    // below, because under a preset a camera move IS a lighting change and the field key
+    // has to say so. Manual returns the slider untouched. See src/engine/SunPlacement.h.
+    const cloud::SunPlacement placement = toSunPlacement(values);
+    data->field.atmosphere.sunAzimuth =
+        cloud::placedSunAzimuth(placement, data->field.atmosphere.sunAzimuth, data->view);
+    diagLog("  sun: %s, azimuth %.1f deg, elevation %.1f deg",
+            placement == cloud::SunPlacement::Backlit  ? "backlit"
+            : placement == cloud::SunPlacement::SideLit ? "side lit"
+            : placement == cloud::SunPlacement::FrontLit ? "front lit"
+                                                        : "manual",
+            static_cast<double>(data->field.atmosphere.sunAzimuth),
+            static_cast<double>(data->field.atmosphere.sunElevation));
+
     // WHICH CAMERA, NAMED RATHER THAN INFERRED FROM THE PICTURE. "No camera,
     // defaulting" and "the comp's camera, and it points there" produce different
     // skies, and telling them apart by looking is exactly the diagnosis this
@@ -1134,6 +1148,46 @@ PF_Err smartRender(PF_InData* in_data, PF_OutData* out_data,
 
 // PF_Handle RATHER THAN new, because AE owns sequence data across a save and
 // reload and has to be able to move it.
+// ===========================================================================
+// THE CLASSIFIER READOUT, RENAMED IN PLACE.
+//
+// The readout is a parameter whose NAME is the text (see addStaticText in Params.h), and
+// PF_UpdateParamUI on a copy with a new name is how the SDK's own Supervisor sample
+// renames one. Called for PF_Cmd_USER_CHANGED_PARAM, which the classifier's supervised
+// inputs send as they change, and for PF_Cmd_UPDATE_PARAMS_UI, which covers opening the
+// panel and loading a project.
+//
+// SKIPPED WHEN THE TEXT HAS NOT CHANGED, so a slider drag that stays inside one species
+// does not ask AE to redraw the panel on every step.
+// ===========================================================================
+PF_Err updateReadout(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* params[]) {
+    if (!params || !params[kMistytuneClassification]) return PF_Err_NONE;
+
+    ParamValues values;
+    readParamsFromArray(params, values);
+
+    char text[cloud::kReadoutMaxChars + 1];
+    cloud::describeSky(cloud::classifySky(toFieldForReadout(values)), text,
+                       static_cast<int>(sizeof(text)));
+
+    const PF_ParamDef& current = *params[kMistytuneClassification];
+    if (std::strncmp(current.PF_DEF_NAME, text, sizeof(current.PF_DEF_NAME)) == 0) {
+        return PF_Err_NONE;
+    }
+
+    // A COPY, as PF_UpdateParamUI requires; the params array is AE's.
+    PF_ParamDef renamed = current;
+    renamed.param_type = PF_Param_FLOAT_SLIDER;
+    PF_STRNNCPY(renamed.PF_DEF_NAME, text, sizeof(renamed.PF_DEF_NAME));
+
+    AEFX_SuiteScoper<PF_ParamUtilsSuite3> paramUtils(in_data, kPFParamUtilsSuite,
+                                                     kPFParamUtilsSuiteVersion3, out_data);
+    const PF_Err err = paramUtils->PF_UpdateParamUI(in_data->effect_ref,
+                                                    kMistytuneClassification, &renamed);
+    diagLog("readout: \"%s\" (err %d)", text, static_cast<int>(err));
+    return err;
+}
+
 PF_Err sequenceSetup(PF_InData* in_data, PF_OutData* out_data) {
     AEGP_SuiteHandler suites(in_data->pica_basicP);
 
@@ -1224,7 +1278,7 @@ PF_Err EffectMain(
     PF_ParamDef*    params[],
     PF_LayerDef*    output,
     void*           extra) {
-    (void)params; (void)output;
+    (void)output;
 
     PF_Err err = PF_Err_NONE;
 
@@ -1247,6 +1301,10 @@ PF_Err EffectMain(
                 break;
             case PF_Cmd_SEQUENCE_SETDOWN:
                 err = sequenceSetdown(in_data, out_data);
+                break;
+            case PF_Cmd_USER_CHANGED_PARAM:
+            case PF_Cmd_UPDATE_PARAMS_UI:
+                err = updateReadout(in_data, out_data, params);
                 break;
             case PF_Cmd_GPU_DEVICE_SETUP:
                 err = gpuDeviceSetup(in_data, out_data,

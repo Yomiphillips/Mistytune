@@ -171,6 +171,14 @@ struct RenderRequest {
     // chosen here once, and 0 survives only so the CLI can A/B it.
     float neeTentativeScale = 1.0f;
 
+    // THE AIR BETWEEN THE EYE AND THE FIRST CLOUD: its airlight in front, its
+    // transmittance on the cloud behind. ON, because it is the physics; OFF survives so
+    // the CLI can A/B it and so the goldens blessed before build 17 can be reproduced.
+    // Not hashed and not a user parameter, like the two knobs beside it. Whether the
+    // clouds' shadows fall in that air is a user parameter, and lives in
+    // AtmosphereParams::cloudShadowsInMedium.
+    bool aerialPerspective = true;
+
     // THE CUMULUS LAYER'S PROCEDURAL MAJORANT GRID, on or off. An A/B knob for the CLI
     // and nothing else, like neeTentativeScale: any majorant at or above the density is
     // unbiased, so this moves cost and never the converged image. Not hashed.

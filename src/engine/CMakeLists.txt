@@ -63,6 +63,15 @@ add_library(plugin_engine STATIC
     ConvectionField.h
     ConvectionField.cpp
 
+    # The classifier readout: the sky the parameters describe, named by genus and
+    # species. Rule-based and host-free, per PLAN.md, so every rule has a test.
+    Classifier.h
+    Classifier.cpp
+
+    # The three sun-camera presets: the sun's azimuth said relative to where the
+    # camera faces, so walking round a cloud keeps its lighting.
+    SunPlacement.h
+
     # 2D primitives for the contour tracer. What is left of the rigid-body
     # engine's Hull.h once the hull builder went with the solver.
     Geometry.h

@@ -4,6 +4,167 @@ Tracked against `PLAN.md`. Newest first.
 
 ---
 
+## 2026-09-30 — THE AIR IN FRONT OF THE CLOUD, THE SUN THAT FOLLOWS THE LENS, AND A NAME FOR THE SKY. Build 17, minor 9. The first three of Phase 3's remaining items. On the way, the sky's own march turned out to have been 16.5% dark at the horizon since Phase 1, and the Cloud Shadows In Air checkbox turned out never to have been read.
+
+### Where build 16 stands
+
+The host committed build 16 and asked to move on. That is recorded as ACCEPTED, NOT
+MEASURED: there was no report on the orbit rig itself. The next item was chosen by the
+host: finish Phase 3.
+
+### Aerial perspective on the clouds
+
+Missing since build 9. A camera ray that escaped got the whole sky's airlight from
+skyRadiance. One that scattered in a cloud at t₁ got the cloud's light undimmed and no
+air in front of it, so a cumulus 30 km out was as crisp and white as one at 3 km.
+
+**Exact under delta tracking.** With t₁ drawn from the cloud's own free flight
+(infinity for an escape), the eye sees the airlight over [0, t₁] plus T_air(t₁) times
+whatever the path gathers from t₁ on. The expectation over t₁ is the two-medium
+integral, because P(t₁ > s) is the cloud's transmittance to s. The escape case already
+was skyRadiance. So `airSegment` in SkyLib.slang is the same march stopped at t₁: its
+airlight is added once, and its transmittance goes into the throughput before the first
+event's own next event. `airTransmittance` dims the camera segment's sun estimate at
+the point it kept, which keeps the reservoir unbiased.
+
+**Cost: none measurable.** Default scene, 640x360, 32 spp: 28.6 s against 28.8 s.
+
+### The sky's march was dark, and a new check found it
+
+slang.skyParity gained six checks on the new march, including one against a host
+integration in double with 4096 steps. The kernel's airlight matched, to the digit, a
+host model of its own quadrature (24 steps, each step dimmed by ALL of its own optical
+depth). It did not match the converged answer, and neither did skyRadiance:
+
+| elevation | 3 km | 20 km | 60 km | whole ray (the sky) |
+| --- | --- | --- | --- | --- |
+| 1° | 0.31% | 1.82% | 4.29% | **16.51%** |
+| 5° | 0.30% | 1.56% | 3.26% | **9.39%** |
+| 20° | 0.27% | 1.11% | 1.79% | 3.05% |
+
+Taking each step's transmittance at its MIDDLE (the step before it plus half its own)
+brings the whole ray to 0.68%, 0.74% and 0.93% with the same 24 steps. Shading.h's
+comment on that line had always said "includes this step's own half" while the code
+added all of it. Fixed in Shading.h, skyRadiance and airSegment together, so
+slang.skyParity is still bitwise over 260,082 channels. **The low sky is brighter and
+bluer than it was**, most at the horizon. That is the correction, and it is a change to a
+look the host approved.
+
+The first cut of the checks also failed "front plus behind equals the whole" by 6% and
+found the airlight falling between 150 km and the top of the air. Both were this bias in
+the long ray, not errors in the new code. The reference table is what told them apart.
+
+### Cloud Shadows In Air: hashed since Phase 1, read by nothing
+
+The fourth control in this project wired everywhere except where it would do anything.
+It now puts the clouds' shadows into the airlight along the camera segment. One point is
+drawn along the segment in proportion to its airlight's luminance, and one shadow ray is
+cast from it. The estimate is airIn x V. It is unbiased in luminance and gives a
+shadowed stretch the segment's average colour. The exact estimator goes negative in a
+channel whenever a fully shadowed point is drawn, and one sample per pixel cannot
+survive that (see airShadow in BounceLib.slang). Check 6 draws 65,536 points and matches
+the airlight's own distribution to 0.27%.
+
+**It is what makes aerial perspective right for a backlit cloud.** Without it, the hazy
+air in front of a cloud with the sun behind it glows as if the cloud did not shade it,
+and the hero washes out to a pale mass (sun 22° behind the hero, turbidity 5). With it,
+that air is in the cloud's shadow, and the hero reads dark with a silver lining. So it
+stays ON by default, and the checkbox's comment says what off costs.
+
+**Its price, measured:** +29% on the default frame (28.6 s to 37.0 s). At 1 spp,
+denoised, the sky's RMSE against a 128-spp reference goes from 3.43 to 8.56. The hero
+body is unchanged at 16. The single shadow ray per pixel is either lit or shadowed under
+a cumulus field, and OIDN cannot average a coin toss it sees once.
+
+**Tried and reverted: stratifying the shadow point across the frame.** Interleaved
+gradient noise across pixels, with a golden-ratio step per sample. The sky LOOKED
+smoother, but it measured 8.99 against white noise's 8.56, and the whole frame and the
+hero were identical. OIDN is trained on white noise and seems to keep a structured
+pattern rather than average it. It took a signature change through four files and was
+backed out.
+
+**THE REAL FIX IS A SHADOW MAP.** Each frame, the cloud layers' transmittance to the sun
+goes into a 2D grid over the ground, once. Every airlight step then looks it up. That is
+noise-free, costs a texture fetch per step, and could put the clouds' shadows on the
+ground too. At the measured 1.14 µs per shadow ray, a 256² map is about 75 ms a frame,
+against the 2.4 s this estimator adds to a 1080p frame at 1 spp. It is the next piece of
+Phase 3 work, not part of this build.
+
+### Sun Placement: the three sun-camera presets, backlit by default
+
+A popup at the top of Sun and Sky offers Backlit, Side Lit, Front Lit and Manual.
+Under a preset the sun's azimuth is set from the camera's heading. Orbit now changes
+which side of the cloud is seen, not its lighting. Backlit is 20° to the right of
+straight ahead, which is the default hero's flank from the default Distance, so the
+silver lining runs down that side instead of hiding behind the middle of the cloud.
+Elevation stays the Sun Elevation slider. Manual is the old world-fixed sun, and
+Sun Azimuth is relabelled "(Manual)".
+
+The heading is the camera's horizontal forward, plus its up vector weighted by the
+forward's vertical part. Directly under the hero looking up (Distance 0), the forward has
+no heading, and this still gives the orbit's. **The first version switched the up vector
+in by the sign of the pitch**, which a test showed would swing the sun about 27° when a
+level camera was rolled 30°. TestSunPlacement checks every preset through the kernel's
+own sunDirection against the forward and right of the matrix the rays use. It covers six
+orbits and three pans, the pole, tilting past the zenith, and roll.
+
+### The classifier readout
+
+`src/engine/Classifier.{h,cpp}`, rule-based over the parameters as PLAN.md decided. It
+names the sky with the cloud atlas's genera and species:
+
+- **Cumulus:** humilis, mediocris or congestus, by a tower's height over its width, with
+  absolute limits so a 5 km mound is congestus.
+- **Stratocumulus** once polarity passes 0.5: opacus, perlucidus or castellanus.
+- **Cirrus:** fibratus, or uncinus when the wind turns 15° or shears 10 m/s between the
+  top and bottom knots, plus spissatus and floccus.
+- **Nothing:** "too dry for Cu" when the condensation level is above the inversion.
+
+The default sky reads "Cu mediocris, Ci uncinus". The build 14 reference tower reads
+"Cumulus congestus".
+
+The readout moved to the top of the panel, outside every group. It sat at the end of the
+collapsed Output group. It is renamed with PF_UpdateParamUI, as the SDK's Supervisor
+sample renames a parameter. That happens on PF_Cmd_USER_CHANGED_PARAM from the thirty
+controls it reads (now PF_ParamFlag_SUPERVISE), and on PF_Cmd_UPDATE_PARAMS_UI (a new
+out_flag) for opening the panel and loading a project.
+
+**AE's parameter name holds 31 characters**, and that is the contract.
+EveryReadoutFitsInAnAfterEffectsParameterName throws 20,000 skies at it.
+
+### Tests and goldens
+
+- **207 unit tests**, 25 of them new. All 26 ctest suites pass.
+- **slang.skyParity** gained its six air checks.
+- **The three goldens were re-blessed** after rendering each one three ways: the sky fix
+  alone, plus aerial perspective, plus shadows in the air.
+  - The sky fix brightened the sky bands (blue +2.6 to +5.1 of 255) and left the ground
+    band unchanged.
+  - Aerial perspective took blue out of the backlit sunset cirrus (−11 in the top band),
+    which is what a distant cloud under a 2° sun does.
+  - Shadows in the air took a few levels off the sky under the cirrus.
+  - The blessed CPU references match the inspected GPU renders to 1 level.
+
+### Machine note
+
+**C: is full: 0 GB free.** nvcc writes to TEMP, so one build failed with "No space left
+on device" and then a ptxas "Memory allocation failure". The builds here now point TEMP
+at `build/tmp` on D:. Nothing on C: was touched.
+
+### What needs the host
+
+- **Backlit by default.** Is the new first frame the right one?
+- **The haze.** Distant clouds should now dissolve into the horizon, and the low sky is
+  brighter and bluer than build 16.
+- **Draft at 1 sample is noisier in the sky** (see above). How much does it bother you
+  before the shadow map exists?
+- **The readout** at the top of the panel. Does it rename as Instability and Polarity
+  move?
+- **Saved build 16 projects will be scrambled**: two rows were inserted above everything.
+  Re-apply the effect.
+
+---
+
 ## 2026-09-30 — THE CAMERA ORBITS THE CLOUD. Build 16, minor 8.
 
 ### What the host reported

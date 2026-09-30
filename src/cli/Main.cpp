@@ -28,6 +28,7 @@
 #include "Denoiser.h"
 #include "Fingerprint.h"
 #include "OrbitCamera.h"
+#include "SunPlacement.h"
 
 #include <cmath>
 #include <cstdio>
@@ -123,6 +124,13 @@ void printUsage() {
         "                   over tentative collisions drawn at k x the majorant\n"
         "                   (default 1). Unbiased either way, so it changes noise,\n"
         "                   flicker and cost -- never the converged image.\n"
+        "  --aerial <0|1>   the air between the eye and the first cloud: its airlight\n"
+        "                   and its transmittance (default 1). 0 is every render\n"
+        "                   before build 17.\n"
+        "  --no-air-shadows the clouds' shadows in that air (crepuscular rays) off;\n"
+        "                   the effect's Cloud Shadows In Air checkbox.\n"
+        "  --sun-placement <backlit|side|front|manual>  the sun relative to the camera,\n"
+        "                   as the effect's Sun Placement (default manual: --sun-az).\n"
         "  --resolve-check  render, then regenerate the image from the accumulated\n"
         "                   radiance with ZERO new samples, and require the result to\n"
         "                   be byte-identical. That is what FieldCache's ResolveOnly\n"
@@ -353,6 +361,10 @@ int main(int argc, char** argv) {
     cloud::OrbitControls orbit;
     bool useOrbit = false;
 
+    // MANUAL BY DEFAULT HERE, where the effect defaults to Backlit: --sun-az has always
+    // meant a world azimuth to this program, and the goldens are written with it.
+    cloud::SunPlacement sunPlacement = cloud::SunPlacement::Manual;
+
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
         const bool hasNext = (i + 1) < argc;
@@ -379,6 +391,15 @@ int main(int argc, char** argv) {
         else if (argIs(a, "--majorant") && hasNext)      req.quality.densityMajorant = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--sample-chunk") && hasNext)  sampleChunk = std::atoi(argv[++i]);
         else if (argIs(a, "--nee-scale") && hasNext)     req.neeTentativeScale = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--aerial") && hasNext)        req.aerialPerspective = std::atoi(argv[++i]) != 0;
+        else if (argIs(a, "--no-air-shadows"))           req.field.atmosphere.cloudShadowsInMedium = false;
+        else if (argIs(a, "--sun-placement") && hasNext) {
+            const char* v = argv[++i];
+            sunPlacement = argIs(v, "backlit") ? cloud::SunPlacement::Backlit
+                         : argIs(v, "side")    ? cloud::SunPlacement::SideLit
+                         : argIs(v, "front")   ? cloud::SunPlacement::FrontLit
+                                               : cloud::SunPlacement::Manual;
+        }
         else if (argIs(a, "--heading") && hasNext)       headingDegrees = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--fov") && hasNext)           req.view.verticalFovDegrees = static_cast<float>(std::atof(argv[++i]));
         // WHERE THE EYE STANDS, in metres -- what the effect derives from the comp
@@ -507,6 +528,14 @@ int main(int argc, char** argv) {
             0.0f,  0.0f,     0.0f,     1.0f
         };
         for (int i = 0; i < 16; ++i) req.view.cameraToWorld[i] = m[i];
+    }
+
+    // THE SUN, PLACED AFTER THE CAMERA, as the effect places it.
+    req.field.atmosphere.sunAzimuth =
+        cloud::placedSunAzimuth(sunPlacement, req.field.atmosphere.sunAzimuth, req.view);
+    if (sunPlacement != cloud::SunPlacement::Manual) {
+        std::printf("sun: azimuth %.1f deg from the placement\n",
+                    static_cast<double>(req.field.atmosphere.sunAzimuth));
     }
 
     // THE WINDOW, WHICH IS WHAT AFTER EFFECTS ACTUALLY ASKS FOR MOST OF THE TIME.

@@ -280,6 +280,11 @@ MT_RENDER void fillSlangScene(const RenderRequest& req, SceneT& s, PhaseT& ph) {
     // cameraSegmentSun in BounceLib.slang and RenderRequest::neeTentativeScale.
     s.neeTentativeScale_0 = req.neeTentativeScale;
 
+    // THE AIR IN FRONT OF THE CLOUD, and the clouds' shadows in it when the Cloud Shadows
+    // In Air checkbox asks. That checkbox was hashed into the fingerprint from Phase 1 and
+    // read by nothing until build 17. See Scene.aerialMode in BounceLib.slang.
+    s.aerialMode_0 = !req.aerialPerspective ? 0 : (atm.cloudShadowsInMedium ? 2 : 1);
+
     // -----------------------------------------------------------------------
     // The second layer: cellular convection
     // -----------------------------------------------------------------------

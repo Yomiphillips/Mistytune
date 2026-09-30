@@ -45,8 +45,10 @@
 #include "AE_Macros.h"
 #include "Param_Utils.h"
 
+#include "Classifier.h"
 #include "CloudParams.h"
 #include "OrbitCamera.h"
+#include "SunPlacement.h"
 
 #include <cmath>
 
@@ -86,9 +88,25 @@ namespace ae {
 // controls.
 
 #define MISTYTUNE_PARAM_TABLE(TOPIC, ENDTOPIC, FLOAT, ANGLE, POPUP, CHECK, TEXT, SPARE) \
+    /* THE CLASSIFIER READOUT: what the user has made, named by the cloud atlas. FIRST, \
+     * OUTSIDE EVERY GROUP, because a readout in a collapsed group is a readout nobody  \
+     * reads -- it sat at the end of Output until build 17. Static text, which AE has   \
+     * no control for: see addStaticText below, and src/engine/Classifier.h for the     \
+     * rules. Moved, not re-made: the ID is the one it always had. */                   \
+    TEXT    (Classification,    403, "--")                                              \
+                                                                                        \
     /* ---------------- Sun and Sky ---------------- */                                 \
     TOPIC   (SkyGroup,          100, "Sun and Sky")                                     \
-    ANGLE   (SunAzimuth,        101, "Sun Azimuth", 135.0)                              \
+    /* WHERE THE SUN STANDS, SAID RELATIVE TO THE LENS. PLAN.md's three sun-camera      \
+     * presets, BACKLIT BY DEFAULT: under a preset the sun turns with the camera, so    \
+     * Orbit changes the angle on the cloud and not its lighting. MANUAL is the Sun     \
+     * Azimuth slider below, fixed to the world, which is every build before 17.        \
+     * Elevation is Sun Elevation in every mode. See src/engine/SunPlacement.h.         \
+     * INSERTED FIRST, and the minor bump is what makes that safe. */                   \
+    POPUP   (SunPlacement,      114, "Sun Placement", 4, 1,                             \
+             "Backlit|Side Lit|Front Lit|Manual")                                       \
+    /* RELABELLED "(Manual)": only the Manual placement reads it. ID and index kept. */ \
+    ANGLE   (SunAzimuth,        101, "Sun Azimuth (Manual)", 135.0)                     \
     /* Elevation goes BELOW the horizon in the valid range, though the slider stops     \
      * at -10: the nacreous and noctilucent generators are lit by a sun below the       \
      * horizon, and that is v2 work whose range must already be keyframable. */         \
@@ -108,6 +126,10 @@ namespace ae {
              -0.95, 0.95,   0.0, 0.95,      0.76,    3)                                 \
     FLOAT   (GroundAlbedo,      107, "Ground Albedo",                                   \
              0.0, 1.0,      0.0, 1.0,       0.1,     3)                                 \
+    /* READ BY NOTHING UNTIL BUILD 17, which is when the air in front of a cloud began  \
+     * to be rendered. OFF IS FASTER AND WRONG FOR A BACKLIT CLOUD: the hazy air in     \
+     * front of it glows as if the cloud did not shade it. Measured on the default      \
+     * scene: 29% of the frame. See airShadow in BounceLib.slang. */                    \
     CHECK   (CloudShadowsInMedium, 108, "Cloud Shadows In Air", true)                    \
     SPARE   (SkySpare1,         109)                                                     \
     SPARE   (SkySpare2,         110)                                                     \
@@ -400,9 +422,6 @@ namespace ae {
     /* OFF BY DEFAULT and it must stay that way: an effect that tonemapped unasked         \
      * would be fighting whatever the user's own grade is doing downstream. */             \
     CHECK   (AgxTonemap,        402, "AgX Tonemap", false)                                 \
-    /* The classifier readout: what the user has actually made. Static text, which AE      \
-     * has no control for -- see addStaticText below. */                                    \
-    TEXT    (Classification,    403, "--")                                                 \
     SPARE   (OutputSpare1,      404)                                                       \
     SPARE   (OutputSpare2,      405)                                                       \
     ENDTOPIC(OutputGroupEnd,    406)
@@ -472,6 +491,56 @@ enum ParamId {
 #undef MT_ID_SPARE
 
 // ---------------------------------------------------------------------------
+// The controls the classifier reads
+// ---------------------------------------------------------------------------
+//
+// SUPERVISED, so that changing one sends PF_Cmd_USER_CHANGED_PARAM and the readout is
+// renamed as the user drags. PF_Cmd_UPDATE_PARAMS_UI is sent when the Effect Controls
+// need redrawing -- opening them, a time change -- and the SDK does not promise it for
+// every edit, so it is the backstop rather than the mechanism.
+//
+// THE LIST FOLLOWS src/engine/Classifier.cpp. A control the classifier starts reading
+// and this list misses leaves the readout stale until the next redraw, which is why the
+// list is here, beside the table, and not inferred.
+constexpr PF_ParamFlags classifierFlags(int index) {
+    switch (index) {
+        case kMistytuneCumulusEnabled:
+        case kMistytuneCumulusPolarity:
+        case kMistytuneCumulusCoverage:
+        case kMistytuneCumulusInstability:
+        case kMistytuneCumulusCellSize:
+        case kMistytuneCumulusInversion:
+        case kMistytuneCumulusDensity:
+        case kMistytuneCumulusHero:
+        case kMistytuneCumulusHeroWidth:
+        case kMistytuneCumulusHeroHeight:
+        case kMistytuneIceEnabled:
+        case kMistytuneIceCellDensity:
+        case kMistytuneIceCellStrength:
+        case kMistytuneIceStreakLength:
+        case kMistytuneIceOpticalDepth:
+        case kMistytuneIceShearSpeed0:
+        case kMistytuneIceShearSpeed1:
+        case kMistytuneIceShearSpeed2:
+        case kMistytuneIceShearSpeed3:
+        case kMistytuneIceShearSpeed4:
+        case kMistytuneIceShearSpeed5:
+        case kMistytuneIceShearBearing0:
+        case kMistytuneIceShearBearing1:
+        case kMistytuneIceShearBearing2:
+        case kMistytuneIceShearBearing3:
+        case kMistytuneIceShearBearing4:
+        case kMistytuneIceShearBearing5:
+        case kMistytunePhysicsClamp:
+        case kMistytuneGravity:
+        case kMistytuneSurfaceHumidity:
+            return PF_ParamFlag_SUPERVISE;
+        default:
+            return 0;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Static text, which the parameter API has no control for
 // ---------------------------------------------------------------------------
 
@@ -521,16 +590,23 @@ inline PF_Err addStaticText(PF_InData* in_data, const char* label, A_long id) {
 
 #define MT_SETUP_FLOAT(name, id, label, vmin, vmax, smin, smax, dflt, prec) \
     PF_ADD_FLOAT_SLIDERX(label, vmin, vmax, smin, smax, dflt, prec,         \
-                         PF_ValueDisplayFlag_NONE, 0, id);
+                         PF_ValueDisplayFlag_NONE,                          \
+                         classifierFlags(kMistytune##name), id);
 
-#define MT_SETUP_ANGLE(name, id, label, dflt) \
-    do { AEFX_CLR_STRUCT(def); PF_ADD_ANGLE(label, dflt, id); } while (0);
+// PF_ADD_ANGLE TAKES NO FLAGS AND DOES NOT CLEAR `def`, so they are set between the
+// clear and the add.
+#define MT_SETUP_ANGLE(name, id, label, dflt)                     \
+    do {                                                          \
+        AEFX_CLR_STRUCT(def);                                     \
+        def.flags = classifierFlags(kMistytune##name);            \
+        PF_ADD_ANGLE(label, dflt, id);                            \
+    } while (0);
 
 #define MT_SETUP_POPUP(name, id, label, count, dflt, items) \
-    PF_ADD_POPUPX(label, count, dflt, items, 0, id);
+    PF_ADD_POPUPX(label, count, dflt, items, classifierFlags(kMistytune##name), id);
 
 #define MT_SETUP_CHECK(name, id, label, dflt) \
-    PF_ADD_CHECKBOXX(label, dflt, 0, id);
+    PF_ADD_CHECKBOXX(label, dflt, classifierFlags(kMistytune##name), id);
 
 #define MT_SETUP_TEXT(name, id, label)                                   \
     do {                                                                 \
@@ -684,6 +760,43 @@ inline PF_Err readParams(PF_InData* in_data, ParamValues& out) {
 #undef MT_READ_CHECK
 #undef MT_READ_TEXT
 #undef MT_READ_SPARE
+
+// THE SAME VALUES FROM THE PARAMS ARRAY, which the UI commands are handed and the render
+// commands are not. The same conversions as the checkout above -- angles out of 16.16,
+// popups to 0-based -- so a readout and a render of one frame read one set of numbers.
+#define MT_ARR_TOPIC(name, id, label)                          /* no value */
+#define MT_ARR_ENDTOPIC(name, id)                              /* no value */
+#define MT_ARR_SPARE(name, id)                                 /* not read */
+#define MT_ARR_TEXT(name, id, label)                           /* a readout */
+#define MT_ARR_FLOAT(name, id, label, vn, vx, sn, sx, d, p)                    \
+    if (params[kMistytune##name])                                              \
+        out.v[kMistytune##name] = params[kMistytune##name]->u.fs_d.value;
+#define MT_ARR_ANGLE(name, id, label, d)                                       \
+    if (params[kMistytune##name])                                              \
+        out.v[kMistytune##name] = params[kMistytune##name]->u.ad.value / 65536.0;
+#define MT_ARR_POPUP(name, id, label, n, d, items)                             \
+    if (params[kMistytune##name])                                              \
+        out.v[kMistytune##name] =                                              \
+            static_cast<double>(params[kMistytune##name]->u.pd.value - 1);
+#define MT_ARR_CHECK(name, id, label, d)                                       \
+    if (params[kMistytune##name])                                              \
+        out.v[kMistytune##name] = params[kMistytune##name]->u.bd.value ? 1.0 : 0.0;
+
+inline void readParamsFromArray(PF_ParamDef* const params[], ParamValues& out) {
+    if (!params) return;
+    MISTYTUNE_PARAM_TABLE(MT_ARR_TOPIC, MT_ARR_ENDTOPIC, MT_ARR_FLOAT,
+                          MT_ARR_ANGLE, MT_ARR_POPUP, MT_ARR_CHECK,
+                          MT_ARR_TEXT, MT_ARR_SPARE)
+}
+
+#undef MT_ARR_TOPIC
+#undef MT_ARR_ENDTOPIC
+#undef MT_ARR_FLOAT
+#undef MT_ARR_ANGLE
+#undef MT_ARR_POPUP
+#undef MT_ARR_CHECK
+#undef MT_ARR_TEXT
+#undef MT_ARR_SPARE
 
 // ---------------------------------------------------------------------------
 // Values -> the engine's structs
@@ -869,6 +982,25 @@ inline cloud::OrbitControls toOrbit(const ParamValues& p) {
     out.rollDegrees   = static_cast<float>(p.v[kMistytuneCameraRoll]);
     out.focalLengthMm = static_cast<float>(p.v[kMistytuneCameraFocal]);
     return out;
+}
+
+// The popup is 0-based by now; clamped like every other popup, so nothing outside the
+// four placements reaches a switch that has no default.
+inline cloud::SunPlacement toSunPlacement(const ParamValues& p) {
+    const int v = static_cast<int>(std::lround(p.v[kMistytuneSunPlacement]));
+    return static_cast<cloud::SunPlacement>(v < 0 ? 0 : (v > 3 ? 3 : v));
+}
+
+// WHAT THE CLASSIFIER READS: the sky's generators and the air under them, mapped by the
+// same functions the render uses, so the readout and the picture cannot disagree about
+// what a control means. No camera and no time -- a name does not change as a cell drifts.
+inline cloud::FieldParams toFieldForReadout(const ParamValues& p) {
+    cloud::FieldParams f;
+    f.physics    = toPhysics(p);
+    f.atmosphere = toAtmosphere(p);
+    f.ice        = toIce(p);
+    f.convection = toConvection(p);
+    return f;
 }
 
 inline cloud::QualityParams toQuality(const ParamValues& p) {

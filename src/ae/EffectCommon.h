@@ -56,7 +56,11 @@ namespace ae {
 // dynamic-flags mechanism for withdrawing it.
 constexpr PF_OutFlags kOutFlags =
     PF_OutFlag_PIX_INDEPENDENT |
-    PF_OutFlag_DEEP_COLOR_AWARE;
+    PF_OutFlag_DEEP_COLOR_AWARE |
+    // Build 17: PF_Cmd_UPDATE_PARAMS_UI, so the classifier readout is named when the
+    // Effect Controls open and when a project loads -- not only once a supervised
+    // control has been touched. See updateReadout in Mistytune.cpp.
+    PF_OutFlag_SEND_UPDATE_PARAMS_UI;
 
 constexpr PF_OutFlags2 kOutFlags2 =
     // Required before AEGP_GetEffectCameraMatrix returns anything, and what makes

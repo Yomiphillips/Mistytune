@@ -173,6 +173,17 @@ public struct Scene
     // closed form. See cameraSegmentSun for why, and PROGRESS.md for what it buys.
     float neeTentativeScale;
 
+    // THE AIR BETWEEN THE EYE AND THE FIRST CLOUD, at envMode 1 only. 0 leaves it out,
+    // as every render before build 17 did. 1 is aerial perspective: the airlight in front
+    // of the first collision, and its transmittance on everything behind it. 2 also puts
+    // the clouds' shadows in that air, with one shadow ray per camera ray; that is the
+    // Cloud Shadows In Air checkbox, and crepuscular rays are what it draws. See
+    // airSegment in SkyLib.slang and airShadow below.
+    //
+    // ZERO IN A ZEROED STRUCT, so every test scene built before this field existed keeps
+    // measuring exactly what it measured.
+    int aerialMode;
+
     // ===================================================================
     // THE SECOND LAYER, AND IT IS A SECOND MEDIUM RATHER THAN A SECOND TERM IN THE
     // FIRST ONE'S DENSITY.
@@ -529,6 +540,7 @@ float3 cameraSegmentSun(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
     float  total     = 0.0f;                       // B, the sum of the weights so far
     float  kept      = 0.0f;                       // b_J
     float3 keptAt    = float3(0.0f, 0.0f, 0.0f);   // x_J
+    float  keptT     = 0.0f;                       // and its distance, for the air
     int    keptLayer = 0;
 
     // BOUNDED BY THE TWO BUDGETS: every pass consumes at least one step of one walk,
@@ -567,6 +579,7 @@ float3 cameraSegmentSun(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
                 {
                     kept      = b;
                     keptAt    = p;
+                    keptT     = t;
                     keptLayer = takeA ? 0 : 1;
                 }
             }
@@ -625,9 +638,46 @@ float3 cameraSegmentSun(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
         ph0 = phaseCamera(s.phase2, dot(rd, s.sunDir));
     }
 
+    // THE AIR BETWEEN THE EYE AND THE KEPT POINT dims what it sends back. Each point of
+    // the sum carries its own distance, so the factor rides with f(x_J) and the reservoir
+    // stays unbiased for the sum -- see trace(), which does the same for the path.
+    float3 air = float3(1.0f, 1.0f, 1.0f);
+    if (s.environment.envMode == 1 && s.aerialMode != 0)
+    {
+        air = airTransmittance(s.environment.sky, ro.y, rd, keptT);
+    }
+
     // b_J * (B / b_J) = B: the kept point's own weight cancels, which is why `kept` is
     // only checked and never multiplied.
-    return total * matterAlbedo * ph0 * shadow * sunIrradianceAt(s, keptAt);
+    return total * matterAlbedo * ph0 * shadow * sunIrradianceAt(s, keptAt) * air;
+}
+
+// ---------------------------------------------------------------------------
+// The clouds' shadows in the air
+// ---------------------------------------------------------------------------
+//
+// ===========================================================================
+// ONE SHADOW RAY FOR THE WHOLE CAMERA SEGMENT, from the point airSegment drew in
+// proportion to the airlight. Crepuscular rays are the air in a cloud's shadow going
+// dark; the airlight is the integral of sunlit air along the ray, and this puts the
+// clouds' transmittance to the sun under that integral.
+//
+// airIn x V(x) IS UNBIASED IN LUMINANCE, because x was drawn with probability in
+// proportion to each step's luminance: E[V(x)] x L is the shadowed luminance exactly. It
+// is NOT exact in colour. A shadowed stretch is given the whole segment's average colour
+// rather than its own, and the airlight reddens with distance, so a shadow near the eye
+// takes out slightly too much red. That is chosen over the exact estimator, airIn - (1 -
+// V(x)) x c_i L / l_i, because the exact one goes NEGATIVE in a channel whenever a
+// fully shadowed point is drawn from a step whose colour differs from the average, and a
+// negative pixel at one sample per pixel is a coloured speck the denoiser cannot remove.
+// This form is never negative and has zero variance on a ray no shadow crosses, which is
+// most of them.
+// ===========================================================================
+float airShadow(Scene s, StructuredBuffer<float> bounds, StructuredBuffer<float2> drift,
+                inout Rng rng, AirSegment seg, float3 ro, float3 rd, inout int steps)
+{
+    if (s.aerialMode < 2 || seg.shadowAt < 0.0f) return 1.0f;
+    return sceneTransmittance(s, bounds, drift, rng, ro + rd * seg.shadowAt, s.sunDir, steps);
 }
 
 // ---------------------------------------------------------------------------
@@ -670,6 +720,11 @@ public TraceResult trace(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
                                                         segmentRng2, ro, rd, r.trackingSteps);
     }
 
+    // THE AIR IN FRONT OF THE FIRST EVENT, on its own stream for the reason the segment's
+    // sun has one: its shadow ray's draw count depends on the medium.
+    bool airOn  = s.environment.envMode == 1 && s.aerialMode != 0;
+    Rng  airRng = splitRng(rng, 0xa1eu);
+
     for (int bounce = 0; bounce < kBounceCeiling; ++bounce)
     {
         if (bounce >= budget)
@@ -695,11 +750,40 @@ public TraceResult trace(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
             // scattering point after that. The sky is asked from there rather than
             // from the ground, which is what makes the skylight on a high cirrus the
             // sky that crystal can actually see.
-            r.pathRadiance += throughput * environmentRadiance(s.environment, ro, rd, bounce == 0);
+            float3 env = environmentRadiance(s.environment, ro, rd, bounce == 0);
+
+            // A CAMERA RAY THAT ESCAPES already has its airlight, in the sky; only the
+            // clouds' shadow in it is missing. The segment runs to the top of the air,
+            // so its airIn is exactly the airlight inside `env`, and the shadowed part
+            // comes off. Never negative: the ground and the disc are what is left.
+            if (bounce == 0 && airOn && s.aerialMode >= 2)
+            {
+                float u1 = randFloat(airRng);
+                float u2 = randFloat(airRng);
+                AirSegment seg = airSegment(s.environment.sky, ro.y, rd, 1e30f, u1, u2);
+                float v = airShadow(s, bounds, drift, airRng, seg, ro, rd, r.trackingSteps);
+                env = env - seg.airIn * (1.0f - v);
+            }
+
+            r.pathRadiance += throughput * env;
             break;
         }
 
         ++r.scatterEvents;
+
+        // THE FIRST EVENT IS BEHIND THE AIR IN FRONT OF IT. Its airlight is added once,
+        // and its transmittance goes into the throughput BEFORE the next event below, so
+        // the sun at this point and everything the path gathers after it are dimmed by
+        // the same air. See airSegment in SkyLib.slang for why this is exact.
+        if (bounce == 0 && airOn)
+        {
+            float u1 = randFloat(airRng);
+            float u2 = randFloat(airRng);
+            AirSegment seg = airSegment(s.environment.sky, ro.y, rd, length(p - ro), u1, u2);
+            float v = airShadow(s, bounds, drift, airRng, seg, ro, rd, r.trackingSteps);
+            r.pathRadiance += throughput * seg.airIn * v;
+            throughput *= seg.airT;
+        }
 
         // WHAT THE PATH HIT: ice or water. The phase function and the albedo are the
         // matter's, not the scene's -- a crystal and a droplet scatter differently.

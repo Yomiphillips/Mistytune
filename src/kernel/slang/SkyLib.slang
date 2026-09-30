@@ -377,6 +377,9 @@ public float3 skyRadiance(SkyInput p, float originAltitude, float3 rayDir,
         float dR = exp(-hc / scaleHeight) * dt;
         float dM = exp(-hc / kMieScaleHeight) * dt;
 
+        // Dimmed to the step's MIDDLE -- see Shading.h, which carries the measurement.
+        float midR = depthR + 0.5f * dR;
+        float midM = depthM + 0.5f * dM;
         depthR += dR;
         depthM += dM;
 
@@ -391,9 +394,9 @@ public float3 skyRadiance(SkyInput p, float originAltitude, float3 rayDir,
         // half stays an accumulation along this ray.
         float3 sunT = sampleTransmittanceLut(p, hc, lutMuFor(pt, sun));
 
-        float3 viewT = float3(exp(-(betaR.x * depthR + betaMExt * depthM)),
-                              exp(-(betaR.y * depthR + betaMExt * depthM)),
-                              exp(-(betaR.z * depthR + betaMExt * depthM)));
+        float3 viewT = float3(exp(-(betaR.x * midR + betaMExt * midM)),
+                              exp(-(betaR.y * midR + betaMExt * midM)),
+                              exp(-(betaR.z * midR + betaMExt * midM)));
 
         float3 transmittance = viewT * sunT;
 
@@ -488,4 +491,239 @@ public float3 sunTransmittanceAt(SkyInput p, float3 worldPos)
     // for the next-event estimate. Eight steps of quadrature there was the single
     // most-executed loop in the renderer.
     return sampleTransmittanceLut(p, altitude, lutMuFor(geocentric, sun));
+}
+
+// ---------------------------------------------------------------------------
+// The air in front of a cloud
+// ---------------------------------------------------------------------------
+//
+// ===========================================================================
+// AERIAL PERSPECTIVE ON THE CLOUD, listed as missing in PROGRESS.md since build 9.
+//
+// A camera ray that escapes is answered by skyRadiance, which integrates the air along
+// its whole length. A camera ray that SCATTERS in a cloud at distance t1 used to get the
+// cloud's light at full strength and none of the air in front of it, so a cumulus 30 km
+// out was as crisp and as white as one at 3 km, and the field had no depth.
+//
+// EXACT UNDER DELTA TRACKING. With t1 drawn from the cloud's own free-flight distribution
+// (infinity for a ray that escapes), the eye sees
+//
+//     airlight over [0, t1]  +  T_air(t1) x (everything the path gathers from t1 on)
+//
+// and the expectation over t1 is the two-medium integral, because P(t1 > s) is the
+// cloud's transmittance to s. The escape case is skyRadiance already; the collision case
+// is the same march stopped at t1, which is what this is.
+//
+// THE SAME ARITHMETIC AS skyRadiance, STEP FOR STEP, and slang.skyParity holds it there:
+// run past the top of the atmosphere on a ray that misses the ground, `airIn` must equal
+// skyRadiance without its disc BIT FOR BIT. So the air in front of a cloud cannot drift
+// from the air beside it.
+// ===========================================================================
+//
+// FIELD NAMES ARE UNIQUE ACROSS THE KERNEL, for the reason Environment.envMode gives.
+public struct AirSegment
+{
+    float3 airIn;        // what the air adds between the eye and the end of the segment
+    float3 airT;         // what it lets through from the end of the segment
+
+    // ONE POINT OF THAT AIRLIGHT, drawn in proportion to its luminance, for the cloud's
+    // shadow in the air. Negative when the segment has no airlight to draw from.
+    float  shadowAt;
+};
+
+// `dist` past the ground or the top of the atmosphere stops there, as skyRadiance does.
+//
+// u1 AND u2 PLACE THE SHADOW POINT: u1 picks a step in proportion to its airlight and u2
+// a distance within it. They are taken as arguments so the function stays pure and the
+// caller decides which stream they come from.
+//
+// ONE UNIFORM PICKS THE STEP, by the rescaling trick: a reservoir that keeps step i with
+// probability l_i / L_i reuses the fraction of u1 left over by each decision. That keeps
+// each step's choice independent of the last, and a reservoir needs no second pass over
+// the steps.
+public AirSegment airSegment(SkyInput p, float originAltitude, float3 rayDir, float dist,
+                             float u1, float u2)
+{
+    AirSegment seg;
+    seg.airIn    = float3(0.0f, 0.0f, 0.0f);
+    seg.airT     = float3(1.0f, 1.0f, 1.0f);
+    seg.shadowAt = -1.0f;
+
+    float3 sun = sunDirection(p);
+
+    float planetRadius = p.planetRadius > 1000.0f ? p.planetRadius : 1000.0f;
+    float scaleHeight  = p.scaleHeight > 1.0f ? p.scaleHeight : 1.0f;
+    float atmosphereHeight = scaleHeight * kAtmosphereEFoldings;
+
+    float observerAltitude = originAltitude > 0.0f ? originAltitude : 0.0f;
+
+    float b = (planetRadius + observerAltitude) * rayDir.y;
+
+    float cGround = shellC(observerAltitude, planetRadius, 0.0f);
+    float cTop    = shellC(observerAltitude, planetRadius, atmosphereHeight);
+
+    float tTop = shellExit(b, cTop);
+    if (tTop <= 0.0f || !(dist > 0.0f)) return seg;
+
+    float tGround    = shellEnter(b, cGround);
+    bool  hitsGround = tGround > 0.0f;
+    float tMax       = hitsGround ? tGround : tTop;
+    if (dist < tMax) tMax = dist;
+
+    float3 betaR    = rayleighCoefficients();
+    float  betaM    = mieCoefficient(p.turbidity);
+    float  betaMExt = betaM * 1.11f;
+
+    float cosTheta = clampf(dot(rayDir, sun), -1.0f, 1.0f);
+
+    float phaseR = 0.0596831f * (1.0f + cosTheta * cosTheta);
+
+    float g       = clampf(p.mieAnisotropy, -0.95f, 0.95f);
+    float hgDenom = 1.0f + g * g - 2.0f * g * cosTheta;
+    float phaseM  = (1.0f - g * g) /
+                    (12.566370614f * hgDenom * sqrt(hgDenom > 1e-6f ? hgDenom : 1e-6f));
+
+    const int steps = 24;
+    float invSteps2 = 1.0f / float(steps * steps);
+
+    float3 sumR = float3(0.0f, 0.0f, 0.0f);
+    float3 sumM = float3(0.0f, 0.0f, 0.0f);
+    float  depthR = 0.0f;
+    float  depthM = 0.0f;
+
+    float tPrev = 0.0f;
+
+    float u          = u1;
+    float lumTotal   = 0.0f;
+    float pickedFrom = -1.0f;
+    float pickedSpan = 0.0f;
+
+    for (int i = 0; i < steps; ++i)
+    {
+        float tNext = tMax * float((i + 1) * (i + 1)) * invSteps2;
+        float dt    = tNext - tPrev;
+        float tMid  = (tPrev + tNext) * 0.5f;
+        float tFrom = tPrev;
+        tPrev = tNext;
+
+        if (dt <= 0.0f) continue;
+
+        float q  = cGround + 2.0f * tMid * b + tMid * tMid;
+        float h  = altitudeFromQ(q, planetRadius);
+        float hc = h < 0.0f ? 0.0f : h;
+
+        float3 pt = float3(rayDir.x * tMid,
+                           planetRadius + observerAltitude + rayDir.y * tMid,
+                           rayDir.z * tMid);
+
+        float dR = exp(-hc / scaleHeight) * dt;
+        float dM = exp(-hc / kMieScaleHeight) * dt;
+
+        // Dimmed to the step's MIDDLE -- see Shading.h, which carries the measurement.
+        float midR = depthR + 0.5f * dR;
+        float midM = depthM + 0.5f * dM;
+        depthR += dR;
+        depthM += dM;
+
+        float3 sunT = sampleTransmittanceLut(p, hc, lutMuFor(pt, sun));
+
+        float3 viewT = float3(exp(-(betaR.x * midR + betaMExt * midM)),
+                              exp(-(betaR.y * midR + betaMExt * midM)),
+                              exp(-(betaR.z * midR + betaMExt * midM)));
+
+        float3 transmittance = viewT * sunT;
+
+        sumR = sumR + transmittance * dR;
+        sumM = sumM + transmittance * dM;
+
+        // THE STEP'S OWN AIRLIGHT, for the draw only; the sums above are untouched, which
+        // is what keeps airIn bitwise equal to skyRadiance's.
+        float3 c   = transmittance * (betaR * (phaseR * dR) + betaM * (phaseM * dM));
+        float  lum = c.x + c.y + c.z;
+        if (lum > 0.0f)
+        {
+            lumTotal += lum;
+            float keep = lum / lumTotal;
+            if (u < keep)
+            {
+                pickedFrom = tFrom;
+                pickedSpan = dt;
+                u = u / keep;
+            }
+            else
+            {
+                u = (u - keep) / (1.0f - keep);
+            }
+        }
+    }
+
+    float irradiance = sunIrradianceTop(p);
+
+    seg.airIn = (sumR * betaR * phaseR + sumM * (betaM * phaseM)) * irradiance;
+    seg.airT  = float3(exp(-(betaR.x * depthR + betaMExt * depthM)),
+                       exp(-(betaR.y * depthR + betaMExt * depthM)),
+                       exp(-(betaR.z * depthR + betaMExt * depthM)));
+
+    if (pickedFrom >= 0.0f) seg.shadowAt = pickedFrom + clampf(u2, 0.0f, 1.0f) * pickedSpan;
+    return seg;
+}
+
+// What the air lets through between the eye and `dist` along the ray: airSegment's `airT`
+// without the airlight, which is all the camera segment's sun needs at the point it kept.
+// THE SAME STEPS, so the two agree to a few ulps; slang.skyParity checks it (check 2).
+public float3 airTransmittance(SkyInput p, float originAltitude, float3 rayDir, float dist)
+{
+    float planetRadius = p.planetRadius > 1000.0f ? p.planetRadius : 1000.0f;
+    float scaleHeight  = p.scaleHeight > 1.0f ? p.scaleHeight : 1.0f;
+    float atmosphereHeight = scaleHeight * kAtmosphereEFoldings;
+
+    float observerAltitude = originAltitude > 0.0f ? originAltitude : 0.0f;
+
+    float b = (planetRadius + observerAltitude) * rayDir.y;
+
+    float cGround = shellC(observerAltitude, planetRadius, 0.0f);
+    float cTop    = shellC(observerAltitude, planetRadius, atmosphereHeight);
+
+    float tTop = shellExit(b, cTop);
+    if (tTop <= 0.0f || !(dist > 0.0f)) return float3(1.0f, 1.0f, 1.0f);
+
+    float tGround    = shellEnter(b, cGround);
+    bool  hitsGround = tGround > 0.0f;
+    float tMax       = hitsGround ? tGround : tTop;
+    if (dist < tMax) tMax = dist;
+
+    float3 betaR    = rayleighCoefficients();
+    float  betaM    = mieCoefficient(p.turbidity);
+    float  betaMExt = betaM * 1.11f;
+
+    const int steps = 24;
+    float invSteps2 = 1.0f / float(steps * steps);
+
+    float depthR = 0.0f;
+    float depthM = 0.0f;
+    float tPrev  = 0.0f;
+
+    for (int i = 0; i < steps; ++i)
+    {
+        float tNext = tMax * float((i + 1) * (i + 1)) * invSteps2;
+        float dt    = tNext - tPrev;
+        float tMid  = (tPrev + tNext) * 0.5f;
+        tPrev = tNext;
+
+        if (dt <= 0.0f) continue;
+
+        float q  = cGround + 2.0f * tMid * b + tMid * tMid;
+        float h  = altitudeFromQ(q, planetRadius);
+        float hc = h < 0.0f ? 0.0f : h;
+
+        float dR = exp(-hc / scaleHeight) * dt;
+        float dM = exp(-hc / kMieScaleHeight) * dt;
+
+        depthR += dR;
+        depthM += dM;
+    }
+
+    return float3(exp(-(betaR.x * depthR + betaMExt * depthM)),
+                  exp(-(betaR.y * depthR + betaMExt * depthM)),
+                  exp(-(betaR.z * depthR + betaMExt * depthM)));
 }

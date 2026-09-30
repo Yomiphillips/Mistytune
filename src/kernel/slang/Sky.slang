@@ -37,3 +37,36 @@ void skyMain(uint3 tid : SV_DispatchThreadID,
     if (i >= count) return;
     output[i] = skyRadiance(params, originAltitude, directions[i], true);
 }
+
+// THE AIR IN FRONT OF A CLOUD, for slang.skyParity's second half. Not a parity check
+// against Shading.h -- the hand-written kernel has no such function -- but against the
+// sky beside it: run past the top of the air, airIn must BE skyRadiance's airlight.
+// `sky` is skyRadiance without the disc, from the same origin, so the harness can hold
+// the two together; `trans` is airTransmittance, which must agree with airT.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void airMain(uint3 tid : SV_DispatchThreadID,
+             uniform SkyInput params,
+             uniform float originAltitude,
+             uniform StructuredBuffer<float3> directions,
+             uniform StructuredBuffer<float> distances,
+             uniform StructuredBuffer<float2> uniforms,
+             uniform RWStructuredBuffer<float3> airIn,
+             uniform RWStructuredBuffer<float3> airT,
+             uniform RWStructuredBuffer<float3> trans,
+             uniform RWStructuredBuffer<float> shadowAt,
+             uniform RWStructuredBuffer<float3> sky,
+             uniform int count)
+{
+    int i = int(tid.x);
+    if (i >= count) return;
+
+    float3 d = directions[i];
+    AirSegment seg = airSegment(params, originAltitude, d, distances[i],
+                                uniforms[i].x, uniforms[i].y);
+    airIn[i]    = seg.airIn;
+    airT[i]     = seg.airT;
+    shadowAt[i] = seg.shadowAt;
+    trans[i]    = airTransmittance(params, originAltitude, d, distances[i]);
+    sky[i]      = skyRadiance(params, originAltitude, d, false);
+}

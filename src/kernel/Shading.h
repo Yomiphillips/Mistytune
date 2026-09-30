@@ -593,9 +593,15 @@ MT_DEVICE Vec3 skyRadiance(const cloud::FieldParams& field, float originAltitude
         const float dR = expf(-hc / scaleHeight) * dt;
         const float dM = expf(-hc / kMieScaleHeight) * dt;
 
-        // ACCUMULATED BEFORE THE SAMPLE IS USED, so the transmittance includes this
-        // step's own half. Adding it afterwards biases the whole integral towards
-        // the viewer and brightens the horizon by a visible amount.
+        // THE SAMPLE IS DIMMED BY THE AIR UP TO THE STEP'S MIDDLE: every step before
+        // it, plus HALF of its own. Leaving this step out brightens the horizon;
+        // counting ALL of it, as this line did until build 17 while its comment said
+        // half, darkened it -- measured against 4096 steps in double
+        // (slang.skyParity, check 5): the whole ray was 16.5% dark at 1 degree of
+        // elevation, 9.4% at 5 and 3.1% at 20. At the midpoint it is under 1% at all
+        // three, with the same 24 steps.
+        const float midR = depthR + 0.5f * dR;
+        const float midM = depthM + 0.5f * dM;
         depthR += dR;
         depthM += dM;
 
@@ -610,9 +616,9 @@ MT_DEVICE Vec3 skyRadiance(const cloud::FieldParams& field, float originAltitude
         const Vec3 sunT = sampleTransmittanceLut(transmittanceLut, scaleHeight,
                                                  hc, lutMuFor(p, sun));
 
-        const Vec3 viewT = vec3(expf(-(betaR.x * depthR + betaMExt * depthM)),
-                                expf(-(betaR.y * depthR + betaMExt * depthM)),
-                                expf(-(betaR.z * depthR + betaMExt * depthM)));
+        const Vec3 viewT = vec3(expf(-(betaR.x * midR + betaMExt * midM)),
+                                expf(-(betaR.y * midR + betaMExt * midM)),
+                                expf(-(betaR.z * midR + betaMExt * midM)));
 
         const Vec3 transmittance = viewT * sunT;
 
