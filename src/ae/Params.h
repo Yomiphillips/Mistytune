@@ -46,6 +46,7 @@
 #include "Param_Utils.h"
 
 #include "CloudParams.h"
+#include "OrbitCamera.h"
 
 #include <cmath>
 
@@ -124,14 +125,41 @@ namespace ae {
      * INSERTED SECOND, after Sun and Sky, because framing is what a user reaches for   \
      * next. Nothing has shipped, so the insert is free; it is a minor bump. */         \
     TOPIC   (CameraGroup,       700, "Camera")                                          \
-    /* METRES PER COMP PIXEL. 0 is the old behaviour: the camera turns but does not     \
-     * move. 1 means a 1000-pixel dolly walks a kilometre. */                           \
-    FLOAT   (CameraTravel,      701, "Camera Travel (m/px)",                            \
-             0.0, 10000.0,    0.0, 10.0,         1.0,     3)                            \
-    /* The eye's height when the comp camera is level with the comp centre. Moving the  \
-     * camera up in the comp climbs from here, at the Travel scale. */                  \
-    FLOAT   (CameraAltitude,    702, "Camera Altitude",                                 \
+    /* WHICH CAMERA. Build 16, reported from the host: framing with the comp camera left\
+     * the user "lost" -- it moves in pixels, pivots on the ground under the cloud, and \
+     * AE's viewer shows nothing to aim at. ORBIT THE HERO is the effect's own rig (see \
+     * src/engine/OrbitCamera.h): it circles Hero Position X/Z and always looks at the  \
+     * cloud, in metres and degrees. COMP CAMERA is build 15's behaviour, unchanged.    \
+     * THE ROWS BELOW 701 WERE INSERTED, and the minor bump is what makes that safe. */ \
+    POPUP   (CameraMode,        708, "Camera", 2, 1,                                    \
+             "Orbit the Hero|Comp Camera")                                              \
+    /* Round the cloud. 0 stands where a default camera does; + walks to the right. */  \
+    ANGLE   (CameraOrbit,       709, "Orbit", 0.0)                                      \
+    /* Towards or away from the cloud: metres from its centre, along the ground. 0 is   \
+     * directly underneath, looking straight up. Under half the Hero Width the eye is   \
+     * beneath the base, and the frame is the base's shadowed underside. */             \
+    FLOAT   (CameraDistance,    710, "Distance",                                        \
+             0.0, 1000000.0,  0.0, 20000.0,      4000.0,  0)                            \
+    /* THE EYE'S HEIGHT above the ground, for both cameras. For the comp camera it is   \
+     * the height when level with the comp centre, and moving it up climbs from here.   \
+     * RELABELLED from "Camera Altitude"; the ID and index did not move. */             \
+    FLOAT   (CameraAltitude,    702, "Eye Height",                                      \
              1.0, 100000.0,   1.0, 5000.0,       2.0,     1)                            \
+    /* Where on the cloud the rig looks: 0 its base, 1 its top. A fraction so the aim   \
+     * follows the cloud when the Inversion moves it. Beyond 0..1 looks below or above. */\
+    FLOAT   (CameraLookAt,      711, "Look At Height",                                  \
+             -10.0, 10.0,     0.0, 1.0,          0.5,     2)                            \
+    /* Offsets from that aim, for a composition that is not dead centre. */            \
+    ANGLE   (CameraTilt,        712, "Tilt", 0.0)                                       \
+    ANGLE   (CameraPan,         713, "Pan", 0.0)                                        \
+    ANGLE   (CameraRoll,        714, "Roll", 0.0)                                       \
+    /* On 36 mm film measured across, AE's camera default -- so 50 here is AE's 50. */  \
+    FLOAT   (CameraFocal,       715, "Focal Length (mm)",                               \
+             1.0, 10000.0,    8.0, 200.0,        24.0,    1)                            \
+    /* COMP CAMERA ONLY. METRES PER COMP PIXEL. 0 is the old behaviour: the camera turns\
+     * but does not move. 1 means a 1000-pixel dolly walks a kilometre. */              \
+    FLOAT   (CameraTravel,      701, "Comp Camera Travel (m/px)",                       \
+             0.0, 10000.0,    0.0, 10.0,         1.0,     3)                            \
     /* HOW FAR ACROSS FROM THE EYE CLOUD IS DRAWN; 0 IS UNLIMITED. A grazing ray through\
      * the cumulus layer crosses tens of kilometres of cloud, which is most of what a   \
      * horizon view costs. The last quarter fades rather than stopping at a wall.   
@@ -295,8 +323,9 @@ namespace ae {
      * -- so 0, 0 is in front of a default camera and a dolly walks towards it. HEIGHT IS\
      * A FRACTION of the room under the Inversion; raise that for a taller tower. ALONE \
      * drops the field, and is fast: rays that miss the hero never enter the layer.     \
-     * Inserted before the spares, which nothing has shipped to make expensive. */      \
-    POPUP   (CumulusHero,       619, "Hero Cloud", 3, 1,                                \
+     * Inserted before the spares, which nothing has shipped to make expensive.        \
+     * WITH THE FIELD BY DEFAULT since build 16: the default camera orbits the hero. */ \
+    POPUP   (CumulusHero,       619, "Hero Cloud", 3, 2,                                \
              "Off|With the Field|Alone")                                                \
     FLOAT   (CumulusHeroX,      620, "Hero Position X",                                 \
              -1000000.0, 1000000.0, -20000.0, 20000.0, 0.0, 0)                          \
@@ -820,6 +849,25 @@ inline cloud::ConvectionParams toConvection(const ParamValues& p) {
 
     // Polarity and coverage are clamped to [0, 1] in SlangBridge.h, where the kernel's
     // bound needs them to be; billow octaves have no control and keep the default.
+    return out;
+}
+
+// THE ORBIT RIG'S CONTROLS. Mistytune.cpp decides whether they are used, from
+// CameraMode; OrbitCamera.h owns every sign.
+inline bool usesCompCamera(const ParamValues& p) {
+    return std::lround(p.v[kMistytuneCameraMode]) == 1;
+}
+
+inline cloud::OrbitControls toOrbit(const ParamValues& p) {
+    cloud::OrbitControls out;
+    out.orbitDegrees  = static_cast<float>(p.v[kMistytuneCameraOrbit]);
+    out.distance      = static_cast<float>(p.v[kMistytuneCameraDistance]);
+    out.eyeAltitude   = static_cast<float>(p.v[kMistytuneCameraAltitude]);
+    out.lookAt        = static_cast<float>(p.v[kMistytuneCameraLookAt]);
+    out.tiltDegrees   = static_cast<float>(p.v[kMistytuneCameraTilt]);
+    out.panDegrees    = static_cast<float>(p.v[kMistytuneCameraPan]);
+    out.rollDegrees   = static_cast<float>(p.v[kMistytuneCameraRoll]);
+    out.focalLengthMm = static_cast<float>(p.v[kMistytuneCameraFocal]);
     return out;
 }
 

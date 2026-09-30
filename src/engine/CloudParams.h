@@ -268,7 +268,7 @@ struct ConvectionParams {
     // -----------------------------------------------------------------
     int32_t heroMode    = 0;        // 0 off, 1 with the field, 2 alone
     Real heroX          = 0.0f;     // m, +X right of a default camera
-    Real heroZ          = 0.0f;     // m, +Z AWAY from a default camera -- AE's depth
+    Real heroZ          = 0.0f;     // m, +Z TOWARDS a default camera, which stands on +Z
     Real heroWidth      = 3000.0f;  // m, the footprint's diameter at the base
     Real heroHeight     = 1.0f;     // 0..1 of the base-to-inversion depth
     Real heroVariation  = 0.0f;     // picks which cauliflower it wears

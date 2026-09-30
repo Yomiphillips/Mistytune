@@ -4,6 +4,76 @@ Tracked against `PLAN.md`. Newest first.
 
 ---
 
+## 2026-09-30 — THE CAMERA ORBITS THE CLOUD. Build 16, minor 8.
+
+### What the host reported
+
+"The camera movements still feel very unintuitive ... I'm lost. I should be able to
+dolly around a specific point or cloud, move towards it or against it."
+
+Three causes, none of them a bug in CameraConvert.h:
+
+1. **AE's camera moves in comp pixels and the sky is in kilometres.** At the default
+   Camera Travel of 1 m/px, reaching a 3 km cloud means thousands of pixels of dolly.
+2. **AE's point of interest pivots on a spot on the ground.** The world origin is the
+   comp centre on the comp plane, at eye height. The cloud is 0.7 to 2.4 km above that
+   spot, so the Orbit tool swings the camera round the ground under the cloud. A
+   default camera looks level, so the cloud sits above the frame.
+3. **AE's viewer draws nothing where the cloud is.** The only feedback is a slow render.
+
+### Orbit the Hero
+
+The Camera group now opens with a **Camera** popup. **Orbit the Hero** is the new
+default, and **Comp Camera** is build 15's behaviour, unchanged. The rig is in
+`src/engine/OrbitCamera.h`:
+
+| Control | Meaning |
+|---|---|
+| Orbit | round the hero; 0 stands where a default camera does, + walks right |
+| Distance | metres from the hero's axis along the ground; 0 is underneath, looking up |
+| Eye Height | the old Camera Altitude, relabelled (same ID and index) |
+| Look At Height | where on the cloud it aims: 0 base, 1 top; follows the Inversion |
+| Tilt / Pan / Roll | offsets from that aim |
+| Focal Length (mm) | on 36 mm film measured across, so 50 is AE's 50 |
+| Comp Camera Travel | relabelled; used only by Comp Camera |
+
+The target is Hero Position X/Z whether or not the hero is drawn. Look At is a
+fraction of the hero's height, or of the field's towers when the hero is off, or of
+the ground up to the cirrus generating level when there is no cumulus. The basis is
+built from yaw, pitch and roll rather than a look-at cross product, so directly under
+the cloud it looks straight up instead of degenerating. **Hero Cloud now defaults to
+With the Field** so a new instance has something to orbit.
+
+**The defaults, chosen from CLI renders** (480x270): Distance 4000 m and 24 mm frame the
+default hero whole, with the horizon near the bottom edge. At 2500 m it fills the
+frame. At Distance 3200 with the reference tower (Inversion 7000, Instability 0.9,
+Width 4000, Height 0.7), it is the close, looking-up shot from the build 14 report,
+and Orbit 90 shows its other side. **Under half the Hero Width the eye is beneath the
+base**, and the frame is the base's grey underside. That is physically right, and it
+is recorded because it looks like a failure.
+
+**Also fixed:** `heroZ`'s comment said +Z is away from a default camera. It is
+towards it: the camera stands on +Z looking down -Z.
+
+### Tests
+
+Six new cases in TestCamera.cpp: from 84 combinations of orbit, distance and Look At
+(including directly underneath), the centre ray passes through the aim point. They
+also pin orbit direction, tilt, pan and roll signs (none of which move the eye), that
+the basis is orthonormal looking straight up, the eye floor, 50 mm matching AE's
+22.9°, and the Look At span for the hero, the field and cirrus only. The CLI has the
+rig as `--orbit --distance --look-at --tilt --pan --roll --focal`.
+
+### What needs the host
+
+- **Does Orbit / Distance feel like walking round a cloud and towards it?** That is
+  the report this build answers.
+- **The Comp Camera popup** still behaves as build 15 did.
+- **Saved build 15 projects will have scrambled Camera and later values**: eight rows
+  were inserted. Re-apply the effect.
+
+---
+
 ## 2026-09-30 — THE CAMERA TRAVELS, ONE CLOUD CAN BE PLACED, AND THE WALLS GET CAULIFLOWER. Build 15, minor 7. The shape costs 1.8x on the default field, measured, and five cheaper-looking ways out were each measured and each failed.
 
 ### What the host reported

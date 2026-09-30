@@ -392,16 +392,31 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
 
     const PF_LRect& req = extra->input->output_request.rect;
 
-    fillCameraFromComp(in_data, data->view,
-                       static_cast<float>(values.v[kMistytuneCameraTravel]),
-                       static_cast<float>(values.v[kMistytuneCameraAltitude]));
+    // THE ORBIT RIG UNLESS THE USER ASKED FOR THE COMP'S CAMERA. The rig reads the
+    // field, which is filled above, because it aims at the cloud's height -- see
+    // src/engine/OrbitCamera.h. It never calls AEGP_GetEffectCameraMatrix, so a comp
+    // camera left in the comp does nothing while the rig is chosen.
+    const bool compCamera = usesCompCamera(values);
+    if (compCamera) {
+        fillCameraFromComp(in_data, data->view,
+                           static_cast<float>(values.v[kMistytuneCameraTravel]),
+                           static_cast<float>(values.v[kMistytuneCameraAltitude]));
+    } else {
+        cloud::orbitView(data->field, toOrbit(values), data->view);
+        diagLog("  orbit: eye (%.1f, %.1f, %.1f) m",
+                static_cast<double>(data->view.observerX),
+                static_cast<double>(data->view.observerAltitude),
+                static_cast<double>(data->view.observerZ));
+    }
 
     // WHICH CAMERA, NAMED RATHER THAN INFERRED FROM THE PICTURE. "No camera,
     // defaulting" and "the comp's camera, and it points there" produce different
     // skies, and telling them apart by looking is exactly the diagnosis this
     // project has repeatedly got wrong.
     diagLog("  camera: %s, vertical fov %.1f deg",
-            data->view.cameraFromComp ? "from the comp" : "no comp camera -- default",
+            !compCamera                  ? "orbit the hero"
+            : data->view.cameraFromComp ? "from the comp"
+                                        : "no comp camera -- default",
             static_cast<double>(data->view.verticalFovDegrees));
 
     // THE RENDER PATH HAD NO INSTRUMENTATION AT ALL, and that is what made "nothing

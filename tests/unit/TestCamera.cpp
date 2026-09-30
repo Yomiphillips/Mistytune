@@ -17,6 +17,7 @@
 #include "TestFramework.h"
 
 #include "CameraConvert.h"
+#include "OrbitCamera.h"
 #include "Shading.h"
 
 using namespace plugin;
@@ -393,4 +394,209 @@ PL_TEST(TheObserverStaysAboveTheGround) {
     const ObserverPosition o = observerFromCompPosition(960.0, 5000.0, -2000.0,
                                                         1920.0, 1080.0, 1.0f, 2.0f);
     PL_CHECK_NEAR(o.altitude, 1.0, 1e-6);
+}
+
+// --------------------------------------------------------------------------
+// The orbit rig
+// --------------------------------------------------------------------------
+//
+// THE PROMISE IS THAT THE CLOUD STAYS IN FRAME, so the first case is the one that says
+// so: from every orbit angle and distance, including directly underneath, the centre
+// ray passes through the point Look At names. The rest pin each control's sign, which
+// is what decides whether a slider does what its name says.
+
+namespace {
+
+// A hero at a place that is not the origin, so a rig that ignored the hero's position
+// fails rather than passing by coincidence.
+FieldParams heroField() {
+    FieldParams f;
+    f.convection.enabled  = true;
+    f.convection.heroMode = 2;
+    f.convection.heroX    = 1500.0f;
+    f.convection.heroZ    = -800.0f;
+    return f;
+}
+
+ViewParams orbitOf(const FieldParams& f, const OrbitControls& c) {
+    ViewParams v = frameOf(1920, 1080);
+    orbitView(f, c, v);
+    return v;
+}
+
+Vec3 axisOf(const ViewParams& v, Vec3 camDir) { return throughMatrix(v.cameraToWorld, camDir); }
+
+double lengthOf(Vec3 a) { return std::sqrt(static_cast<double>(dot(a, a))); }
+
+Vec3 crossOf(Vec3 a, Vec3 b) {
+    return vec3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
+}
+
+} // namespace
+
+PL_TEST(TheOrbitRigLooksAtTheCloudFromEverywhere) {
+    const FieldParams f = heroField();
+    Real lo = 0, hi = 0;
+    orbitAimSpan(f, lo, hi);
+    PL_CHECK(hi > lo);
+
+    const double orbits[] = { 0.0, 37.0, 90.0, 180.0, 225.0, -60.0, 400.0 };
+    const double dists[]  = { 0.0, 500.0, 4000.0, 30000.0 };
+    const double looks[]  = { 0.0, 0.5, 1.0 };
+
+    for (double o : orbits) {
+        for (double d : dists) {
+            for (double l : looks) {
+                OrbitControls c;
+                c.orbitDegrees = static_cast<Real>(o);
+                c.distance     = static_cast<Real>(d);
+                c.lookAt       = static_cast<Real>(l);
+                const ViewParams v = orbitOf(f, c);
+
+                const double tx = f.convection.heroX - v.observerX;
+                const double ty = (lo + l * (hi - lo)) - v.observerAltitude;
+                const double tz = f.convection.heroZ - v.observerZ;
+                const double len = std::sqrt(tx * tx + ty * ty + tz * tz);
+
+                // The centre pixel's ray is the forward axis, so checking that is enough.
+                const Vec3 fwd = axisOf(v, kForward);
+                PL_CHECK_NEAR(fwd.x, tx / len, 1e-4);
+                PL_CHECK_NEAR(fwd.y, ty / len, 1e-4);
+                PL_CHECK_NEAR(fwd.z, tz / len, 1e-4);
+
+                // And the observer is the distance asked for from the hero's axis.
+                PL_CHECK_NEAR(std::sqrt(tx * tx + tz * tz), d, 0.01 + d * 1e-6);
+            }
+        }
+    }
+}
+
+// ORBIT 0 IS WHERE A DEFAULT CAMERA STANDS, on +Z looking down -Z; +90 walks to its
+// right, which is +X.
+PL_TEST(TheOrbitWalksToTheCameraRight) {
+    const FieldParams f = heroField();
+    OrbitControls c;
+    c.distance = 1000.0f;
+
+    const ViewParams at0 = orbitOf(f, c);
+    PL_CHECK_NEAR(at0.observerX, f.convection.heroX, 1e-3);
+    PL_CHECK_NEAR(at0.observerZ, f.convection.heroZ + 1000.0, 1e-3);
+
+    c.orbitDegrees = 90.0f;
+    const ViewParams at90 = orbitOf(f, c);
+    PL_CHECK_NEAR(at90.observerX, f.convection.heroX + 1000.0, 1e-2);
+    PL_CHECK_NEAR(at90.observerZ, f.convection.heroZ, 1e-2);
+
+    // A little way round, the camera has moved along its OWN right axis at orbit 0.
+    c.orbitDegrees = 5.0f;
+    const ViewParams at5 = orbitOf(f, c);
+    const Vec3 right0 = axisOf(at0, kRight);
+    PL_CHECK((at5.observerX - at0.observerX) * right0.x +
+             (at5.observerZ - at0.observerZ) * right0.z > 0.0f);
+}
+
+// THE OFFSETS, EACH WITH THE SIGN ITS NAME PROMISES, and none of them moves the eye.
+PL_TEST(TiltPanAndRollTurnTheWayTheySay) {
+    const FieldParams f = heroField();
+    const OrbitControls c;
+    const ViewParams base = orbitOf(f, c);
+    const Vec3 fwd0   = axisOf(base, kForward);
+    const Vec3 right0 = axisOf(base, kRight);
+
+    OrbitControls tilt = c;  tilt.tiltDegrees = 10.0f;
+    const Vec3 fwdT = axisOf(orbitOf(f, tilt), kForward);
+    PL_CHECK(fwdT.y > fwd0.y);                                   // looks higher
+    PL_CHECK_NEAR(fwdT.x, fwd0.x, 1e-5);                         // same heading
+
+    OrbitControls pan = c;   pan.panDegrees = 10.0f;
+    const Vec3 fwdP = axisOf(orbitOf(f, pan), kForward);
+    PL_CHECK(fwdP.x * right0.x + fwdP.z * right0.z > 0.0f);      // turned right
+    PL_CHECK_NEAR(fwdP.y, fwd0.y, 1e-5);                         // same elevation
+
+    OrbitControls roll = c;  roll.rollDegrees = 10.0f;
+    const ViewParams rolled = orbitOf(f, roll);
+    PL_CHECK(axisOf(rolled, kRight).y < right0.y);               // right side dips
+    checkSameRay(axisOf(rolled, kForward), fwd0);                // aim unchanged
+
+    for (const OrbitControls* o : { &tilt, &pan, &roll }) {
+        const ViewParams v = orbitOf(f, *o);
+        PL_CHECK_NEAR(v.observerX, base.observerX, 0.0);
+        PL_CHECK_NEAR(v.observerZ, base.observerZ, 0.0);
+        PL_CHECK_NEAR(v.observerAltitude, base.observerAltitude, 0.0);
+    }
+}
+
+// STANDING DIRECTLY UNDER THE CLOUD LOOKS STRAIGHT UP, and the basis is still a
+// rotation. A look-at built by crossing with world up is zero here, and this is the
+// shot the rig exists for.
+PL_TEST(DirectlyUnderTheCloudLooksStraightUp) {
+    OrbitControls c;
+    c.distance     = 0.0f;
+    c.orbitDegrees = 30.0f;
+    const ViewParams v = orbitOf(heroField(), c);
+
+    const Vec3 fwd = axisOf(v, kForward);
+    const Vec3 up  = axisOf(v, kUp);
+    const Vec3 rt  = axisOf(v, kRight);
+    PL_CHECK_NEAR(fwd.y, 1.0, 1e-5);
+    PL_CHECK_NEAR(lengthOf(up), 1.0, 1e-5);
+    PL_CHECK_NEAR(lengthOf(rt), 1.0, 1e-5);
+    PL_CHECK_NEAR(dot(up, rt), 0.0, 1e-5);
+    PL_CHECK_NEAR(dot(fwd, up), 0.0, 1e-5);
+
+    // Right-handed: right x up is the camera's +Z, which is backwards.
+    checkSameRay(crossOf(rt, up), vec3(-fwd.x, -fwd.y, -fwd.z));
+}
+
+// THE EYE STAYS ABOVE THE GROUND, as the comp camera's does.
+PL_TEST(TheOrbitEyeStaysAboveTheGround) {
+    OrbitControls c;
+    c.eyeAltitude = -50.0f;
+    PL_CHECK_NEAR(orbitOf(heroField(), c).observerAltitude, 1.0, 0.0);
+}
+
+// A 50 MM LENS FRAMES WHAT AE'S DEFAULT 50 MM CAMERA DOES: 22.9 degrees vertical on a
+// 16:9 comp, which the host log reports for one (distance 2666.7 to a 1080 plane).
+PL_TEST(FocalLengthMatchesAnAECamera) {
+    PL_CHECK_NEAR(verticalFovFromFocalLength(50.0f, 1920, 1080),
+                  verticalFovFromPlane(2666.7, 1080.0), 0.01);
+    PL_CHECK(verticalFovFromFocalLength(24.0f, 1920, 1080) >
+             verticalFovFromFocalLength(85.0f, 1920, 1080));
+
+    // Only the aspect reaches it, so a proxy render (both halved) frames the same.
+    PL_CHECK_NEAR(verticalFovFromFocalLength(35.0f, 1920, 1080),
+                  verticalFovFromFocalLength(35.0f, 640, 360), 1e-4);
+    PL_CHECK_NEAR(verticalFovFromFocalLength(0.0f, 1920, 1080), 0.0, 0.0);
+}
+
+// LOOK AT IS A FRACTION OF THE CLOUD THAT IS THERE: the hero when there is one, the
+// field's towers when not, and the cirrus's generating level with no cumulus at all.
+PL_TEST(LookAtSpansTheCloudThatIsThere) {
+    FieldParams f = heroField();
+    ConvectionDerived cd;
+    deriveConvection(f, cd);
+
+    Real lo = 0, hi = 0;
+    orbitAimSpan(f, lo, hi);
+    PL_CHECK_NEAR(lo, cd.base, 1e-3);
+    PL_CHECK_NEAR(hi, cd.base + cd.heroTop, 1e-3);
+
+    f.convection.heroMode = 0;
+    deriveConvection(f, cd);
+    orbitAimSpan(f, lo, hi);
+    PL_CHECK_NEAR(lo, cd.base, 1e-3);
+    PL_CHECK_NEAR(hi, cd.base + cd.depth, 1e-3);
+
+    f.convection.enabled = false;
+    orbitAimSpan(f, lo, hi);
+    PL_CHECK_NEAR(lo, 0.0, 0.0);
+    PL_CHECK_NEAR(hi, f.ice.cellAltitude, 0.0);
+
+    // Raising the lid raises the aim with the cloud.
+    FieldParams tall = heroField();
+    tall.convection.inversionHeight *= 2.0f;
+    Real tlo = 0, thi = 0;
+    orbitAimSpan(tall, tlo, thi);
+    orbitAimSpan(heroField(), lo, hi);
+    PL_CHECK(thi > hi);
 }

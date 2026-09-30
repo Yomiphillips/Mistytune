@@ -27,6 +27,7 @@
 #include "FieldCache.h"
 #include "Denoiser.h"
 #include "Fingerprint.h"
+#include "OrbitCamera.h"
 
 #include <cmath>
 #include <cstdio>
@@ -92,6 +93,14 @@ void printUsage() {
         "  --cam-x <m>      where the eye stands: metres east (+X) of the origin\n"
         "  --cam-z <m>      ...and metres along +Z, which the identity camera faces away from\n"
         "  --altitude <m>   the eye's height (default 2)\n"
+        "\n"
+        "  The orbit rig -- the effect's default camera. Any of these turns it on, and it\n"
+        "  then replaces --pitch, --heading, --fov and --cam-x/z; --altitude is the eye:\n"
+        "  --orbit <deg>    round the hero, + walks right (default 0)\n"
+        "  --distance <m>   from the hero's axis along the ground (default 4000)\n"
+        "  --look-at <f>    where on the cloud to aim, 0 base .. 1 top (default 0.5)\n"
+        "  --tilt <deg>  --pan <deg>  --roll <deg>   offsets from that aim\n"
+        "  --focal <mm>     focal length on 36 mm film (default 24)\n"
         "  --bounces <n>    scattering events per path (default 32)\n"
         "\n"
         "  The cumulus layer (cellular convection). OFF unless one of these is given,\n"
@@ -339,6 +348,11 @@ int main(int argc, char** argv) {
     // golden scenes' matrix exactly what it was.
     float headingDegrees = 180.0f;
 
+    // THE ORBIT RIG, off unless one of its flags is given, so every golden scene keeps
+    // its camera. The eye height is --altitude's, read after the loop.
+    cloud::OrbitControls orbit;
+    bool useOrbit = false;
+
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
         const bool hasNext = (i + 1) < argc;
@@ -395,6 +409,13 @@ int main(int argc, char** argv) {
         else if (argIs(a, "--hero-height") && hasNext)   req.field.convection.heroHeight    = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--hero-var") && hasNext)      req.field.convection.heroVariation = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--render-distance") && hasNext) req.view.renderDistance = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--orbit") && hasNext)         { useOrbit = true; orbit.orbitDegrees  = static_cast<float>(std::atof(argv[++i])); }
+        else if (argIs(a, "--distance") && hasNext)      { useOrbit = true; orbit.distance      = static_cast<float>(std::atof(argv[++i])); }
+        else if (argIs(a, "--look-at") && hasNext)       { useOrbit = true; orbit.lookAt        = static_cast<float>(std::atof(argv[++i])); }
+        else if (argIs(a, "--tilt") && hasNext)          { useOrbit = true; orbit.tiltDegrees   = static_cast<float>(std::atof(argv[++i])); }
+        else if (argIs(a, "--pan") && hasNext)           { useOrbit = true; orbit.panDegrees    = static_cast<float>(std::atof(argv[++i])); }
+        else if (argIs(a, "--roll") && hasNext)          { useOrbit = true; orbit.rollDegrees   = static_cast<float>(std::atof(argv[++i])); }
+        else if (argIs(a, "--focal") && hasNext)         { useOrbit = true; orbit.focalLengthMm = static_cast<float>(std::atof(argv[++i])); }
         else if (argIs(a, "--window") && i + 4 < argc) {
             windowX = std::atoi(argv[++i]);
             windowY = std::atoi(argv[++i]);
@@ -462,7 +483,17 @@ int main(int argc, char** argv) {
     // world's Y. Camera-to-world, row-major, as ViewParams documents -- Ry(theta) * Rx(pitch),
     // where theta = heading - 180 because the identity camera already faces azimuth 180.
     // Left untouched at the defaults, so the golden scenes keep the exact identity.
-    if (pitchDegrees != 0.0f || headingDegrees != 180.0f) {
+    if (useOrbit) {
+        // THE SAME CALL THE EFFECT MAKES, after the frame size is known, since the
+        // field of view depends on its aspect.
+        orbit.eyeAltitude = req.view.observerAltitude;
+        cloud::orbitView(req.field, orbit, req.view);
+        std::printf("orbit: eye (%.1f, %.1f, %.1f) m, vertical fov %.1f deg\n",
+                    static_cast<double>(req.view.observerX),
+                    static_cast<double>(req.view.observerAltitude),
+                    static_cast<double>(req.view.observerZ),
+                    static_cast<double>(req.view.verticalFovDegrees));
+    } else if (pitchDegrees != 0.0f || headingDegrees != 180.0f) {
         const float rad = pitchDegrees * 0.01745329252f;
         const float cc  = std::cos(rad);
         const float ss  = std::sin(rad);

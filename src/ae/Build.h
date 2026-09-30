@@ -126,6 +126,15 @@
 //
 // A MINOR BUMP BECAUSE THE PARAMETER LIST CHANGED: a Camera group was inserted after Sun
 // and Sky, and six hero rows were inserted into the Cumulus group before its spares.
+// MINOR 8, BUILD 16 -- THE CAMERA ORBITS THE CLOUD. Reported from the host: framing with
+// the comp camera left the user "lost". It moves in pixels, pivots on the ground under
+// the cloud, and AE's viewer shows nothing to aim at. The new default camera, Orbit the
+// Hero, circles Hero Position X/Z at a Distance in metres and always looks at the cloud;
+// Tilt, Pan and Roll offset that aim. The comp camera is still there, unchanged, behind
+// the Camera popup. The hero now defaults to With the Field so there is one to orbit.
+//
+// A MINOR BUMP BECAUSE THE PARAMETER LIST CHANGED: eight rows were inserted into the
+// Camera group, and a default changed.
 #define PLUGIN_MAJOR 0
-#define PLUGIN_MINOR 7
-#define PLUGIN_BUILD 15
+#define PLUGIN_MINOR 8
+#define PLUGIN_BUILD 16
