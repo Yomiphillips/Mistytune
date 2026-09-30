@@ -114,6 +114,37 @@ namespace ae {
     SPARE   (SkySpare4,         112)                                                     \
     ENDTOPIC(SkyGroupEnd,       113)                                                     \
                                                                                         \
+    /* ---------------- Camera ---------------- */                                      \
+    /* WHERE THE EYE IS. Until build 15 only the comp camera's ROTATION reached the     \
+     * renderer, so a dolly towards a cloud moved nothing: the eye stood two metres     \
+     * above one spot and could only look around. Travel converts the comp camera's     \
+     * position into metres -- see observerFromAE in CameraConvert.h, which puts the    \
+     * world origin where AE's default camera looks.                                    \
+     *                                                                                  \
+     * INSERTED SECOND, after Sun and Sky, because framing is what a user reaches for   \
+     * next. Nothing has shipped, so the insert is free; it is a minor bump. */         \
+    TOPIC   (CameraGroup,       700, "Camera")                                          \
+    /* METRES PER COMP PIXEL. 0 is the old behaviour: the camera turns but does not     \
+     * move. 1 means a 1000-pixel dolly walks a kilometre. */                           \
+    FLOAT   (CameraTravel,      701, "Camera Travel (m/px)",                            \
+             0.0, 10000.0,    0.0, 10.0,         1.0,     3)                            \
+    /* The eye's height when the comp camera is level with the comp centre. Moving the  \
+     * camera up in the comp climbs from here, at the Travel scale. */                  \
+    FLOAT   (CameraAltitude,    702, "Camera Altitude",                                 \
+             1.0, 100000.0,   1.0, 5000.0,       2.0,     1)                            \
+    /* HOW FAR ACROSS FROM THE EYE CLOUD IS DRAWN; 0 IS UNLIMITED. A grazing ray through\
+     * the cumulus layer crosses tens of kilometres of cloud, which is most of what a   \
+     * horizon view costs. The last quarter fades rather than stopping at a wall.   
+     * DEFAULT 40 KM, MEASURED: 18% off a backlit horizon frame, with little lost but the  
+     * far clutter at the horizon. 20 km halves it but fades the low cirrus visibly.       \
+     * A SPARE TURNED INTO A CONTROL IN PLACE: ID 703 was always this slot. */          \
+    FLOAT   (RenderDistance,    703, "Render Distance",                                 \
+             0.0, 1000000.0,  0.0, 100000.0,     40000.0, 0)                            \
+    SPARE   (CameraSpare2,      704)                                                    \
+    SPARE   (CameraSpare3,      705)                                                    \
+    SPARE   (CameraSpare4,      706)                                                    \
+    ENDTOPIC(CameraGroupEnd,    707)                                                    \
+                                                                                        \
     /* ---------------- Ice and fallstreaks ---------------- */                         \
     /* THE FIRST GENERATOR, AND UNTIL NOW NOT ONE OF ITS PARAMETERS REACHED THE PANEL.  \
      * The kernel has marched a real cirrus field since 2026-09-28 -- IceParams is      \
@@ -259,6 +290,26 @@ namespace ae {
      * the glory. The fit is valid for 5 to 50 and is clamped there. */                 \
     FLOAT   (CumulusDroplet,    613, "Droplet Size",                                    \
              1.0, 1000.0,     5.0, 50.0,         20.0,    1)                            \
+    /* THE HERO: one cloud, placed, rather than whichever the lattice put in front of the\
+     * camera. POSITION IS WORLD METRES from the origin -- where AE's default camera looks\
+     * -- so 0, 0 is in front of a default camera and a dolly walks towards it. HEIGHT IS\
+     * A FRACTION of the room under the Inversion; raise that for a taller tower. ALONE \
+     * drops the field, and is fast: rays that miss the hero never enter the layer.     \
+     * Inserted before the spares, which nothing has shipped to make expensive. */      \
+    POPUP   (CumulusHero,       619, "Hero Cloud", 3, 1,                                \
+             "Off|With the Field|Alone")                                                \
+    FLOAT   (CumulusHeroX,      620, "Hero Position X",                                 \
+             -1000000.0, 1000000.0, -20000.0, 20000.0, 0.0, 0)                          \
+    FLOAT   (CumulusHeroZ,      621, "Hero Position Z",                                 \
+             -1000000.0, 1000000.0, -20000.0, 20000.0, 0.0, 0)                          \
+    /* The footprint's diameter at the base. A divisor, floored at 2 m in the engine. */\
+    FLOAT   (CumulusHeroWidth,  622, "Hero Width",                                      \
+             2.0, 100000.0,   200.0, 10000.0,    3000.0,  0)                            \
+    FLOAT   (CumulusHeroHeight, 623, "Hero Height",                                     \
+             0.0, 1.0,        0.0, 1.0,          1.0,     3)                            \
+    /* Which cauliflower it wears. CONTINUOUS, so keyframing it morphs the lobes. */    \
+    FLOAT   (CumulusHeroVariation, 624, "Hero Variation",                               \
+             -1000000.0, 1000000.0, 0.0, 10.0, 0.0,  2)                                 \
     SPARE   (CumulusSpare1,     614)                                                    \
     SPARE   (CumulusSpare2,     615)                                                    \
     SPARE   (CumulusSpare3,     616)                                                    \
@@ -756,6 +807,16 @@ inline cloud::ConvectionParams toConvection(const ParamValues& p) {
 
     out.lifetime        = static_cast<float>(p.v[kMistytuneCumulusLifetime]);
     out.dropletDiameter = static_cast<float>(p.v[kMistytuneCumulusDroplet]);
+
+    // The popup is 0-based by the time it gets here; clamped like the habit popup, so
+    // nothing outside Off / With the Field / Alone can reach the engine.
+    const int hero = static_cast<int>(std::lround(p.v[kMistytuneCumulusHero]));
+    out.heroMode      = hero < 0 ? 0 : (hero > 2 ? 2 : hero);
+    out.heroX         = static_cast<float>(p.v[kMistytuneCumulusHeroX]);
+    out.heroZ         = static_cast<float>(p.v[kMistytuneCumulusHeroZ]);
+    out.heroWidth     = static_cast<float>(p.v[kMistytuneCumulusHeroWidth]);
+    out.heroHeight    = static_cast<float>(p.v[kMistytuneCumulusHeroHeight]);
+    out.heroVariation = static_cast<float>(p.v[kMistytuneCumulusHeroVariation]);
 
     // Polarity and coverage are clamped to [0, 1] in SlangBridge.h, where the kernel's
     // bound needs them to be; billow octaves have no control and keep the default.

@@ -10,7 +10,14 @@
 //      on the CONDENSATION LEVEL -- flat, because every parcel starts from the same
 //      surface air -- and rises as far as its updraft carries it, under the inversion.
 //   4. Billows displace the top and sides, riding the updraft upward; the base is left
-//      alone.
+//      alone. They push along the surface's NORMAL, measured as a distance to the
+//      nearest surface rather than straight down to the top -- which is what puts
+//      cauliflower on a tall tower's walls instead of only on its crown.
+//
+// And optionally a HERO: one cloud placed where the user says, with or without the field
+// around it. It is built the same way from an analytic tower, so it has the same base,
+// the same billows and the same bound. It is what a framing -- and, later, pareidolia --
+// is built on.
 //
 // Nothing here is a density-to-opacity ramp. Every factor is a physical statement
 // about where saturated air is, and the light is the transport's business.
@@ -47,6 +54,20 @@ public struct ConvectionInput
     float2 cvDrift;        // m, how far the pattern has travelled on the wind
     float  cvAge;          // lifetimes elapsed: the clock every cell's cycle reads
     float  cvRise;         // m, how far the billows have climbed
+
+    // The hero cloud. cvHeroTop <= 0 means there is none. cvHeroAlone 1 leaves the
+    // cell field out. ZERO MEANS THE OLD BEHAVIOUR for both, so a zero-initialised
+    // input -- which is how every test builds one -- is the field and no hero.
+    int    cvHeroAlone;
+    float2 cvHeroAt;       // m, world x and z of the hero's centre. It does not drift
+    float  cvHeroRadius;   // m, its footprint on the base
+    float  cvHeroTop;      // m above the base
+    float3 cvHeroSeed;     // an offset into billow space: which cauliflower it wears
+
+    // THE HERO'S BILLOWS SCALE WITH IT: amount and lobe size both, by this factor over
+    // the field's. A cloud twice a cell's width is built from thermals about twice as
+    // big, and with the field's lobes a 4 km hero read as a beehive of small ones.
+    float  cvHeroBillow;
 };
 
 // ---------------------------------------------------------------------------
@@ -118,7 +139,33 @@ public static const float kBillowBias = 1.16f;  // measured: 0.9 inflated by +0.
 // How much of the full billow a tower's SIDES get, against its top. Rising thermals
 // break through the top; the flanks are smoother. The displacement ramps from this at
 // the base to one at the top of the tallest tower.
-public static const float kBillowSideFraction = 0.35f;
+public static const float kBillowSideFraction = 0.6f;
+
+// ===========================================================================
+// THE BILLOWS NEAR THE BASE ARE CAPPED AT A FRACTION OF THE HEIGHT, AND WITHOUT IT THE
+// FLAT BASE GROWS A SHEET.
+//
+// Away from every tower the nearest "surface" the distance below can find is the base
+// plane itself, `above` metres down. A billow lifting further than that would turn the
+// air just above the base into cloud everywhere -- a ragged mist across the whole
+// layer. Holding the lift under kLiftPerHeight x above keeps every point that far from
+// a wall clear, whatever the billow says. It is non-decreasing in height, which the
+// bound relies on.
+// ===========================================================================
+public static const float kLiftPerHeight = 0.7f;
+
+// ===========================================================================
+// THE STEEPEST THE UPDRAFT CAN BE, PER SLOT WIDTH -- the Lipschitz constant the bound
+// divides by.
+//
+// A kernel vig (1 - d^2/R^2)^2 has slope 4 vig t d / R^2, largest at d = R/sqrt(3):
+// 8 / (3 sqrt(3) R). The open field is one short kernel (R = 0.75) over kConvOpenNorm:
+// 2.053 / 0.31 = 6.62. The closed field is a difference of two long ones (R = 1.05):
+// at most 2 x 1.466 = 2.93. A blend of the two is no steeper than the steeper. Vigour
+// is at most one. So 6.62 bounds every gradient convUpdraftGrad returns; 7 is the
+// constant, with the margin on the safe side.
+// ===========================================================================
+public static const float kConvGradMax = 7.0f;
 
 // THERE IS NO FOOTPRINT WARP, AND THERE WAS ONE. It was there to stop the footprints
 // being ovals, which a sum of round kernels makes. The two-largest-kernels fields do not:
@@ -194,13 +241,22 @@ public float convBump(float d2, float reach)
 // cells had no holes. The second-largest kernel is symmetric in the two cells, which
 // is what "on the boundary" means.
 // ===========================================================================
-public float convUpdraft(ConvectionInput c, float2 q)
+// THE UPDRAFT AND ITS GRADIENT, per metre. The gradient is what turns "how far below
+// the top" into "how far from the wall": see convSurfaceDistance. It is exact wherever
+// the kernels' order does not change, which is almost everywhere; where it does, the
+// field has a crease and either side's slope is an honest answer.
+public float convUpdraftGrad(ConvectionInput c, float2 q, out float2 grad)
 {
     float2 g  = q / c.cvSpacing;
     int2   gi = int2(floor(g));
 
     float oTop = 0.0f, oNext = 0.0f;   // the short kernels' two largest: the rims
     float kTop = 0.0f, kNext = 0.0f;   // the long kernels' two largest: the centres
+    float2 goTop = float2(0.0f, 0.0f), goNext = float2(0.0f, 0.0f);
+    float2 gkTop = float2(0.0f, 0.0f), gkNext = float2(0.0f, 0.0f);
+
+    float ro2 = kConvReachOpen * kConvReachOpen;
+    float rk2 = kConvReachClosed * kConvReachClosed;
 
     for (int j = -1; j <= 1; ++j)
     {
@@ -216,17 +272,34 @@ public float convUpdraft(ConvectionInput c, float2 q)
             float  ko = vig * convBump(d2, kConvReachOpen);
             float  kk = vig * convBump(d2, kConvReachClosed);
 
-            if (ko > oTop) { oNext = oTop; oTop = ko; }
-            else if (ko > oNext) { oNext = ko; }
+            // d/dg of vig (1 - d2/R2)^2 is -4 vig (1 - d2/R2) d / R2.
+            float2 gko = d2 < ro2 ? d * (-4.0f * vig * (1.0f - d2 / ro2) / ro2) : float2(0.0f, 0.0f);
+            float2 gkk = d2 < rk2 ? d * (-4.0f * vig * (1.0f - d2 / rk2) / rk2) : float2(0.0f, 0.0f);
 
-            if (kk > kTop) { kNext = kTop; kTop = kk; }
-            else if (kk > kNext) { kNext = kk; }
+            if (ko > oTop) { oNext = oTop; goNext = goTop; oTop = ko; goTop = gko; }
+            else if (ko > oNext) { oNext = ko; goNext = gko; }
+
+            if (kk > kTop) { kNext = kTop; gkNext = gkTop; kTop = kk; gkTop = gkk; }
+            else if (kk > kNext) { kNext = kk; gkNext = gkk; }
         }
     }
 
-    float openField   = min(oNext / kConvOpenNorm, 1.0f);
+    float openRaw     = oNext / kConvOpenNorm;
+    float openField   = min(openRaw, 1.0f);
     float closedField = kTop - kNext;
+
+    float2 gOpen   = openRaw < 1.0f ? goNext / kConvOpenNorm : float2(0.0f, 0.0f);
+    float2 gClosed = gkTop - gkNext;
+
+    // Per slot width, to per metre.
+    grad = lerp(gOpen, gClosed, c.cvPolarity) / c.cvSpacing;
     return lerp(openField, closedField, c.cvPolarity);
+}
+
+public float convUpdraft(ConvectionInput c, float2 q)
+{
+    float2 unused;
+    return convUpdraftGrad(c, q, unused);
 }
 
 // How tall the cloud column stands over a point with updraft w. Zero below the
@@ -247,6 +320,98 @@ public float convTowerHeight(ConvectionInput c, float w)
     float u = saturate((w - (1.0f - span)) / span);
     if (u <= 0.0f) return 0.0f;
     return c.cvDepth * pow(u, c.cvShape);
+}
+
+// The updraft a column needs to reach `above`: convTowerHeight's inverse. Past the
+// tallest tower it keeps climbing past one, which no updraft reaches, so a point over
+// every top is outside by a positive margin rather than on a surface.
+public float convNeededUpdraft(ConvectionInput c, float above)
+{
+    float cover = clamp(c.cvCoverage, 0.0f, 1.0f);
+    if (cover <= 0.0f || c.cvDepth <= 0.0f) return 1e9f;
+
+    float span = sqrt(cover);
+    float u = pow(max(above, 0.0f) / c.cvDepth, 1.0f / max(c.cvShape, 1e-3f));
+    return (1.0f - span) + span * u;
+}
+
+// ===========================================================================
+// HOW FAR A POINT IS FROM THE CLOUD'S SURFACE: positive inside, negative outside.
+//
+// THE OLD MEASURE WAS VERTICAL ONLY -- tower minus height -- and that is why tall towers
+// rendered as smooth pillars. A billow adds to this number, and on a steep wall the
+// vertical distance to the top is hundreds of metres while the wall is a few metres
+// away, so no billow could move it. The crown got cauliflower and the walls got none.
+//
+// So both distances are taken, `v` down to the top and `h` across to the wall, and
+// combined as the distance to the plane through both intercepts:
+//
+//     d = sign(v) |v h| / sqrt(v^2 + h^2)
+//
+// On a flat crown h is huge and d is v, as before. On a wall v is huge and d is h. The
+// two always share a sign, since a point is under the top exactly where the updraft
+// beats what that height needs. |d| is at most min(|v|, |h|), which the bound uses.
+//
+// FOR THE FIELD, h is the updraft's shortfall over its slope: delta / G. Written without
+// the division, so a flat updraft (G = 0) gives d = v rather than a NaN.
+// ===========================================================================
+public float convSurfaceDistance(float v, float delta, float slope)
+{
+    float num = abs(v * delta);
+    float den = sqrt(v * v * slope * slope + delta * delta);
+    if (den <= 1e-20f) return 0.0f;
+    float d = num / den;
+    return v >= 0.0f ? d : -d;
+}
+
+// The same combination as a floor: every point whose |v| >= vMin and |h| >= hMin is at
+// least this far from the surface.
+public float convDistanceFloor(float vMin, float hMin)
+{
+    if (vMin <= 0.0f || hMin <= 0.0f) return 0.0f;
+    return 1.0f / sqrt(1.0f / (vMin * vMin) + 1.0f / (hMin * hMin));
+}
+
+// ---------------------------------------------------------------------------
+// The hero
+// ---------------------------------------------------------------------------
+//
+// ONE TOWER, ANALYTIC: height cvHeroTop (1 - (r/R)^2)^shape over a round footprint of
+// radius R. The same exponent as the field, so it is as steep-sided as the field's
+// towers at the same instability. Because the profile inverts in closed form, h is the
+// true horizontal distance to the wall, not an estimate.
+
+public float convHeroHeight(ConvectionInput c, float r)
+{
+    if (c.cvHeroTop <= 0.0f || r >= c.cvHeroRadius) return 0.0f;
+    float t = 1.0f - (r * r) / (c.cvHeroRadius * c.cvHeroRadius);
+    return c.cvHeroTop * pow(t, c.cvShape);
+}
+
+// The hero's radius at height `above`, or -1 above its top.
+public float convHeroRadiusAt(ConvectionInput c, float above)
+{
+    if (c.cvHeroTop <= 0.0f || above >= c.cvHeroTop) return -1.0f;
+    float f = pow(max(above, 0.0f) / c.cvHeroTop, 1.0f / max(c.cvShape, 1e-3f));
+    return c.cvHeroRadius * sqrt(max(1.0f - f, 0.0f));
+}
+
+// The highest anything in the layer reaches above the base, billows included: the
+// field's tallest tower plus its billow, or the hero's plus its own. The slab's top.
+public float convCeiling(ConvectionInput c)
+{
+    float field = c.cvDepth + c.cvBillow;
+    float hero  = c.cvHeroTop > 0.0f ? c.cvHeroTop + c.cvBillow * c.cvHeroBillow : 0.0f;
+    return max(field, hero);
+}
+
+// How far outside its footprint the hero can put cloud: the side billows' reach, which
+// is under 1.5x the lift once the base cap holds (see kLiftPerHeight), plus the soft
+// edge. The host sizes the layer's horizontal box from the same number, and the density
+// is zero outside that box, so this is the definition rather than an estimate.
+public float convHeroReach(ConvectionInput c)
+{
+    return c.cvHeroRadius + 1.5f * c.cvBillow * c.cvHeroBillow + 2.0f * kConvEdgeSoft;
 }
 
 // One octave of puffs: the largest sphere any feature point puts over x, in [0, 1].
@@ -282,14 +447,34 @@ public float convPuffs(float3 x)
 // Cauliflower: round lobes separated by sharp creases, in [-1, 1]. Sampled in the
 // PATTERN'S frame and lifted by the updraft, so the billows ride with the cloud and
 // climb through it rather than sitting still while it drifts past.
-public float convBillow(ConvectionInput c, float3 p)
+// ===========================================================================
+// EACH OCTAVE'S LATTICE IS TURNED, because a wall shows the lattice's rows.
+//
+// The puffs' feature points are jittered by only a quarter of a cell -- that is what
+// makes the eight-cell search exact -- so the lattice is regular enough to read. Seen
+// from above it never did; on a tower's wall, once the billows reached the sides, it
+// read as horizontal bands a lattice cell apart, like a beehive. An oblique rotation
+// per octave puts the rows at an angle no wall shares, and each octave at a different
+// one. It is orthonormal (this is the rotation from Quilez's value-noise fbm), so the
+// puffs keep their size and the eight-cell argument is untouched.
+// ===========================================================================
+float3 convTwist(float3 x)
 {
-    float3 x = float3(p.x, p.y - c.cvRise, p.z) / c.cvBillowScale;
+    return float3( 0.00f * x.x + 0.80f * x.y + 0.60f * x.z,
+                  -0.80f * x.x + 0.36f * x.y - 0.48f * x.z,
+                  -0.60f * x.x - 0.48f * x.y + 0.64f * x.z);
+}
+
+// `scale` is the largest lobe, in metres: the field's billow scale, or the hero's.
+public float convBillow(ConvectionInput c, float3 p, float scale)
+{
+    float3 x = float3(p.x, p.y - c.cvRise, p.z) / scale;
 
     float sum = 0.0f, amp = 0.6f, norm = 0.0f;
     for (int i = 0; i < 4; ++i)
     {
         if (i >= c.cvOctaves) break;
+        x     = convTwist(x);
         sum  += amp * convPuffs(x);
         norm += amp;
         x    *= 2.17f;
@@ -306,11 +491,25 @@ public float convBillow(ConvectionInput c, float3 p)
 // the base, which stays flat; kBillowSideFraction of the full amount on the flanks,
 // rising to all of it at the top of the tallest tower. NON-DECREASING IN HEIGHT, which
 // is what lets the bound take it at the top of a box.
-public float convLift(ConvectionInput c, float above)
+// `k` scales the billow amount: one for the field, cvHeroBillow for the hero. It scales
+// before the base cap, so the cap holds for both.
+public float convLift(ConvectionInput c, float above, float k)
 {
     float up = saturate(above / max(c.cvDepth, 1.0f));
-    return c.cvBillow * smoothstep(0.0f, kConvBaseFade, above)
-         * lerp(kBillowSideFraction, 1.0f, up);
+    float lift = c.cvBillow * k * smoothstep(0.0f, kConvBaseFade, above)
+               * lerp(kBillowSideFraction, 1.0f, up);
+    return min(lift, kLiftPerHeight * max(above, 0.0f));
+}
+
+// How far inside the cloud a point is once the billows have had their say, given its
+// distance `d` from the smooth surface and the most the billows can move it. The billow
+// is the expensive part, so it is only evaluated in the shell where it can matter.
+// `x` is the point in the billow pattern's own frame.
+float convInside(ConvectionInput c, float d, float lift, float3 x, float scale)
+{
+    if (d + lift <= 0.0f) return d + lift;             // no billow reaches out this far
+    if (d - lift >= kConvEdgeSoft) return kConvEdgeSoft;  // nor bites in this far
+    return d + lift * convBillow(c, x, scale);
 }
 
 
@@ -319,36 +518,106 @@ public float convLift(ConvectionInput c, float above)
 // Density
 // ---------------------------------------------------------------------------
 
+// The hero, in its own frame: it stands still while the field drifts, so its billows are
+// sampled about its own centre and do not slide across it. The same surface point as the
+// field's, from the closed form: up by v to the crown, out along the radius by h to the
+// wall. -1e30 beyond its reach.
+float convHeroInside(ConvectionInput c, float3 p, float above)
+{
+    float2 rel = p.xz - c.cvHeroAt;
+    float  r   = length(rel);
+    if (r >= convHeroReach(c)) return -1e30f;
+
+    float v  = convHeroHeight(c, r) - above;
+    float ra = convHeroRadiusAt(c, above);
+    float d, shiftUp, shiftOut;
+    if (ra < 0.0f)
+    {
+        d = v; shiftUp = v; shiftOut = 0.0f;   // over the top: straight down to it
+    }
+    else
+    {
+        float h = ra - r;
+        d = convSurfaceDistance(v, h, 1.0f);
+        shiftUp  = abs(v) > 1e-6f ? d * (d / v) : 0.0f;
+        shiftOut = abs(h) > 1e-6f ? d * (d / h) : 0.0f;
+    }
+    float2 radial = r > 1e-3f ? rel / r : float2(0.0f, 0.0f);
+    float2 at = rel + radial * shiftOut;
+    float3 x = float3(at.x, p.y + shiftUp, at.y) + c.cvHeroSeed;
+    float heroLift = convLift(c, above, c.cvHeroBillow);
+    return convInside(c, d, heroLift, x, c.cvBillowScale * c.cvHeroBillow);
+}
+
+// ===========================================================================
+// WHAT THE SIDE BILLOWS COST, MEASURED, AND WHY IT IS THIS SHAPE.
+//
+// Per density evaluation, on points spread through the layer the way a tracking walk
+// spreads them (the default field, RTX 2070 SUPER):
+//
+//     vertical-only distance, the build-14 shape          0.39 ns
+//     distance with the gradient, no billow at all        0.40 ns
+//     distance with the gradient, billow in the shell     0.68 ns   <- this
+//     a Lipschitz pre-test, gradient only in the shell    1.16 ns
+//
+// So the gradient is free -- it rides the lattice loop's hashes -- and the billow is the
+// whole cost. It runs wherever a lobe could reach, which is now around the walls as well
+// as over the crowns, and that shell is the feature. The last row is the tempting
+// optimisation, and it is 1.7x WORSE: the global slope bound is loose, so most points
+// fail the cheap test and pay the lattice twice. Stopping the octaves early once the
+// answer is known was also measured, at no gain: a warp runs the billow if any one of its
+// points needs it.
+// ===========================================================================
 public float convectionDensity(ConvectionInput c, float3 p)
 {
     float above = p.y - c.cvBase;
 
     // NOTHING BELOW THE CONDENSATION LEVEL, EXACTLY. That line is the flat base.
-    if (above < 0.0f || above > c.cvDepth + c.cvBillow) return 0.0f;
+    if (above < 0.0f || above > convCeiling(c)) return 0.0f;
 
-    float2 q = p.xz - c.cvDrift;
+    float lift   = convLift(c, above, 1.0f);
+    float inside = -1e30f;
 
-    float tower = convTowerHeight(c, convUpdraft(c, q));
-    if (tower <= 0.0f) return 0.0f;
-
-    // The cheapest rejection first: even the biggest outward billow cannot reach.
-    float lift = convLift(c, above);
-    if (tower - above + lift <= 0.0f) return 0.0f;
-
-    // ...and the cheapest acceptance: DEEP ENOUGH THAT NO BILLOW CAN BITE THROUGH TO
-    // THE EDGE. The billow is at least -1, so inside >= tower - above - lift, and past
-    // kConvEdgeSoft the edge factor is one whatever the billow says. Most scattering in
-    // a thick cloud happens exactly here, and the billow is the expensive part.
-    float inside;
-    if (tower - above - lift >= kConvEdgeSoft)
+    // THE CELL FIELD. The updraft and its slope give the distance to the surface; the
+    // billow is evaluated only in the shell where it can move the answer.
+    if (c.cvHeroAlone == 0)
     {
-        inside = kConvEdgeSoft;
+        float2 q = p.xz - c.cvDrift;
+        float2 slope;
+        float  w = convUpdraftGrad(c, q, slope);
+
+        float v     = convTowerHeight(c, w) - above;
+        float delta = w - convNeededUpdraft(c, above);
+        float d     = convSurfaceDistance(v, delta, length(slope));
+
+        if (d + lift > 0.0f)
+        {
+            // THE BILLOW IS READ AT THE NEAREST SURFACE POINT, NOT AT p. Read at p, it
+            // varies along the normal as fast as across it, so pockets of high billow sit
+            // out in the air, detached: the first render of side billows was a tower
+            // wrapped in loose flecks. Read at the surface, each point along a normal gets
+            // the same billow, which makes the displacement a relief ON the surface --
+            // round lobes attached to the wall, the cauliflower.
+            //
+            // The nearest point on the plane through both intercepts is
+            // p + d^2 (y/v - g/delta), with g the updraft's gradient. Each term is at
+            // most |d| long, and each ratio is taken only where its divisor is not
+            // vanishing -- where it is, d is too.
+            float  shiftUp = abs(v) > 1e-6f ? d * (d / v) : 0.0f;
+            float2 shiftAcross = abs(delta) > 1e-12f ? slope * (-d * (d / delta))
+                                                     : float2(0.0f, 0.0f);
+            inside = convInside(c, d, lift,
+                                float3(q.x + shiftAcross.x, p.y + shiftUp, q.y + shiftAcross.y),
+                                c.cvBillowScale);
+        }
     }
-    else
+
+    if (c.cvHeroTop > 0.0f && inside < kConvEdgeSoft)
     {
-        inside = tower - above + lift * convBillow(c, float3(q.x, p.y, q.y));
-        if (inside <= 0.0f) return 0.0f;
+        inside = max(inside, convHeroInside(c, p, above));
     }
+
+    if (inside <= 0.0f) return 0.0f;
 
     float edge    = smoothstep(0.0f, kConvEdgeSoft, inside);
     float profile = sqrt(saturate(above / kConvBaseRamp));
@@ -496,17 +765,78 @@ public float convectionBound(ConvectionInput c, float3 lo, float3 hi)
 {
     float low  = lo.y - c.cvBase;
     float high = hi.y - c.cvBase;
-    float ceiling = c.cvDepth + c.cvBillow;
+    float ceiling = convCeiling(c);
 
     if (high < 0.0f || low > ceiling) return 0.0f;
     low  = max(low, 0.0f);
     high = min(high, ceiling);
 
-    float tower = convTowerHeight(c, convUpdraftBound(c, lo.xz - c.cvDrift, hi.xz - c.cvDrift));
-    if (tower <= 0.0f) return 0.0f;
+    // THE LIFT AT THE TOP OF THE BOX: it is non-decreasing in height, base cap included.
+    float lift   = convLift(c, high, 1.0f);
+    float inside = -1e30f;
 
-    float lift   = convLift(c, high);
-    float inside = tower - low + lift + 1e-3f;
+    // ===================================================================
+    // THE FIELD. Two cases, and each is an inequality on the distance the density uses.
+    //
+    // SOME POINT MAY BE UNDER A TOP (the bounded updraft reaches what the box's lowest
+    // point needs): then d <= v <= tallest tower - low, and inside is at most that plus
+    // the lift.
+    //
+    // EVERY POINT IS OUTSIDE: then |v| >= low - tallest, and |delta| >= needed(low) -
+    // wHi, and |d| is increasing in both and decreasing in the slope, which is at most
+    // kConvGradMax per slot. So every point is at least `floor` from the surface, and
+    // the most a billow can do is lift it back by `lift`. This is the case that proves
+    // clear air clear -- the old vertical-only bound could say zero for any box over
+    // the towers' tops; this one must first be sure no wall is within reach sideways.
+    // ===================================================================
+    if (c.cvHeroAlone == 0)
+    {
+        float wHi   = convUpdraftBound(c, lo.xz - c.cvDrift, hi.xz - c.cvDrift);
+        float tower = convTowerHeight(c, wHi);
+        float need  = convNeededUpdraft(c, low);
+
+        if (wHi < need)
+        {
+            float slopeMax = kConvGradMax / c.cvSpacing;
+            float floorD = convDistanceFloor(low - tower, (need - wHi) / slopeMax);
+            inside = lift - floorD;
+        }
+        else
+        {
+            inside = max(tower - low, 0.0f) + lift;
+        }
+    }
+
+    // THE HERO, the same two cases from its closed form. Every factor is monotone in
+    // the distance from its centre, so the box's nearest point to the centre bounds it.
+    if (c.cvHeroTop > 0.0f)
+    {
+        float2 nearGap = max(max(lo.xz - c.cvHeroAt, c.cvHeroAt - hi.xz), float2(0.0f, 0.0f));
+        float  rMin    = length(nearGap);
+
+        if (rMin < convHeroReach(c))
+        {
+            float tower = convHeroHeight(c, rMin);
+            float ra    = convHeroRadiusAt(c, low);
+
+            float heroLift = convLift(c, high, c.cvHeroBillow);
+            float heroIn;
+            if (ra < 0.0f || rMin >= ra)
+            {
+                // Outside everywhere: over the top, or beyond the wall at every height
+                // the box reaches. See the field's case above.
+                float hMin = ra < 0.0f ? 1e30f : rMin - ra;
+                heroIn = heroLift - convDistanceFloor(low - tower, hMin);
+            }
+            else
+            {
+                heroIn = max(tower - low, 0.0f) + heroLift;
+            }
+            inside = max(inside, heroIn);
+        }
+    }
+
+    inside += 1e-3f;
     if (inside <= 0.0f) return 0.0f;
 
     float edge    = smoothstep(0.0f, kConvEdgeSoft, inside);

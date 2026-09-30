@@ -316,7 +316,18 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
     data->field.timeSeconds = currentTimeSeconds(in_data);
     data->quality          = toQuality(values);
 
+    // THE LAYER'S DRAFT SWITCH IS THE PREVIEW MODE. See draftQuality in CloudParams.h.
+    // Applied here, before the sampling hash is taken below, so a Draft frame and a Best
+    // frame are different accumulations and neither is mistaken for the other.
+    if (in_data->quality == PF_Quality_LO) {
+        data->quality = cloud::draftQuality(data->quality);
+        diagLog("  layer quality Draft: %d spp, %d bounces",
+                static_cast<int>(data->quality.samplesPerPixel),
+                static_cast<int>(data->quality.maxBounces));
+    }
+
     data->view.exposureEV = static_cast<float>(values.v[kMistytuneExposureEV]);
+    data->view.renderDistance = static_cast<float>(values.v[kMistytuneRenderDistance]);
     data->view.agxTonemap = values.v[kMistytuneAgxTonemap] > 0.5;
 
     // ---------------------------------------------------------------------
@@ -381,7 +392,9 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
 
     const PF_LRect& req = extra->input->output_request.rect;
 
-    fillCameraFromComp(in_data, data->view);
+    fillCameraFromComp(in_data, data->view,
+                       static_cast<float>(values.v[kMistytuneCameraTravel]),
+                       static_cast<float>(values.v[kMistytuneCameraAltitude]));
 
     // WHICH CAMERA, NAMED RATHER THAN INFERRED FROM THE PICTURE. "No camera,
     // defaulting" and "the comp's camera, and it points there" produce different

@@ -140,6 +140,23 @@ struct ConvectionDerived {
     // sides rise steeply from the footprint's edge.
     Real shape = 1;
 
+    // The hero, resolved. heroTop is zero when there is none; heroAlone leaves the
+    // cell field out. The seed is an offset into billow space, continuous in Hero
+    // Variation so that keyframing it morphs the cauliflower rather than cutting.
+    bool heroAlone  = false;
+    Real heroX      = 0;
+    Real heroZ      = 0;
+    Real heroRadius = 0;
+    Real heroTop    = 0;
+    Real heroSeedX  = 0;
+    Real heroSeedY  = 0;
+    Real heroSeedZ  = 0;
+
+    // The hero's billows over the field's, amount and lobe size alike: its width over
+    // a cell's, clamped. A cloud twice a cell across is built from thermals about twice
+    // as big; with the field's own lobes a 4 km hero read as a beehive of small ones.
+    Real heroBillow = 1;
+
     TruncatedPhase phase;
 };
 

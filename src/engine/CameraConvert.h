@@ -66,22 +66,87 @@ inline void cameraToWorldFromAE(const double aeRowMajor[16], Real out[16]) {
         }
     }
 
-    // TRANSLATION DELIBERATELY DROPPED, AND THIS IS A DESIGN DECISION RATHER THAN AN
-    // OMISSION.
+    // TRANSLATION LEFT OUT OF THE MATRIX, AND IT IS NOT LOST: IT GOES THROUGH
+    // observerFromAE BELOW INSTEAD.
     //
-    // The renderer's world is metres with the observer at ViewParams::observerAltitude;
-    // AE's is comp PIXELS with an arbitrary origin. There is no conversion between
-    // them without a scene-scale parameter, which does not exist and should not be
-    // invented here.
-    //
-    // It costs nothing today: the sky is at infinity, so only orientation reaches the
-    // image, and primaryRayDirection applies the upper 3x3 alone for that reason. It
-    // will start costing something the moment clouds sit at a finite altitude and the
-    // camera is expected to fly past them -- which is Phase 3, and wants a real
-    // pixels-per-metre parameter rather than a guess made here.
+    // AE's world is comp PIXELS; this one is METRES. The conversion needs the Camera
+    // Travel scale, so the position is carried in ViewParams' observer fields, in
+    // metres, and this matrix stays a pure rotation. primaryRayDirection applies the
+    // upper 3x3 alone, and primaryRayOrigin reads the observer fields. So there is one
+    // place a position is converted, and a pixel is never read as a metre.
     out[3] = out[7] = out[11] = static_cast<Real>(0);
     out[12] = out[13] = out[14] = static_cast<Real>(0);
     out[15] = static_cast<Real>(1);
+}
+
+// ---------------------------------------------------------------------------
+// Where the camera stands
+// ---------------------------------------------------------------------------
+//
+// ===========================================================================
+// THE COMP'S CENTRE, ON THE COMP PLANE, IS THE WORLD ORIGIN -- WHICH IS WHERE AE'S
+// DEFAULT CAMERA LOOKS.
+//
+// A new AE camera stands at (w/2, h/2, -zoom) and its point of interest is (w/2, h/2,
+// 0). Anchoring the world there means the default camera stands zoom x travel metres
+// BEHIND the origin, looking at it. That is 2.7 km for a 50 mm camera on a 1920-wide
+// comp at 1 m per pixel. A hero cloud placed at the origin is therefore in front of any
+// camera that still looks where AE put it, and a dolly towards the point of interest
+// walks towards the cloud.
+//
+// MEASURED IN THE HOST (the diagnostic log, 2026-09-29): the plane AE reports stays
+// 1920x1080 at Full, Half, Third and Quarter resolution. So the camera is in full comp
+// pixels whatever the preview resolution, and a resolution change cannot move the
+// observer.
+//
+// AXES: AE +X right, +Y DOWN, +Z INTO the screen. Ours: +X right, +Y up (altitude),
+// +Z OUT of the screen. So x carries over, y flips into altitude, and z flips.
+//
+// `metresPerPixel` 0 IS THE OLD BEHAVIOUR: the camera turns but does not travel, and
+// the observer stands at the origin at `baseAltitude`.
+//
+// THE ALTITUDE IS FLOORED AT ONE METRE. The atmosphere clamps a negative origin
+// altitude to zero anyway, but a camera below the ground plane would start every ray
+// inside the planet, and the floor keeps "lowered the camera too far" a plausible
+// picture rather than a black one.
+// ===========================================================================
+struct ObserverPosition {
+    Real x        = 0;
+    Real altitude = 0;
+    Real z        = 0;
+};
+
+inline ObserverPosition observerFromCompPosition(double camX, double camY, double camZ,
+                                                 double compWidth, double compHeight,
+                                                 Real metresPerPixel, Real baseAltitude) {
+    const double s = metresPerPixel > 0 ? static_cast<double>(metresPerPixel) : 0.0;
+
+    ObserverPosition o;
+    o.x        = static_cast<Real>((camX - compWidth * 0.5) * s);
+    o.altitude = static_cast<Real>(static_cast<double>(baseAltitude) + (compHeight * 0.5 - camY) * s);
+    o.z        = static_cast<Real>(-camZ * s);
+
+    if (!(o.altitude >= static_cast<Real>(1))) o.altitude = static_cast<Real>(1);
+    return o;
+}
+
+// The same, from A_Matrix4's sixteen values in memory order. The translation is the
+// fourth ROW, since AE multiplies row vectors: mat[3][0..2].
+inline ObserverPosition observerFromAE(const double aeRowMajor[16],
+                                       double compWidth, double compHeight,
+                                       Real metresPerPixel, Real baseAltitude) {
+    return observerFromCompPosition(aeRowMajor[12], aeRowMajor[13], aeRowMajor[14],
+                                    compWidth, compHeight, metresPerPixel, baseAltitude);
+}
+
+// WHERE THE OBSERVER STANDS WHEN THE COMP HAS NO CAMERA: where a new default camera
+// would stand, a 50 mm lens on a 36 mm frame, so zoom = width x 50/36. Adding a
+// default camera to the comp then turns the view without moving it.
+inline ObserverPosition defaultObserver(double compWidth, double compHeight,
+                                        Real metresPerPixel, Real baseAltitude) {
+    return observerFromCompPosition(compWidth * 0.5, compHeight * 0.5,
+                                    -compWidth * (50.0 / 36.0),
+                                    compWidth, compHeight, metresPerPixel, baseAltitude);
 }
 
 // The vertical field of view AE's camera implies, in degrees.

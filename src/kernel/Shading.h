@@ -844,34 +844,22 @@ MT_RENDER Vec3 mistytuneTrace(const RenderRequest& req, Vec3 ro, Vec3 rd,
 // Where a camera ray starts, in world space.
 //
 // +Y IS ALTITUDE IN METRES and the ground plane is y = 0, which is the convention
-// the atmosphere, the slab and the generator all share. A camera 2 m up is at
-// (0, 2, 0).
+// the atmosphere, the slab and the generator all share. A camera 2 m up at the
+// origin is at (0, 2, 0).
 //
 // ===========================================================================
-// THE MATRIX TRANSLATION IS NOT READ, AND READING IT IS A BUG THIS FUNCTION
-// ALREADY SHIPPED ONCE.
+// THE MATRIX TRANSLATION IS STILL NOT READ HERE, AND THAT IS STILL THE RULE.
 //
-// The first version took elements 3, 7 and 11 whenever `cameraFromComp` was set,
-// on the reasonable-sounding grounds that a real comp camera knows where it is.
-// It does not, HERE: src/engine/CameraConvert.h zeroes those three deliberately,
-// and says why at length. AE's world is comp PIXELS with an arbitrary origin and
-// this one is METRES; there is no conversion between them without a scene-scale
-// parameter, which does not exist and must not be invented in a shading header.
-//
-// So in After Effects that branch read three guaranteed zeros and put the camera
-// at ALTITUDE ZERO rather than at observerAltitude. Two metres against a cloud
-// base of six kilometres is invisible -- which is the entire problem with it.
-// Nothing in a render would ever have shown it, and the next person to add the
-// translation to CameraConvert for Phase 3 would have found this silently
-// consuming pixels as metres.
-//
-// WHEN THE CAMERA IS ALLOWED TO FLY, it arrives as a real pixels-per-metre
-// parameter and it arrives in ONE place. Until then the observer is where
-// ViewParams says the observer is, and the comp camera contributes orientation
-// and field of view only -- which is all a sky at infinity can use anyway.
+// The first version of this function took elements 3, 7 and 11 of cameraToWorld
+// when `cameraFromComp` was set. Those are comp PIXELS in AE's world and zeros after
+// CameraConvert, and they put the camera at altitude zero -- a bug no render could
+// show. The camera now DOES travel, and the position arrives the one way the old
+// note asked for: converted to metres once, by observerFromAE in CameraConvert.h
+// with the Camera Travel scale, and carried in ViewParams' observer fields. The
+// matrix stays a pure rotation, so nothing here can consume a pixel as a metre.
 // ===========================================================================
 MT_DEVICE Vec3 primaryRayOrigin(const cloud::ViewParams& view) {
-    return vec3(0.0f, view.observerAltitude, 0.0f);
+    return vec3(view.observerX, view.observerAltitude, view.observerZ);
 }
 
 // ---------------------------------------------------------------------------

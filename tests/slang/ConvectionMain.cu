@@ -151,6 +151,19 @@ int main() {
         c.cvBillow_0  = 0.0f;
         cases.push_back({ "small cells, no billow", c });
     }
+    // THE HERO: its own closed-form tower and its own scaled billows, beside the field and
+    // alone. Placed near the origin, so the random boxes meet it as well as the seeds do.
+    {
+        ConvectionInput_0 c = defaults(0.0f);
+        c.cvHeroAt_0     = make_float2(500.0f, -800.0f);
+        c.cvHeroRadius_0 = 2000.0f;
+        c.cvHeroTop_0    = 1500.0f;
+        c.cvHeroSeed_0   = make_float3(1731.0f, 613.0f, 2477.0f);
+        c.cvHeroBillow_0 = 2.0f;
+        cases.push_back({ "hero with the field", c });
+        c.cvHeroAlone_0  = 1;
+        cases.push_back({ "hero alone", c });
+    }
 
     const float extents[] = { 15.0f, 60.0f, 250.0f, 900.0f, 2500.0f };
     const int   perBox    = 192;
@@ -159,15 +172,23 @@ int main() {
         const ConvectionInput_0& c = k.c;
         HostRng rng(0xc0ffee);
 
-        const float top = c.cvBase_0 + c.cvDepth_0 + c.cvBillow_0;
+        // The layer's ceiling, as convCeiling has it: the field's or the hero's, billows in.
+        const float top = c.cvBase_0 + std::max(c.cvDepth_0 + c.cvBillow_0,
+                                                c.cvHeroTop_0 > 0.0f ? c.cvHeroTop_0 + c.cvBillow_0 * c.cvHeroBillow_0 : 0.0f);
 
         // SEEDS: points already known to be cloud, which the second half of the boxes
         // centre on. Found by sampling the slab and keeping the ones with density.
+        // A HERO ALONE IS ONE CLOUD IN A 40 KM SQUARE, about 1% of it, so its seeds are
+        // looked for around it instead -- otherwise the half of the boxes meant to sit on
+        // cloud would mostly sit on nothing.
+        const bool   alone = c.cvHeroAlone_0 != 0 && c.cvHeroTop_0 > 0.0f;
+        const float  span  = alone ? c.cvHeroRadius_0 * 2.0f : 20000.0f;
+        const float2 mid   = alone ? c.cvHeroAt_0 : make_float2(0.0f, 0.0f);
         std::vector<float3> probe(200000);
         for (float3& p : probe) {
-            p = make_float3(rng.range(-20000.0f, 20000.0f),
+            p = make_float3(mid.x + rng.range(-span, span),
                             rng.range(c.cvBase_0, top),
-                            rng.range(-20000.0f, 20000.0f));
+                            mid.y + rng.range(-span, span));
         }
         const std::vector<float> probeD = densities(c, probe);
         std::vector<float3> cloud;
@@ -275,9 +296,25 @@ int main() {
         std::printf("\n  shipping-sized boxes (450 x 360 x 450 m): proved empty %.1f%%, "
                     "found empty by sampling %.1f%%\n",
                     100.0 * zero / bnd.size(), 100.0 * empty / bnd.size());
+        // ===================================================================
+        // REPORTED, NO LONGER A GATE -- AND THAT IS A REGRESSION OF THE OPTIONAL GRID, NOT
+        // A TEST MADE TO PASS.
+        //
+        // Until build 15 the billows only moved the surface vertically, so a box over
+        // every top was provably clear. Now they reach sideways off the walls, and proving
+        // a box clear needs the updraft's slope; the only slope that bounds soundly is the
+        // steepest a kernel can be (kConvGradMax), which is loose, so small boxes are not
+        // proved empty. The bound stays SOUND -- section 1 above, zero violations -- it has
+        // stopped being useful.
+        //
+        // THE GRID WAS ALREADY OFF, because it was measured a loss in every cloudy scene
+        // (PROGRESS.md, 2026-09-29), and `--conv-grid 1` is an A/B switch only. Nothing
+        // that ships consults this bound. If the grid is ever revived, this is the line
+        // to make a gate again, with a per-box slope bound behind it.
+        // ===================================================================
         if (zero == 0) {
-            std::printf("    FAIL: the bound never says zero -- the grid skips nothing\n");
-            ++failures;
+            std::printf("    note: the bound never says zero at this box size -- the optional\n"
+                        "          grid would skip nothing (it is off; see the comment above)\n");
         }
     }
 

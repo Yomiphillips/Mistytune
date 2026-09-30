@@ -4,6 +4,156 @@ Tracked against `PLAN.md`. Newest first.
 
 ---
 
+## 2026-09-30 — THE CAMERA TRAVELS, ONE CLOUD CAN BE PLACED, AND THE WALLS GET CAULIFLOWER. Build 15, minor 7. The shape costs 1.8x on the default field, measured, and five cheaper-looking ways out were each measured and each failed.
+
+### What the host reported
+
+Build 14 looked good, but a close, looking-up shot of one towering cumulus (a phone
+photo was the reference) could not be framed. Only the horizon view, or the same view
+pitched up. The user was worried about this for pareidolia. Cumulus was only
+interactive at Third resolution and Samples 1. They also said "we don't have to render
+everything sometimes".
+
+Two causes, both confirmed before any code was written:
+
+1. **Only the comp camera's rotation reached the renderer.** CameraConvert.h dropped
+   the translation on purpose, for want of a scale, so the eye stood 2 m above one spot.
+   Moving a camera with a point of interest turned it; dollying it moved nothing.
+2. **Tall towers were smooth pillars.** A test render with the camera placed as well as
+   it could be (7 km inversion, sun behind, 18° up) showed tapered tombstones. The billow
+   displaced a HEIGHT FIELD, so it roughened crowns and could not move a steep wall.
+
+### Camera Travel
+
+A Camera group after Sun and Sky: **Camera Travel** (metres per comp pixel, default 1;
+0 is the old turn-only behaviour) and **Camera Altitude** (default 2 m).
+`observerFromAE` in CameraConvert.h converts the position. The world origin is the comp
+centre on the comp plane, which is where a new AE camera looks, so a default camera
+stands zoom x travel metres behind it (2.7 km for 50 mm on a 1920 comp). The altitude
+is floored at 1 m. With no comp camera, the eye stands where a default camera would, so
+adding one turns the view without moving it. The matrix stays a pure rotation and the
+position travels in ViewParams' new observer fields, in metres.
+
+**MEASURED FROM THE HOST LOG, not assumed:** the image plane AE reports stayed 1920x1080
+at Full, Half, Third and Quarter (911 frames at 1/4 and 1/3 in mistytune.log). The
+camera is therefore in full comp pixels at every preview resolution, and a resolution
+change cannot move the eye.
+
+**NOT YET MEASURED:** whether the translation row is in comp space (the assumption) or
+layer space. The log now prints `camera pos: comp (x, y, z) px -> observer (...) m`. A
+new default camera on a 1920x1080 comp should read comp (960, 540, -2666.7) and
+observer (0, 2, 2666.7) at 1 m/px.
+
+### The hero cloud
+
+Five rows in the Cumulus group: **Hero Cloud** (Off / With the Field / Alone),
+**Position X/Z** (world metres; 0, 0 is in front of a default camera), **Width**,
+**Height** (a fraction of the room under the Inversion, and the hero may use all of it
+where the field's towers stop at towerFraction), and **Variation** (continuous, so
+keyframing it morphs the lobes). The hero is an analytic tower on the same condensation
+level with the same billows, and it holds still while the field drifts.
+
+**Alone is a box.** Medium gained a horizontal box (`clipOn`, zero meaning unbounded, so
+a zeroed test struct keeps the old behaviour). A ray that misses the hero never enters
+the layer: 480x270 at 32 spp renders in 1.6 to 2.7 s against 24.6 s for a field of
+towers.
+
+### Cauliflower on the walls, in three attempts
+
+The density now measures the distance to the surface, not the height below the top.
+There are two intercepts, `v` down to the crown and `h` across to the wall, where `h` is
+the updraft's shortfall over its gradient (exact, in closed form, for the hero). They
+combine as the distance to the plane through both. The gradient rides the lattice
+loop's hashes.
+
+1. **Billow sampled at the point: loose flecks.** It varies along the normal as fast as
+   across it, so pockets of it float free of the wall. Now sampled at the NEAREST SURFACE
+   POINT (`p + d²(ŷ/v − g/δ)`), which makes it a relief on the surface.
+2. **Lobe height over lobe size set too high in the test: pine branches.** At 700 m of
+   billow on 500 m lobes, each lobe is taller than it is wide. At the defaults it is not.
+3. **Horizontal banding like a beehive.** The puff lattice's feature points are jittered
+   only a quarter cell (the eight-cell search needs that), and on a wall its rows show.
+   Each octave now turns the lattice by a fixed orthonormal rotation.
+
+The hero's billows scale with its width over a cell's (clamped 0.75 to 3). With the
+field's lobes, a 4 km hero read as a beehive of small ones.
+
+Also: the lift is capped at 0.7 x the height above the base. Away from every tower the
+nearest "surface" is the base plane itself, and without the cap the billows would grow
+a ragged sheet across the whole layer.
+
+### What it costs, and five things that did not fix it
+
+Density per evaluation on 4M points spread through the default layer (a tracking walk's
+sampling), RTX 2070 SUPER, runs made one at a time:
+
+| | ns per point |
+| --- | --- |
+| build 14, vertical distance | 0.35 to 0.42 |
+| distance with the gradient, no billow | 0.39 to 0.42 |
+| **distance with the gradient, billow in the shell (shipped)** | **0.64 to 0.68** |
+| Lipschitz pre-test, gradient only in the shell | 1.16 to 1.20 |
+
+The whole frame (default field, 640x360, 32 spp, backlit horizon): **17.3 to 17.9 s
+against 9.5 to 9.7 s, 1.8x.** The frame ratio is above the density ratio, which says
+the lumpier cloud also scatters more.
+
+Measured and rejected:
+
+- **A cheap Lipschitz pre-test** before the gradient: 1.7x WORSE. The only sound slope
+  bound is loose, so most points fail it and pay the lattice twice.
+- **`[noinline]` on the shell, the billow or the density:** no fewer registers. A CUDA
+  kernel's count covers everything it calls. The main kernel is at 226 to 232 registers
+  against 162. An experiment showed the growth is a threshold effect of total inlined
+  size: either library's changes alone passed 220, and both reverted gave 166.
+- **Occupancy:** with 16x16 blocks, 162 and 232 registers both fit one block per SM, so
+  occupancy never changed. `__launch_bounds__(256, 2)` gave 17.1 to 17.5 s, within
+  noise. Reverted.
+- **Stopping the octaves once the answer is known** (exact, and verified by an identical
+  cloud fraction): no gain. A warp runs the billow if any of its points needs it.
+- **Narrower wall billows** (side fraction 0.35 against 0.6): 17.8 s against 17.9.
+
+### The offsets
+
+**Render Distance** (Camera group, default 40 km, 0 unlimited): the medium fades over
+the last quarter of the radius around the eye, and the ray range is clipped to it. It is
+a factor at most one, so every majorant still holds. Same frame: **17.3 s unlimited,
+14.2 s at 40 km, 8.2 s at 20 km.** At 40 km little changes beyond the far clutter at the
+horizon; at 20 km the low cirrus fades visibly.
+
+**The layer's Draft switch** (`in_data->quality == PF_Quality_LO`) caps samples at 1 and
+bounces at 16, so the Samples slider keeps the final render's value. Bounces were
+measured first and are not where the time is: 32 to 16 is 1% darker for about 10% less
+time, and 8 is 3% darker for 28% less.
+
+### Tests
+
+26 of 26 pass. New: the camera's axes, signs, zero travel and ground floor; the observer
+and render distance in the sampling hash; Draft's caps; the hero's height, lid, alone,
+billow scale and placement; hero with the field and hero alone in slang.convection's
+bound sweep (0 violations in 6,000 boxes). The flat base holds at 97.4% (gate 90%).
+
+**A REGRESSION, RECORDED RATHER THAN HIDDEN:** the box bound is still sound, but it now
+proves 0.0% of shipping-sized boxes empty against 82.2% found empty by sampling. Proving
+a box clear needs the slope, and the sound slope bound is loose. That gate is now a
+printed note, with the reason in the test. The optional grid it served was already
+off, measured a loss in build 14, and nothing that ships consults it.
+
+### What needs the host
+
+- **The `camera pos` log line** with a new default camera, against the numbers above.
+  That settles comp space against layer space.
+- **A dolly towards the point of interest** walks towards a hero at 0, 0.
+- **The reference shot, verified in the CLI with AE's 50 mm lens:** Inversion 7000,
+  Instability 0.9, Hero Cloud Alone, Width 4000, Height 0.7, Camera Travel 5, camera
+  tilted about 15° up, Sun Elevation 45 with Sun Azimuth 0 (behind a default camera),
+  Exposure -1.
+- **Draft on the layer** should make slider drags feel like Samples 1 did.
+- **The field's new walls:** is the lumpier default field still the look that was
+  reported good?
+
+---
+
 ## 2026-09-29 — THE SECOND GENERATOR AND THE SECOND LAYER. Cumulus from cellular convection, with cell polarity, a flat base at the condensation level, and a cirrus deck that shadows it because it is in the same medium. Two firefly sources found and removed on the way, and a majorant grid that was proved correct and then measured to be a loss.
 
 ### What was built

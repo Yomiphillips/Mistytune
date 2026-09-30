@@ -21,6 +21,9 @@ uint64_t samplingHash(const ViewParams& v, const QualityParams& q) {
 
     fp.add(v.verticalFovDegrees);
     fp.add(v.observerAltitude);
+    fp.add(v.observerX);
+    fp.add(v.observerZ);
+    fp.add(v.renderDistance);
     fp.add(v.widthPx);
     fp.add(v.heightPx);
 

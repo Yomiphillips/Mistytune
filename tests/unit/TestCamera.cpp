@@ -277,17 +277,16 @@ PL_TEST(NoCameraGivesZeroFov) {
 // Where the ray STARTS, which is a different question from where it points
 // ---------------------------------------------------------------------------
 
-// THE OBSERVER IS AT observerAltitude, WHATEVER THE COMP CAMERA SAYS.
+// THE MATRIX NEVER MOVES THE OBSERVER. The position is converted separately.
 //
-// CameraConvert drops the translation on purpose -- AE's world is comp pixels with an
-// arbitrary origin and this one is metres, and there is no conversion without a
-// scene-scale parameter that does not exist yet. So elements 3, 7 and 11 are
-// guaranteed zero, and a primaryRayOrigin that trusted them put the camera at
-// ALTITUDE ZERO in After Effects instead of at the observer's two metres.
+// CameraConvert leaves the translation out of cameraToWorld, so elements 3, 7 and 11
+// are zeros. An old primaryRayOrigin read them when `cameraFromComp` was set and put
+// the camera at ALTITUDE ZERO in After Effects instead of at the observer's two metres.
 //
 // THAT SHIPPED, AND NO RENDER COULD HAVE SHOWN IT: two metres against a cloud base of
-// six kilometres moves nothing a person can see. It is exactly the class of error
-// this file exists for -- the one that renders a completely plausible picture.
+// six kilometres moves nothing a person can see. The camera travels now, but only
+// through observerFromAE and ViewParams' observer fields (tested below). The matrix is
+// still a rotation, and this test pins that.
 PL_TEST(TheRayStartsAtTheObserverNotAtTheMatrix) {
     cloud::ViewParams view;
     view.observerAltitude = 2.0f;
@@ -318,4 +317,80 @@ PL_TEST(ObserverAltitudeReachesTheRayOrigin) {
     cloud::ViewParams high;
     high.observerAltitude = 3500.0f;
     PL_CHECK_NEAR(primaryRayOrigin(high).y, 3500.0, 1e-3);
+}
+
+// And the horizontal position is the one the view carries.
+PL_TEST(ObserverPositionReachesTheRayOrigin) {
+    cloud::ViewParams v;
+    v.observerX = 1234.0f;
+    v.observerAltitude = 56.0f;
+    v.observerZ = -789.0f;
+    const Vec3 o = primaryRayOrigin(v);
+    PL_CHECK_NEAR(o.x, 1234.0, 1e-3);
+    PL_CHECK_NEAR(o.y, 56.0, 1e-3);
+    PL_CHECK_NEAR(o.z, -789.0, 1e-3);
+}
+
+// ---------------------------------------------------------------------------
+// The comp camera's position, in metres
+// ---------------------------------------------------------------------------
+
+// A DEFAULT AE CAMERA STANDS BEHIND THE ORIGIN, LOOKING AT IT. On a 1920x1080 comp
+// a new camera is at (960, 540, -2666.7), and its point of interest is the comp
+// centre on z = 0 -- the world origin. At 1 m per pixel it therefore stands 2666.7 m
+// along +Z (ours, out of the screen), at the base altitude, and centred in x.
+PL_TEST(DefaultCameraStandsBehindTheOrigin) {
+    double ae[16];
+    aeMatrix(ae, 1, 0, 0,  0, 1, 0,  0, 0, 1,  960.0, 540.0, -2666.7);
+
+    const ObserverPosition o = observerFromAE(ae, 1920.0, 1080.0, 1.0f, 2.0f);
+    PL_CHECK_NEAR(o.x, 0.0, 1e-3);
+    PL_CHECK_NEAR(o.altitude, 2.0, 1e-3);
+    PL_CHECK_NEAR(o.z, 2666.7, 1e-2);
+
+    // ...and the no-camera default is exactly where that camera would be, so adding
+    // one to the comp turns the view without moving it.
+    const ObserverPosition d = defaultObserver(1920.0, 1080.0, 1.0f, 2.0f);
+    PL_CHECK_NEAR(d.x, 0.0, 1e-3);
+    PL_CHECK_NEAR(d.altitude, 2.0, 1e-3);
+    PL_CHECK_NEAR(d.z, 2666.67, 1e-1);
+}
+
+// EACH AXIS, ONE AT A TIME, WITH THE SIGN A USER EXPECTS. A camera moved right goes
+// +x; moved UP in the comp (AE's y DECREASES) climbs; dollied IN (AE's z INCREASES,
+// towards the point of interest) moves towards the origin, which is -z in ours. Any
+// one of these with the wrong sign is a camera that flies away from what it is told
+// to approach, and it would still render a plausible sky.
+PL_TEST(EachCompAxisMovesTheObserverTheRightWay) {
+    const double w = 1920.0, h = 1080.0;
+    const ObserverPosition base  = observerFromCompPosition(960.0, 540.0, -2000.0, w, h, 2.0f, 10.0f);
+    const ObserverPosition right = observerFromCompPosition(1060.0, 540.0, -2000.0, w, h, 2.0f, 10.0f);
+    const ObserverPosition up    = observerFromCompPosition(960.0, 440.0, -2000.0, w, h, 2.0f, 10.0f);
+    const ObserverPosition in    = observerFromCompPosition(960.0, 540.0, -1900.0, w, h, 2.0f, 10.0f);
+
+    PL_CHECK_NEAR(right.x - base.x, 200.0, 1e-3);          // 100 px at 2 m/px
+    PL_CHECK_NEAR(right.altitude - base.altitude, 0.0, 1e-3);
+    PL_CHECK_NEAR(up.altitude - base.altitude, 200.0, 1e-3);
+    PL_CHECK_NEAR(in.z - base.z, -200.0, 1e-3);            // closer to the origin
+    PL_CHECK(in.z < base.z);
+    PL_CHECK_NEAR(base.z, 4000.0, 1e-3);
+}
+
+// ZERO TRAVEL IS THE OLD BEHAVIOUR: wherever the comp camera is, the observer stands
+// at the origin at the base altitude. That is the switch back to "turn but do not
+// move", and it must be exact rather than small.
+PL_TEST(ZeroTravelPinsTheObserver) {
+    const ObserverPosition o = observerFromCompPosition(5000.0, -3000.0, 9000.0,
+                                                        1920.0, 1080.0, 0.0f, 2.0f);
+    PL_CHECK_NEAR(o.x, 0.0, 0.0);
+    PL_CHECK_NEAR(o.altitude, 2.0, 0.0);
+    PL_CHECK_NEAR(o.z, 0.0, 0.0);
+}
+
+// A CAMERA LOWERED THROUGH THE GROUND STOPS AT ONE METRE rather than starting every
+// ray inside the planet.
+PL_TEST(TheObserverStaysAboveTheGround) {
+    const ObserverPosition o = observerFromCompPosition(960.0, 5000.0, -2000.0,
+                                                        1920.0, 1080.0, 1.0f, 2.0f);
+    PL_CHECK_NEAR(o.altitude, 1.0, 1e-6);
 }

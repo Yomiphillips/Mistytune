@@ -89,6 +89,9 @@ void printUsage() {
         "                   like --sun-az (default 180, the identity camera). Set it\n"
         "                   to the sun's azimuth for a backlit view.\n"
         "  --fov <deg>      vertical field of view (default 39.6, 50 mm full frame)\n"
+        "  --cam-x <m>      where the eye stands: metres east (+X) of the origin\n"
+        "  --cam-z <m>      ...and metres along +Z, which the identity camera faces away from\n"
+        "  --altitude <m>   the eye's height (default 2)\n"
         "  --bounces <n>    scattering events per path (default 32)\n"
         "\n"
         "  The cumulus layer (cellular convection). OFF unless one of these is given,\n"
@@ -364,6 +367,11 @@ int main(int argc, char** argv) {
         else if (argIs(a, "--nee-scale") && hasNext)     req.neeTentativeScale = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--heading") && hasNext)       headingDegrees = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--fov") && hasNext)           req.view.verticalFovDegrees = static_cast<float>(std::atof(argv[++i]));
+        // WHERE THE EYE STANDS, in metres -- what the effect derives from the comp
+        // camera's position and Camera Travel. Zero is the fixed observer the goldens use.
+        else if (argIs(a, "--cam-x") && hasNext)         req.view.observerX = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--cam-z") && hasNext)         req.view.observerZ = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--altitude") && hasNext)      req.view.observerAltitude = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--bounces") && hasNext)       req.quality.maxBounces = std::atoi(argv[++i]);
         else if (argIs(a, "--conv-grid") && hasNext)     req.convectionGrid = std::atoi(argv[++i]) != 0;
         // The convection layer. Any of its settings turns it on, since setting one of
@@ -379,6 +387,14 @@ int main(int argc, char** argv) {
         else if (argIs(a, "--billow") && hasNext)        { req.field.convection.enabled = true; req.field.convection.billowAmount    = static_cast<float>(std::atof(argv[++i])); }
         else if (argIs(a, "--billow-scale") && hasNext)  { req.field.convection.enabled = true; req.field.convection.billowScale     = static_cast<float>(std::atof(argv[++i])); }
         else if (argIs(a, "--humidity") && hasNext)      req.field.physics.surfaceHumidity = static_cast<float>(std::atof(argv[++i]));
+        // THE HERO. --hero 1 is with the field, 2 is alone; the rest place and size it.
+        else if (argIs(a, "--hero") && hasNext)          { req.field.convection.enabled = true; req.field.convection.heroMode = std::atoi(argv[++i]); }
+        else if (argIs(a, "--hero-x") && hasNext)        req.field.convection.heroX         = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--hero-z") && hasNext)        req.field.convection.heroZ         = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--hero-width") && hasNext)    req.field.convection.heroWidth     = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--hero-height") && hasNext)   req.field.convection.heroHeight    = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--hero-var") && hasNext)      req.field.convection.heroVariation = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--render-distance") && hasNext) req.view.renderDistance = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--window") && i + 4 < argc) {
             windowX = std::atoi(argv[++i]);
             windowY = std::atoi(argv[++i]);

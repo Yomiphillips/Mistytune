@@ -248,6 +248,30 @@ struct ConvectionParams {
     // four parameters, so it is what sets the forward peak, the fogbow and the glory.
     // The fit is valid from 5 to 50 microns and is clamped to that range.
     Real dropletDiameter = 20.0f;
+
+    // -----------------------------------------------------------------
+    // THE HERO: one cloud, placed.
+    //
+    // A field is a statistical thing: you get whichever cloud the lattice happens to
+    // put in front of the camera. A shot is usually about ONE cloud, and pareidolia
+    // shapes exactly one, so this puts a tower where the user says. It stands on the
+    // same base under the same lid with the same billows as the field, and it holds
+    // still while the field drifts.
+    //
+    // POSITION IS IN WORLD METRES from the origin -- the point AE's default camera
+    // looks at (see observerFromAE in CameraConvert.h). So a hero at 0, 0 is in front
+    // of a default camera, and moving the camera moves you past it.
+    //
+    // HEIGHT IS A FRACTION OF THE ROOM UNDER THE LID, not metres, for the same reason
+    // the field's towers are: the inversion caps convection. Raise Inversion Height for
+    // a taller hero.
+    // -----------------------------------------------------------------
+    int32_t heroMode    = 0;        // 0 off, 1 with the field, 2 alone
+    Real heroX          = 0.0f;     // m, +X right of a default camera
+    Real heroZ          = 0.0f;     // m, +Z AWAY from a default camera -- AE's depth
+    Real heroWidth      = 3000.0f;  // m, the footprint's diameter at the base
+    Real heroHeight     = 1.0f;     // 0..1 of the base-to-inversion depth
+    Real heroVariation  = 0.0f;     // picks which cauliflower it wears
 };
 
 // ---------------------------------------------------------------------------
@@ -302,6 +326,24 @@ struct ViewParams {
 
     Real verticalFovDegrees = 39.6f;   // 50 mm on full frame
     Real observerAltitude   = 2.0f;    // m above the ground plane
+
+    // WHERE ON THE GROUND THE OBSERVER STANDS, in metres from the world origin. Zero
+    // is the old fixed observer, which is what the CLI and the golden images use.
+    //
+    // THE EFFECT SETS THESE FROM THE COMP CAMERA'S POSITION, scaled by Camera Travel --
+    // see observerFromAE in CameraConvert.h. Before that, only the camera's rotation
+    // reached the renderer, so a dolly towards a cloud moved nothing: the eye stayed
+    // two metres above one spot and every framing was "look around from here".
+    Real observerX = 0.0f;
+    Real observerZ = 0.0f;
+
+    // HOW FAR ACROSS FROM THE OBSERVER CLOUD IS DRAWN, in metres; 0 is unlimited.
+    //
+    // A VIEW SETTING, NOT A FIELD ONE: it is measured from wherever the eye stands, so
+    // moving the camera moves it, and the cached field does not care. The cloud fades
+    // out over the last kRenderDistanceFade of it rather than stopping at a wall. See
+    // Medium's fade in TransportLib.slang, which is where it takes effect.
+    Real renderDistance = 0.0f;
 
     // THE FULL FRAME, WHICH IS NOT NECESSARILY THE BUFFER BEING WRITTEN.
     //
@@ -471,5 +513,34 @@ struct QualityParams {
     // ===================================================================
     Real denoiseAmount = 0.8f;
 };
+
+// ---------------------------------------------------------------------------
+// Draft: what the layer's Draft switch buys
+// ---------------------------------------------------------------------------
+//
+// ===========================================================================
+// ONE SAMPLE, AND AT MOST SIXTEEN BOUNCES, WHILE THE LAYER IS SET TO DRAFT.
+//
+// Reported from the host: cumulus was only interactive at Third resolution AND Samples
+// 1, so every look change meant dragging the Samples slider down and back up again.
+// AE's layer quality switch already says "I am adjusting, not rendering" -- it reaches
+// the effect as in_data->quality == PF_Quality_LO -- so it drives this instead, and the
+// Samples slider keeps the value the final render wants.
+//
+// SIXTEEN BOUNCES, MEASURED on the default cumulus at 640x360: 32 -> 16 is 1% darker for
+// about 10% less time; 8 is 3% darker for 28% less. Bounces are NOT where the time is --
+// the samples are -- so the cap stops where the picture starts to move, which keeps
+// Draft a faithful preview of the look rather than a darker one.
+//
+// NEVER RAISES ANYTHING: a user already at one sample or eight bounces keeps them.
+// ===========================================================================
+constexpr int32_t kDraftSamples    = 1;
+constexpr int32_t kDraftMaxBounces = 16;
+
+inline QualityParams draftQuality(QualityParams q) {
+    if (q.samplesPerPixel > kDraftSamples)  q.samplesPerPixel = kDraftSamples;
+    if (q.maxBounces > kDraftMaxBounces)    q.maxBounces = kDraftMaxBounces;
+    return q;
+}
 
 } // namespace plugin::cloud

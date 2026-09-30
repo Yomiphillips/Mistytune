@@ -26,9 +26,9 @@ static_assert(sizeof(ShearProfile) == 48,
               "ShearProfile changed -- hash the new member in Fingerprint::add(ShearProfile)");
 static_assert(sizeof(IceParams) == 100,
               "IceParams changed -- hash the new member in Fingerprint::add(IceParams)");
-static_assert(sizeof(ConvectionParams) == 56,
+static_assert(sizeof(ConvectionParams) == 80,
               "ConvectionParams changed -- hash the new member in Fingerprint::add(ConvectionParams)");
-static_assert(sizeof(FieldParams) == 228,
+static_assert(sizeof(FieldParams) == 252,
               "FieldParams changed -- hash the new member in Fingerprint::add(FieldParams)");
 
 // THE ONE PAIR THAT MUST NOT BE HASHED, asserted so that a future refactor
@@ -48,7 +48,7 @@ static_assert(sizeof(FieldParams) == 228,
 // reflection this language does not have. The mitigation is to treat "I added a member
 // and the build stayed green" as meaning nothing, rather than as clearance.
 // ===========================================================================
-static_assert(sizeof(ViewParams) == 100,
+static_assert(sizeof(ViewParams) == 112,
               "ViewParams changed -- check nothing camera-side leaked into the "
               "field hash; see the note in Fingerprint.h");
 
@@ -123,6 +123,12 @@ void Fingerprint::add(const ConvectionParams& c) {
     add(c.windBearing);
     add(c.lifetime);
     add(c.dropletDiameter);
+    add(c.heroMode);
+    add(c.heroX);
+    add(c.heroZ);
+    add(c.heroWidth);
+    add(c.heroHeight);
+    add(c.heroVariation);
 }
 
 void Fingerprint::add(const FieldParams& f) {

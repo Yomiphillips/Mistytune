@@ -218,3 +218,85 @@ PL_TEST(TheForwardLobeStaysBelowOne) {
 PL_TEST(BiggerDropletsAreMoreForward) {
     PL_CHECK(dropletPhase(Real(40)).hgG > dropletPhase(Real(8)).hgG);
 }
+
+// ---------------------------------------------------------------------------
+// The hero
+// ---------------------------------------------------------------------------
+
+// OFF BY DEFAULT: the effect's default sky is the field, and a zeroed request has no
+// hero in it.
+PL_TEST(ThereIsNoHeroByDefault) {
+    ConvectionDerived d;
+    deriveConvection(convectiveField(), d);
+    PL_CHECK_NEAR(d.heroTop, 0.0, 0.0);
+    PL_CHECK(!d.heroAlone);
+}
+
+// HEIGHT IS A FRACTION OF THE WHOLE ROOM UNDER THE LID, and one reaches the lid -- where
+// the field's own towers stop at towerFraction of it. It never passes the inversion.
+PL_TEST(AFullHeightHeroReachesTheLidAndNoFurther) {
+    FieldParams f = convectiveField();
+    f.convection.heroMode   = 1;
+    f.convection.heroHeight = Real(1);
+    ConvectionDerived d;
+    deriveConvection(f, d);
+    PL_CHECK_NEAR(d.base + d.heroTop, f.convection.inversionHeight, 1e-2);
+    PL_CHECK(d.heroTop >= d.depth);
+
+    f.convection.heroHeight = Real(7);   // an expression past the slider
+    deriveConvection(f, d);
+    PL_CHECK_NEAR(d.base + d.heroTop, f.convection.inversionHeight, 1e-2);
+}
+
+// ALONE IS STILL PRESENT when the field alone would not be -- a hero on a day too calm
+// for the field's towers is still a cloud -- and it is absent when the air is too dry
+// for any cloud at all, since the hero stands on the same condensation level.
+PL_TEST(AHeroAloneFollowsTheAirNotTheField) {
+    FieldParams f = convectiveField();
+    f.convection.heroMode = 2;
+    ConvectionDerived d;
+    deriveConvection(f, d);
+    PL_CHECK(d.present);
+    PL_CHECK(d.heroAlone);
+
+    f.physics.surfaceHumidity = Real(0.2);
+    deriveConvection(f, d);
+    PL_CHECK(!d.present);
+}
+
+// THE HERO'S BILLOWS SCALE WITH ITS WIDTH over a cell's, inside the clamp.
+PL_TEST(ABiggerHeroGetsBiggerBillows) {
+    FieldParams f = convectiveField();
+    f.convection.heroMode  = 1;
+    f.convection.cellSize  = Real(2000);
+    f.convection.heroWidth = Real(4000);
+    ConvectionDerived d;
+    deriveConvection(f, d);
+    PL_CHECK_NEAR(d.heroBillow, 2.0, 1e-5);
+
+    f.convection.heroWidth = Real(100000);
+    deriveConvection(f, d);
+    PL_CHECK_NEAR(d.heroBillow, 3.0, 1e-5);
+
+    f.convection.heroWidth = Real(10);
+    deriveConvection(f, d);
+    PL_CHECK_NEAR(d.heroBillow, 0.75, 1e-5);
+}
+
+// POSITION AND VARIATION PASS THROUGH; a mode outside 0..2 from a bad request is off.
+PL_TEST(TheHeroIsWhereItIsPut) {
+    FieldParams f = convectiveField();
+    f.convection.heroMode = 1;
+    f.convection.heroX = Real(-1500);
+    f.convection.heroZ = Real(3200);
+    f.convection.heroVariation = Real(2);
+    ConvectionDerived d;
+    deriveConvection(f, d);
+    PL_CHECK_NEAR(d.heroX, -1500.0, 1e-3);
+    PL_CHECK_NEAR(d.heroZ, 3200.0, 1e-3);
+    PL_CHECK(d.heroSeedX != Real(0));
+
+    f.convection.heroMode = 9;
+    deriveConvection(f, d);
+    PL_CHECK_NEAR(d.heroTop, 0.0, 0.0);
+}

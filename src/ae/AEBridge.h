@@ -493,7 +493,8 @@ inline cloud::HostColorSettings readHostColorSettings(PF_InData* in_data) {
 // comp pixels against an arbitrary origin and this one is metres, so flying the camera
 // needs a real pixels-per-metre parameter. Phase 3. The ray origin is observerAltitude
 // unconditionally, which TheRayStartsAtTheObserverNotAtTheMatrix pins.
-inline void fillCameraFromComp(PF_InData* in_data, cloud::ViewParams& view) {
+inline void fillCameraFromComp(PF_InData* in_data, cloud::ViewParams& view,
+                               float metresPerPixel, float baseAltitude) {
     view.cameraFromComp = false;
 
     // ---------------------------------------------------------------------
@@ -552,9 +553,39 @@ inline void fillCameraFromComp(PF_InData* in_data, cloud::ViewParams& view) {
                 cloud::verticalFovFromPlane(distanceToPlane, planeHeight);
             if (fov > 0) view.verticalFovDegrees = fov;
 
+            // WHERE IT STANDS, in metres. The plane AE reports is the comp, in full
+            // pixels at every preview resolution (measured), which is the frame the
+            // translation is in. The raw position is logged beside the result so a
+            // wrong frame -- a layer-relative translation, say -- shows as numbers
+            // rather than as a sky that is merely somewhere else.
+            const cloud::ObserverPosition o = cloud::observerFromAE(
+                flat, static_cast<double>(planeWidth), static_cast<double>(planeHeight),
+                metresPerPixel, baseAltitude);
+            view.observerX        = o.x;
+            view.observerAltitude = o.altitude;
+            view.observerZ        = o.z;
+            diagLog("  camera pos: comp (%.1f, %.1f, %.1f) px -> observer (%.1f, %.1f, %.1f) m"
+                    " at %.3f m/px",
+                    flat[12], flat[13], flat[14],
+                    static_cast<double>(o.x), static_cast<double>(o.altitude),
+                    static_cast<double>(o.z), static_cast<double>(metresPerPixel));
+
             view.cameraFromComp = true;
             return;
         }
+    }
+
+    // NO CAMERA: stand where a new default camera would, so that adding one turns the
+    // view without moving it. The layer's size stands in for the comp's, which it is
+    // for a generator on a comp-sized solid.
+    {
+        const double w = in_data ? static_cast<double>(in_data->width)  : 1920.0;
+        const double h = in_data ? static_cast<double>(in_data->height) : 1080.0;
+        const cloud::ObserverPosition o =
+            cloud::defaultObserver(w, h, metresPerPixel, baseAltitude);
+        view.observerX        = o.x;
+        view.observerAltitude = o.altitude;
+        view.observerZ        = o.z;
     }
 
     // A DEFAULT THAT LOOKS AT THE SKY rather than the identity, which looks along

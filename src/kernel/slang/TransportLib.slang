@@ -124,6 +124,31 @@ public struct Medium
     ConvectionInput conv;
 
     int   mode;         // 0 = constant, 1 = background + core, 2 = ice, 3 = convection
+
+    // ===================================================================
+    // WHERE THE MEDIUM IS, ACROSS: a box in x and z, and a fade around the observer.
+    //
+    // THE BOX is what makes a lone hero cloud cheap. Without it a ray still walks the
+    // whole infinite slab at the majorant's rate, paying null collisions through
+    // kilometres of air that the density then says are empty. With it, a ray that
+    // misses the hero's box never enters the medium at all. clipOn 0 is unbounded.
+    //
+    // THE FADE is Render Distance. Density falls from full at fadeRadius - fadeWidth to
+    // nothing at fadeRadius, measured across from fadeAt (the observer), and the box is
+    // clipped to that radius too. A grazing ray through a cumulus layer otherwise
+    // crosses tens of kilometres of cloud, which is most of what a horizon view costs.
+    // It is a factor of at most one, so every majorant stays a majorant. fadeRadius <= 0
+    // is off.
+    //
+    // THE DENSITY IS ZERO OUTSIDE BOTH, in densityAt, so the range below is an exact
+    // statement about where the medium is rather than an optimisation that hopes.
+    // ===================================================================
+    int    clipOn;      // 0 = no box across: zero-initialised means unbounded
+    float2 clipLo;
+    float2 clipHi;
+    float2 fadeAt;
+    float  fadeRadius;
+    float  fadeWidth;
 };
 
 // ===========================================================================
@@ -150,14 +175,35 @@ public float densityAt(Medium m, StructuredBuffer<float2> disp, float3 p)
     // guarantees -- but a density function that relies on its caller to bound it is one
     // inlining away from being wrong.
     if (p.y < m.slabBottom || p.y > m.slabTop) return 0.0f;
-    if (m.mode == 0) return m.density;
+    if (m.clipOn != 0 && (any(p.xz < m.clipLo) || any(p.xz > m.clipHi))) return 0.0f;
 
-    if (m.mode == 2) return iceDensity(m.gen, disp, p);
-    if (m.mode == 3) return convectionDensity(m.conv, p);
+    float fade = 1.0f;
+    if (m.fadeRadius > 0.0f)
+    {
+        float r = length(p.xz - m.fadeAt);
+        fade = saturate((m.fadeRadius - r) / max(m.fadeWidth, 1.0f));
+        if (fade <= 0.0f) return 0.0f;
+    }
+
+    if (m.mode == 0) return m.density * fade;
+
+    if (m.mode == 2) return iceDensity(m.gen, disp, p) * fade;
+    if (m.mode == 3) return convectionDensity(m.conv, p) * fade;
 
     float3 d  = (p - m.coreCentre) / max(m.coreRadius, 1e-6f);
     float  r2 = dot(d, d);
-    return m.density + m.coreDensity * exp(-r2);
+    return (m.density + m.coreDensity * exp(-r2)) * fade;
+}
+
+// One axis of a box, narrowing [t0, t1]. False when the ray misses it.
+bool clipAxis(float o, float d, float lo, float hi, inout float t0, inout float t1)
+{
+    if (abs(d) < 1e-9f) return o >= lo && o <= hi;
+    float ta = (lo - o) / d;
+    float tb = (hi - o) / d;
+    t0 = max(t0, min(ta, tb));
+    t1 = min(t1, max(ta, tb));
+    return t1 > t0;
 }
 
 // Where the ray is inside the slab. Returns false when it never is.
@@ -178,6 +224,18 @@ public bool slabRange(Medium m, float3 ro, float3 rd, out float t0, out float t1
         t0 = max(t0, min(ta, tb));
         t1 = min(t1, max(ta, tb));
     }
+
+    // THE BOX ACROSS, per axis the same way as the slab above. The fade's radius is
+    // folded into it as a square, which contains the circle the density fades inside.
+    float2 lo = m.clipOn != 0 ? m.clipLo : float2(-1e9f, -1e9f);
+    float2 hi = m.clipOn != 0 ? m.clipHi : float2(1e9f, 1e9f);
+    if (m.fadeRadius > 0.0f)
+    {
+        lo = max(lo, m.fadeAt - m.fadeRadius);
+        hi = min(hi, m.fadeAt + m.fadeRadius);
+    }
+    if (!clipAxis(ro.x, rd.x, lo.x, hi.x, t0, t1)) return false;
+    if (!clipAxis(ro.z, rd.z, lo.y, hi.y, t0, t1)) return false;
 
     // A HORIZONTAL BOUND AS WELL, or a ray parallel to the deck marches forever
     // through empty grid cells and the frame rate collapses with nothing on screen.

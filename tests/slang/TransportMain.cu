@@ -221,7 +221,7 @@ int main() {
     const float sigma     = 0.0025f;          // optical depth 2.5 across the slab
     const float expected  = std::exp(-sigma * thickness);
 
-    Medium_0 base;
+    Medium_0 base{};
     base.slabTop_0    = 2000.0f;
     base.slabBottom_0 = 2000.0f - thickness;
     base.density_0    = sigma;

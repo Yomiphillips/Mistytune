@@ -77,7 +77,7 @@ void convBillowAt(uint3 tid : SV_DispatchThreadID,
 {
     int i = int(tid.x);
     if (i >= count) return;
-    outBillow[i] = convBillow(c, points[i]);
+    outBillow[i] = convBillow(c, points[i], c.cvBillowScale);
 }
 
 // THE UPDRAFT OVER A 5x5 WINDOW, for the claim that 3x3 is exact rather than an

@@ -58,6 +58,21 @@ constexpr float kIceSingleScatterAlbedo = 0.999f;
 // droplets sit around 0.99998 in the green; a hundred bounces at that lose 0.2%.
 constexpr float kWaterSingleScatterAlbedo = 0.99998f;
 
+// ===========================================================================
+// RENDER DISTANCE FADES OVER ITS LAST QUARTER, not at a wall.
+//
+// A hard stop draws a ring on the ground plane of the cloud layer -- a clean edge in
+// the distance, which is the one thing a sky never has. Fading the density means far
+// clouds thin out towards the limit instead. A quarter is wide enough that the fade
+// reads as distance rather than as an edge at any Render Distance a user would pick.
+// ===========================================================================
+constexpr float kRenderDistanceFade = 0.25f;
+
+// The hero's box across, past the reach the kernel's convHeroReach allows for, so that
+// the box never clips what the density would draw. The kernel's own reach is the
+// definition; this is the host's copy with a margin.
+constexpr float kHeroBoxMargin = 50.0f;
+
 // How the convection layer's procedural majorant grid is cut, in metres.
 //
 // A QUARTER OF A CELL ACROSS, ALIGNED TO THE CELLS, AND FOUR SLICES DEEP.
@@ -145,6 +160,17 @@ MT_RENDER void fillSlangScene(const RenderRequest& req, SceneT& s, PhaseT& ph) {
     s.medium_0.coreCentre_0  = V::v3(0.0f, 0.0f, 0.0f);
     s.medium_0.coreRadius_0  = 1.0f;
     s.medium_0.coreDensity_0 = 0.0f;
+
+    // NO BOX ACROSS: cirrus runs to the horizon. Render Distance applies to both
+    // layers alike, from wherever the eye stands. Every field is written, because the
+    // caller's struct is not zeroed and this one travels to a GPU.
+    const float renderDist = req.view.renderDistance > 0.0f ? req.view.renderDistance : 0.0f;
+    s.medium_0.clipOn_0     = 0;
+    s.medium_0.clipLo_0     = V::v2(0.0f, 0.0f);
+    s.medium_0.clipHi_0     = V::v2(0.0f, 0.0f);
+    s.medium_0.fadeAt_0     = V::v2(req.view.observerX, req.view.observerZ);
+    s.medium_0.fadeRadius_0 = renderDist;
+    s.medium_0.fadeWidth_0  = renderDist * kRenderDistanceFade;
 
     // -----------------------------------------------------------------------
     // The majorant grid: OFF, and that is a measurement rather than a shortcut
@@ -292,10 +318,37 @@ MT_RENDER void fillSlangScene(const RenderRequest& req, SceneT& s, PhaseT& ph) {
     s.medium2_0.conv_0.cvAge_0         = cd.age;
     s.medium2_0.conv_0.cvRise_0        = cd.rise;
 
-    // THE SLAB IS THE TALLEST THE CLOUD CAN BE: the tallest tower plus the biggest
-    // outward billow. convectionDensity() returns zero outside exactly this range.
+    // THE HERO. heroTop zero is no hero, which is also what a zeroed struct says.
+    s.medium2_0.conv_0.cvHeroAlone_0  = cd.heroAlone ? 1 : 0;
+    s.medium2_0.conv_0.cvHeroAt_0     = V::v2(cd.heroX, cd.heroZ);
+    s.medium2_0.conv_0.cvHeroRadius_0 = cd.heroRadius > 1.0f ? cd.heroRadius : 1.0f;
+    s.medium2_0.conv_0.cvHeroTop_0    = cd.heroTop;
+    s.medium2_0.conv_0.cvHeroSeed_0   = V::v3(cd.heroSeedX, cd.heroSeedY, cd.heroSeedZ);
+    s.medium2_0.conv_0.cvHeroBillow_0 = cd.heroBillow;
+
+    // THE SLAB IS THE TALLEST THE CLOUD CAN BE: the tallest tower or the hero, plus the
+    // biggest outward billow. convectionDensity() returns zero outside exactly this range.
     s.medium2_0.slabBottom_0 = cd.base;
-    s.medium2_0.slabTop_0    = cd.base + cd.depth + billow;
+    const float fieldTop = cd.depth + billow;
+    const float heroTop  = cd.heroTop > 0.0f ? cd.heroTop + billow * cd.heroBillow : 0.0f;
+    s.medium2_0.slabTop_0    = cd.base + (fieldTop > heroTop ? fieldTop : heroTop);
+
+    // A HERO ALONE IS A BOX, and the box is the whole speed-up: a ray that misses it
+    // never enters the layer, where an unbounded slab would make it walk kilometres of
+    // empty air at the cloud's majorant. Reach as convHeroReach has it, plus a margin.
+    if (cd.heroAlone && cd.heroTop > 0.0f) {
+        const float reach = cd.heroRadius + 1.5f * billow * cd.heroBillow + 24.0f + kHeroBoxMargin;
+        s.medium2_0.clipOn_0 = 1;
+        s.medium2_0.clipLo_0 = V::v2(cd.heroX - reach, cd.heroZ - reach);
+        s.medium2_0.clipHi_0 = V::v2(cd.heroX + reach, cd.heroZ + reach);
+    } else {
+        s.medium2_0.clipOn_0 = 0;
+        s.medium2_0.clipLo_0 = V::v2(0.0f, 0.0f);
+        s.medium2_0.clipHi_0 = V::v2(0.0f, 0.0f);
+    }
+    s.medium2_0.fadeAt_0     = V::v2(req.view.observerX, req.view.observerZ);
+    s.medium2_0.fadeRadius_0 = renderDist;
+    s.medium2_0.fadeWidth_0  = renderDist * kRenderDistanceFade;
     s.medium2_0.majorant_0   = cd.sigma;
     s.medium2_0.density_0    = 0.0f;
     s.medium2_0.mode_0       = 3;          // cellular convection
@@ -315,7 +368,9 @@ MT_RENDER void fillSlangScene(const RenderRequest& req, SceneT& s, PhaseT& ph) {
     // so that its slices line up with the flat bottom, where the density switches on.
     float across = spacing * kConvGridFraction;
     for (int k = 0; k < 24 && across < kConvGridMinExtent; ++k) across *= 2.0f;
-    const float slice  = (cd.depth + billow) / static_cast<float>(kConvGridSlices);
+    const float slice  = s.medium2_0.slabTop_0 - cd.base > 1.0f
+                       ? (s.medium2_0.slabTop_0 - cd.base) / static_cast<float>(kConvGridSlices)
+                       : 1.0f;
     s.grid2_0.origin_0     = V::v3(cd.driftX, cd.base, cd.driftZ);
     s.grid2_0.cellExtent_0 = V::v3(across, slice > 1.0f ? slice : 1.0f, across);
     s.grid2_0.dims_0       = V::i3(1, 1, 1);

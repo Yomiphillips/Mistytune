@@ -477,3 +477,47 @@ PL_TEST(ASecondResolveStillResolves) {
     PL_CHECK(c.canResolve(keyOf(1, 2, 5), kSpp, kW, kH, kPitch));
     PL_CHECK_EQ(c.samples(), kSpp);
 }
+
+// ---------------------------------------------------------------------------
+// Draft, and the two view inputs added with the travelling camera
+// ---------------------------------------------------------------------------
+
+// DRAFT CAPS, IT NEVER RAISES. A user already below the caps keeps their values, and
+// the field is untouched -- Draft is a quality setting, not a different sky.
+PL_TEST(DraftCapsSamplesAndBouncesAndNothingElse) {
+    QualityParams q;
+    q.samplesPerPixel = 64;
+    q.maxBounces      = 32;
+    q.denoise         = true;
+    q.denoiseAmount   = 0.6f;
+
+    const QualityParams d = draftQuality(q);
+    PL_CHECK_EQ(d.samplesPerPixel, kDraftSamples);
+    PL_CHECK_EQ(d.maxBounces, kDraftMaxBounces);
+    PL_CHECK(d.denoise);
+    PL_CHECK_NEAR(d.denoiseAmount, 0.6, 1e-6);
+
+    QualityParams low;
+    low.samplesPerPixel = 1;
+    low.maxBounces      = 4;
+    const QualityParams dl = draftQuality(low);
+    PL_CHECK_EQ(dl.samplesPerPixel, 1);
+    PL_CHECK_EQ(dl.maxBounces, 4);
+}
+
+// WHERE THE EYE STANDS AND HOW FAR IT DRAWS ARE SAMPLING INPUTS. Both change which
+// cloud a ray meets, so an accumulation cannot carry across either -- and neither
+// may touch the field hash, which is what keeps a camera move from rebuilding it.
+PL_TEST(ObserverAndRenderDistanceAreInTheSamplingHash) {
+    ViewParams v;
+    QualityParams q;
+    const uint64_t base = samplingHash(v, q);
+
+    ViewParams moved = v;   moved.observerX = 10.0f;
+    ViewParams deeper = v;  deeper.observerZ = -10.0f;
+    ViewParams nearer = v;  nearer.renderDistance = 20000.0f;
+
+    PL_CHECK(samplingHash(moved, q)  != base);
+    PL_CHECK(samplingHash(deeper, q) != base);
+    PL_CHECK(samplingHash(nearer, q) != base);
+}

@@ -115,6 +115,17 @@
 //
 // A MINOR BUMP BECAUSE THE PARAMETER LIST CHANGED: a Cumulus group was inserted between
 // Ice and Physics, and the ice group's reserved spare became its on/off switch.
+// MINOR 7, BUILD 15 -- THE CAMERA TRAVELS, AND ONE CLOUD CAN BE PLACED. Reported from
+// the host: a close, looking-up shot of one cumulus could not be framed, because only
+// the comp camera's rotation reached the renderer. Camera Travel converts its position
+// into metres. The Hero Cloud puts a tower where the user says, with the field or alone.
+// Billows now push off the walls as well as the crowns, which is what turned tall
+// towers from smooth pillars into cauliflower; it costs about 1.8x on the default field,
+// measured, and Render Distance (default 40 km) and the layer's Draft switch (1 sample)
+// are the offsets. PROGRESS.md carries the numbers.
+//
+// A MINOR BUMP BECAUSE THE PARAMETER LIST CHANGED: a Camera group was inserted after Sun
+// and Sky, and six hero rows were inserted into the Cumulus group before its spares.
 #define PLUGIN_MAJOR 0
-#define PLUGIN_MINOR 6
-#define PLUGIN_BUILD 14
+#define PLUGIN_MINOR 7
+#define PLUGIN_BUILD 15

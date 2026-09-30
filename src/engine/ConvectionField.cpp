@@ -158,7 +158,34 @@ void deriveConvection(const FieldParams& field, ConvectionDerived& out) {
     out.age  = field.timeSeconds / life;
     out.rise = billowRiseSpeed(c.instability) * field.timeSeconds;
 
-    out.present = out.depth > Real(1);
+    // THE HERO. Its height is a fraction of the WHOLE room under the lid, where the
+    // field's towers are capped at towerFraction of it: a hero is the one cloud in the
+    // shot that did get all the way up. A width under a metre is floored rather than
+    // allowed to become a divisor of zero.
+    if (c.heroMode == 1 || c.heroMode == 2) {
+        const Real frac = clampReal(c.heroHeight, Real(0), Real(1));
+        const Real width = c.heroWidth > Real(2) ? c.heroWidth : Real(2);
+        out.heroTop    = room * frac;
+        out.heroRadius = width * Real(0.5);
+        out.heroX      = c.heroX;
+        out.heroZ      = c.heroZ;
+        out.heroAlone  = c.heroMode == 2;
+
+        const Real cell = c.cellSize > Real(1) ? c.cellSize : Real(1);
+        out.heroBillow = clampReal(width / cell, Real(0.75), Real(3));
+
+        // Far enough per unit that a unit of variation is a different cauliflower, and
+        // along three unrelated directions so no two values share a lobe pattern.
+        out.heroSeedX = c.heroVariation * Real(1731.0);
+        out.heroSeedY = c.heroVariation * Real(613.0);
+        out.heroSeedZ = c.heroVariation * Real(2477.0);
+        if (!(out.heroTop > Real(1))) out.heroTop = Real(0);
+    }
+
+    // A HERO ALONE MAKES THE FIELD'S OWN DEPTH IRRELEVANT, but it is kept: the billows'
+    // top-to-side ramp and the tower exponent still read it.
+    out.present = out.heroAlone ? out.heroTop > Real(1)
+                                : (out.depth > Real(1) || out.heroTop > Real(1));
 }
 
 } // namespace plugin::cloud
