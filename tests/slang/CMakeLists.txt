@@ -21,10 +21,13 @@ set(GENERATED_DIR "${SLANG_DIR}/generated")
 set(SLANG_RNG        "${SLANG_DIR}/Rng.slang")
 set(SLANG_PHASE_LIB  "${SLANG_DIR}/PhaseLib.slang")
 set(SLANG_XPORT_LIB  "${SLANG_DIR}/TransportLib.slang")
-set(SLANG_GEN_LIB    "${SLANG_DIR}/GeneratorLib.slang")
+# GeneratorLib includes OrganizationLib (build 20), so everything that depends on one
+# depends on both.
+set(SLANG_GEN_LIB    "${SLANG_DIR}/GeneratorLib.slang" "${SLANG_DIR}/OrganizationLib.slang")
 set(SLANG_CONV_LIB   "${SLANG_DIR}/ConvectionLib.slang")
 set(SLANG_SKY_LIB    "${SLANG_DIR}/SkyLib.slang")
 set(SLANG_BOUNCE_LIB "${SLANG_DIR}/BounceLib.slang")
+set(SLANG_AIRMAP_LIB "${SLANG_DIR}/AirMapLib.slang")
 
 if(NOT EXISTS "${GENERATED_DIR}/MathParity.cu")
     # A MISSING GENERATED FILE IS A FAILING TEST, NOT A SKIPPED ONE -- the same rule
@@ -230,7 +233,7 @@ slang_generate("${SLANG_DIR}/Bounce.slang"
                "${GENERATED_DIR}/Bounce.cu"
                "../prelude/slang-cuda-prelude.h"
                ${SLANG_RNG} ${SLANG_PHASE_LIB} ${SLANG_XPORT_LIB} ${SLANG_GEN_LIB} ${SLANG_CONV_LIB}
-               ${SLANG_BOUNCE_LIB} ${SLANG_SKY_LIB})
+               ${SLANG_BOUNCE_LIB} ${SLANG_SKY_LIB} ${SLANG_AIRMAP_LIB})
 
 add_executable(slang_bounce BounceMain.cu "${GENERATED_DIR}/Bounce.cu")
 
@@ -247,6 +250,39 @@ target_compile_options(slang_bounce PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/wd4996>)
 
 add_test(NAME slang.bounce COMMAND slang_bounce)
+
+# ---------------------------------------------------------------------------
+# The clouds' shadow maps (build 18)
+# ---------------------------------------------------------------------------
+#
+# THE MAP AGAINST ANSWERS IT DID NOT COMPUTE: its lookups against a Gaussian core's
+# closed-form transmittance, and airShadowLoss against the same integral marched finely
+# by a different method. The grid is placed by the production planner, so a grid that
+# missed part of a shadow fails here too. See AirMapMain.cu's header for the five checks.
+#
+# LINKS plugin_kernel for the transmittance table's builder, as slang.skyParity does.
+slang_generate("${SLANG_DIR}/AirMap.slang"
+               "${GENERATED_DIR}/AirMap.cu"
+               "../prelude/slang-cuda-prelude.h"
+               ${SLANG_RNG} ${SLANG_XPORT_LIB} ${SLANG_GEN_LIB} ${SLANG_CONV_LIB}
+               ${SLANG_SKY_LIB} ${SLANG_AIRMAP_LIB})
+
+add_executable(slang_air_map AirMapMain.cu "${GENERATED_DIR}/AirMap.cu")
+
+set_source_files_properties("${GENERATED_DIR}/AirMap.cu" PROPERTIES HEADER_FILE_ONLY ON)
+
+target_include_directories(slang_air_map PRIVATE "${GENERATED_DIR}")
+target_link_libraries(slang_air_map PRIVATE plugin_kernel)
+
+set_target_properties(slang_air_map PROPERTIES
+    CUDA_ARCHITECTURES "${PLUGIN_CUDA_ARCHITECTURES}"
+    LINKER_LANGUAGE CUDA)
+
+target_compile_options(slang_air_map PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:-diag-suppress=1444>
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/wd4996>)
+
+add_test(NAME slang.airMap COMMAND slang_air_map)
 
 # ---------------------------------------------------------------------------
 # Has any committed .cu drifted from the .slang it came from?
@@ -325,7 +361,7 @@ add_test(NAME slang.regenerates
         -DFP_MODE=${PLUGIN_SLANG_FP_MODE}
         -DPRELUDE=../prelude/slang-cuda-prelude.h
         -DREWRITE=${CMAKE_SOURCE_DIR}/cmake/SlangRewriteInclude.cmake
-        -DSOURCES=MathParity|Sky|Phase|Transport|Generator|Convection|Bounce|Render
+        -DSOURCES=MathParity|Sky|Phase|Transport|Generator|Convection|Bounce|AirMap|Render
         -DCPP_SOURCES=CpuParity|RenderCpu
         -DCPP_PRELUDE=../prelude/slang-cpp-prelude.h
         -P ${CMAKE_SOURCE_DIR}/cmake/SlangCheckRegenerated.cmake)
@@ -347,5 +383,5 @@ add_test(NAME slang.regenerates
 add_test(NAME slang.fieldNames
     COMMAND ${CMAKE_COMMAND}
         -DGENERATED_DIR=${GENERATED_DIR}
-        -DFILES=MathParity.cu|Sky.cu|Phase.cu|Transport.cu|Generator.cu|Convection.cu|Bounce.cu|Render.cu|CpuParity.cpp|RenderCpu.cpp
+        -DFILES=MathParity.cu|Sky.cu|Phase.cu|Transport.cu|Generator.cu|Convection.cu|Bounce.cu|AirMap.cu|Render.cu|CpuParity.cpp|RenderCpu.cpp
         -P ${CMAKE_SOURCE_DIR}/cmake/SlangCheckFieldNames.cmake)

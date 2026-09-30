@@ -54,9 +54,24 @@
 // source, because it names those structs; after Shading.h, because it uses Vec3.
 #include "SlangBridge.h"
 
+#include "AirMapHost.h"
+
+#include <vector>
+
 namespace plugin::kernel {
 
 namespace {
+
+// The backend's vector constructors, handed to the shared marshalling in SlangBridge.h.
+// This is the entire difference between the two backends. HOST AND DEVICE, because the
+// host fills a Scene of its own to plan the shadow maps -- see AirMapHost.h.
+struct CudaVectors {
+    static __host__ __device__ float2 v2(float x, float y) { return make_float2(x, y); }
+    static __host__ __device__ float3 v3(float x, float y, float z) {
+        return make_float3(x, y, z);
+    }
+    static __host__ __device__ int3 i3(int x, int y, int z) { return make_int3(x, y, z); }
+};
 
 // ONE ERROR SLOT, AND IT IS THREAD-LOCAL.
 //
@@ -195,6 +210,19 @@ thread_local DeviceScratch g_drift;
 // parameters, and it is the million exp() calls that would actually hurt.
 thread_local DeviceScratch g_transmittance;
 
+// ===========================================================================
+// THE CLOUDS' SHADOW MAPS, BUILT ON THE DEVICE AND KEPT THERE.
+//
+// Unlike the two tables above, these are never uploaded: a kernel builds them where the
+// render reads them. KEPT BETWEEN CALLS, keyed on everything a column reads (see
+// AirMapHost.h), so the bands and sample chunks of one frame build them once. The key
+// remembers the pointer too: DeviceScratch frees and reallocates when it grows, and the
+// map in the old allocation went with it.
+// ===========================================================================
+thread_local DeviceScratch              g_airMap;
+thread_local std::vector<unsigned char> g_airMapKey;
+thread_local void*                      g_airMapBuiltAt = nullptr;
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -209,16 +237,6 @@ thread_local DeviceScratch g_transmittance;
 // for the host compilation of Shading.h.
 MT_RENDER Vec3 mistytuneTrace(const RenderRequest& req, Vec3 ro, Vec3 rd,
                               unsigned int seed) {
-    // The backend's vector constructors, handed to the shared marshalling in
-    // SlangBridge.h. This is the entire difference between the two backends.
-    struct CudaVectors {
-        static __host__ __device__ float2 v2(float x, float y) { return make_float2(x, y); }
-        static __host__ __device__ float3 v3(float x, float y, float z) {
-            return make_float3(x, y, z);
-        }
-        static __host__ __device__ int3 i3(int x, int y, int z) { return make_int3(x, y, z); }
-    };
-
     Scene_0      scene{};
     PhaseInput_0 phase{};
     fillSlangScene<CudaVectors>(req, scene, phase);
@@ -259,6 +277,73 @@ __global__ void mistytuneTransformKernel(RenderRequest req) {
     const int py = blockIdx.y * blockDim.y + threadIdx.y;
     transformPixel(req, px, py);
 }
+
+// One texel's column of a shadow map per thread. See layerMapColumn in AirMapLib.slang.
+__global__ void airMapKernel(Medium_0 medium, StructuredBuffer<float2> drift,
+                             LayerShadowMap_0 map, RWStructuredBuffer<float> out, int count) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= count) return;
+    layerMapColumn_0(&medium, drift, &map, i, out);
+}
+
+namespace {
+
+// Plans the maps for `work`, builds them when the key has moved, and points the request at
+// them. `driftDev` is the drift table already uploaded for this launch.
+//
+// NO SYNCHRONISE HERE. The build and the render go on the same stream, so the render
+// cannot start before the map is written; renderCuda's own synchronise catches a failure
+// in either.
+bool prepareAirMapsCuda(RenderRequest& work, void* driftDev) {
+    Scene_0 scene;
+    std::vector<unsigned char> key;
+    const AirMapPlan plan = planAirMapsFor<CudaVectors, Scene_0, PhaseInput_0>(work, scene, key);
+
+    work.airMaps      = plan;
+    work.airMapBuffer = nullptr;
+    if (!plan.on || plan.totalFloats <= 0) return true;
+
+    void* dev = g_airMap.reserve(sizeof(float) * static_cast<size_t>(plan.totalFloats));
+    if (!dev) return false;   // reserve() has already set the error
+
+    if (dev != g_airMapBuiltAt || key != g_airMapKey) {
+        g_airMapKey.clear();
+        g_airMapBuiltAt = nullptr;
+
+        StructuredBuffer<float2> drift;
+        drift.data  = static_cast<float2*>(driftDev);
+        drift.count = static_cast<size_t>(cloud::kDriftKnots);
+
+        for (int layer = 0; layer < 2; ++layer) {
+            const AirMapGeometry& g = plan.layer[layer];
+            if (!g.present) continue;
+
+            LayerShadowMap_0 map;
+            std::memset(static_cast<void*>(&map), 0, sizeof map);
+            fillAirMap<CudaVectors>(g, dev, map);
+
+            RWStructuredBuffer<float> out;
+            out.data  = static_cast<float*>(dev) + g.offset;
+            out.count = static_cast<size_t>(airMapFloats(g));
+
+            const int texels = g.dimU * g.dimV;
+            airMapKernel<<<static_cast<unsigned>(divideRoundUp(texels, 256)), 256>>>(
+                layer == 0 ? scene.medium_0 : scene.medium2_0, drift, map, out, texels);
+
+            const cudaError_t err = cudaPeekAtLastError();
+            if (err != cudaSuccess) {
+                setError("shadow map launch", cudaGetLastError());
+                return false;
+            }
+        }
+        g_airMapKey     = key;
+        g_airMapBuiltAt = dev;
+    }
+    work.airMapBuffer = dev;
+    return true;
+}
+
+} // namespace
 
 bool cudaAvailable() {
     // CACHED, because this is asked on the render path and cudaGetDeviceCount
@@ -362,6 +447,10 @@ bool renderCuda(const RenderRequest& req) {
         }
         work.transmittanceBuffer = lutDev;
     }
+
+    // THE CLOUDS' SHADOW MAPS, built on this device at most once per change. See
+    // AirMapLib.slang for what they are and AirMapHost.h for the key.
+    if (!prepareAirMapsCuda(work, driftDev)) return false;
 
     const dim3 block(kBlockX, kBlockY, 1);
     const dim3 grid(static_cast<unsigned>(divideRoundUp(req.dest.widthPx,  kBlockX)),

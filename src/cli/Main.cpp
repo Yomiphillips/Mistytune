@@ -117,6 +117,18 @@ void printUsage() {
         "  --billow <m>     billow displacement (default 160)\n"
         "  --billow-scale <m>  the largest billow (default 320)\n"
         "  --humidity <rh>  surface humidity 0..1, which sets the base (default 0.7)\n"
+        "\n"
+        "  The Organization group, for the cumulus layer (turns it on) and, with an\n"
+        "  --ice- prefix, the cirrus layer's generating cells. Bearings clockwise from +Z:\n"
+        "  --org <mode>     cellular | rolls | waves | chaotic (or 0..3)\n"
+        "  --aspect <a>     cells a times longer along their rows (default 1)\n"
+        "  --rows-along <deg>  the rows' bearing (default 90, the lattice unturned)\n"
+        "  --coherence <c>  0..1, how straight the rows are\n"
+        "  --wave-length <m>  crest to crest (default 3000)\n"
+        "  --wave-amp <a>   0..1, 1 clears the troughs\n"
+        "  --crests-along <deg>  the crests' bearing (default 0)\n"
+        "  --gap <g>        0..1, clear seams between closed cells (cumulus only)\n"
+        "  --lacunarity <l> 0..1, a deck with round holes (cumulus only)\n"
         "  --conv-grid <0|1>  the cumulus layer's procedural majorant grid (default 0).\n"
         "                   Cost only: any majorant above the density is unbiased.\n"
         "  --nee-scale <k>  the camera ray's sun: 0 = one next event at the first real\n"
@@ -129,6 +141,10 @@ void printUsage() {
         "                   before build 17.\n"
         "  --no-air-shadows the clouds' shadows in that air (crepuscular rays) off;\n"
         "                   the effect's Cloud Shadows In Air checkbox.\n"
+        "  --air-shadow-rays  those shadows from one shadow ray per camera ray, as\n"
+        "                   build 17 drew them, instead of the per-frame shadow map.\n"
+        "  --air-map-res <n>  the shadow map's texel budget: n x n for the cumulus,\n"
+        "                   a quarter of that for the cirrus (default 512).\n"
         "  --sun-placement <backlit|side|front|manual>  the sun relative to the camera,\n"
         "                   as the effect's Sun Placement (default manual: --sun-az).\n"
         "  --resolve-check  render, then regenerate the image from the accumulated\n"
@@ -186,6 +202,15 @@ bool writePpm(const char* path, const std::vector<float>& argb, int width, int h
 }
 
 bool argIs(const char* a, const char* want) { return std::strcmp(a, want) == 0; }
+
+// An Organization mode by name or by number. Anything else is Cellular, which is what
+// resolveOrganization makes of an out-of-range number too.
+int32_t parseOrgMode(const char* s) {
+    if (argIs(s, "rolls"))   return 1;
+    if (argIs(s, "waves"))   return 2;
+    if (argIs(s, "chaotic")) return 3;
+    return static_cast<int32_t>(std::atoi(s));
+}
 
 // Reads a PPM this program wrote. DELIBERATELY NOT A GENERAL PPM READER -- it
 // accepts only the exact header this file emits, because a golden reference that
@@ -393,6 +418,8 @@ int main(int argc, char** argv) {
         else if (argIs(a, "--nee-scale") && hasNext)     req.neeTentativeScale = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--aerial") && hasNext)        req.aerialPerspective = std::atoi(argv[++i]) != 0;
         else if (argIs(a, "--no-air-shadows"))           req.field.atmosphere.cloudShadowsInMedium = false;
+        else if (argIs(a, "--air-shadow-rays"))          req.airShadowMap = false;
+        else if (argIs(a, "--air-map-res") && hasNext)   req.airMapResolution = std::atoi(argv[++i]);
         else if (argIs(a, "--sun-placement") && hasNext) {
             const char* v = argv[++i];
             sunPlacement = argIs(v, "backlit") ? cloud::SunPlacement::Backlit
@@ -422,6 +449,23 @@ int main(int argc, char** argv) {
         else if (argIs(a, "--billow") && hasNext)        { req.field.convection.enabled = true; req.field.convection.billowAmount    = static_cast<float>(std::atof(argv[++i])); }
         else if (argIs(a, "--billow-scale") && hasNext)  { req.field.convection.enabled = true; req.field.convection.billowScale     = static_cast<float>(std::atof(argv[++i])); }
         else if (argIs(a, "--humidity") && hasNext)      req.field.physics.surfaceHumidity = static_cast<float>(std::atof(argv[++i]));
+        // THE ORGANIZATION GROUP, the cumulus layer's (which it turns on) and the ice's.
+        else if (argIs(a, "--org") && hasNext)           { req.field.convection.enabled = true; req.field.convection.organization.mode = parseOrgMode(argv[++i]); }
+        else if (argIs(a, "--aspect") && hasNext)        { req.field.convection.enabled = true; req.field.convection.organization.aspectRatio   = static_cast<float>(std::atof(argv[++i])); }
+        else if (argIs(a, "--rows-along") && hasNext)    { req.field.convection.enabled = true; req.field.convection.organization.alignment     = static_cast<float>(std::atof(argv[++i])); }
+        else if (argIs(a, "--coherence") && hasNext)     { req.field.convection.enabled = true; req.field.convection.organization.coherence     = static_cast<float>(std::atof(argv[++i])); }
+        else if (argIs(a, "--wave-length") && hasNext)   { req.field.convection.enabled = true; req.field.convection.organization.waveLength    = static_cast<float>(std::atof(argv[++i])); }
+        else if (argIs(a, "--wave-amp") && hasNext)      { req.field.convection.enabled = true; req.field.convection.organization.waveAmplitude = static_cast<float>(std::atof(argv[++i])); }
+        else if (argIs(a, "--crests-along") && hasNext)  { req.field.convection.enabled = true; req.field.convection.organization.waveAngle     = static_cast<float>(std::atof(argv[++i])); }
+        else if (argIs(a, "--gap") && hasNext)           { req.field.convection.enabled = true; req.field.convection.organization.gapFraction   = static_cast<float>(std::atof(argv[++i])); }
+        else if (argIs(a, "--lacunarity") && hasNext)    { req.field.convection.enabled = true; req.field.convection.organization.lacunarity    = static_cast<float>(std::atof(argv[++i])); }
+        else if (argIs(a, "--ice-org") && hasNext)          req.field.ice.organization.mode          = parseOrgMode(argv[++i]);
+        else if (argIs(a, "--ice-aspect") && hasNext)       req.field.ice.organization.aspectRatio   = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--ice-rows-along") && hasNext)   req.field.ice.organization.alignment     = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--ice-coherence") && hasNext)    req.field.ice.organization.coherence     = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--ice-wave-length") && hasNext)  req.field.ice.organization.waveLength    = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--ice-wave-amp") && hasNext)     req.field.ice.organization.waveAmplitude = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--ice-crests-along") && hasNext) req.field.ice.organization.waveAngle     = static_cast<float>(std::atof(argv[++i]));
         // THE HERO. --hero 1 is with the field, 2 is alone; the rest place and size it.
         else if (argIs(a, "--hero") && hasNext)          { req.field.convection.enabled = true; req.field.convection.heroMode = std::atoi(argv[++i]); }
         else if (argIs(a, "--hero-x") && hasNext)        req.field.convection.heroX         = static_cast<float>(std::atof(argv[++i]));

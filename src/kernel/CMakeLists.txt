@@ -33,9 +33,11 @@ set(PLUGIN_SLANG_RENDER_DEPS
     "${SLANG_DIR}/BounceLib.slang"
     "${SLANG_DIR}/TransportLib.slang"
     "${SLANG_DIR}/GeneratorLib.slang"
+    "${SLANG_DIR}/OrganizationLib.slang"
     "${SLANG_DIR}/ConvectionLib.slang"
     "${SLANG_DIR}/PhaseLib.slang"
     "${SLANG_DIR}/SkyLib.slang"
+    "${SLANG_DIR}/AirMapLib.slang"
     "${SLANG_DIR}/Rng.slang")
 
 slang_generate("${SLANG_DIR}/Render.slang"
@@ -54,6 +56,7 @@ set(PLUGIN_KERNEL_SOURCES
     SlangBridge.h       # RenderRequest -> the kernel's structs, written ONCE
     KernelApi.h         # the only thing the host calls
     CpuRender.cpp       # the CPU loop around Shading.h
+    GroundSkyLight.cpp  # the ground's skylight, integrated on the host
 
     # Generated, committed, and #included as source rather than compiled on their
     # own -- see HEADER_FILE_ONLY below. Listed here so the custom commands that

@@ -26,6 +26,11 @@
 // only what a reader needs to check the transcription itself.
 // ===========================================================================
 
+// GUARDED since build 18, because AirMapLib needs the sky's march and BounceLib includes
+// both. The guard changes nothing slangc emits.
+#ifndef MISTYTUNE_SKY_LIB_SLANG
+#define MISTYTUNE_SKY_LIB_SLANG
+
 // Everything skyRadiance needs out of FieldParams, flattened.
 //
 // FLAT AND EXPLICIT RATHER THAN MIRRORING FieldParams. Reproducing a nested C++
@@ -43,6 +48,19 @@ public struct SkyInput
     float sunIntensity;
     float sunAngularRadius;  // degrees
     float groundAlbedo;
+
+    // THE GROUND'S SKYLIGHT (build 19): albedo / pi times the irradiance the sky dome
+    // puts on flat ground, the radiance a sunless patch of ground sends back. ONE COLOUR
+    // FOR THE WHOLE FRAME, because the sky is the same over every patch of the flat
+    // ground; the host integrates it once from Shading.h's skyRadiance (see
+    // groundSkyLightFor in Shading.h).
+    //
+    // UNTIL BUILD 19 THE GROUND HAD ONLY THE SUN, and nothing showed it, because nothing
+    // shadowed the ground. With the clouds' shadows on it, ground in a shadow went black.
+    //
+    // ZERO IS Shading.h EXACTLY, and slang.skyParity passes zero: the term is added on
+    // its own, and adding zero changes no bit.
+    float3 groundSkyLight;
 
     // ===================================================================
     // THE TRANSMITTANCE TABLE, CARRIED IN THE STRUCT RATHER THAN THREADED THROUGH
@@ -309,8 +327,15 @@ public float sunIrradianceTop(SkyInput p)
 // TAKES THE ORIGIN'S ALTITUDE, mirroring Shading.h, which carries the argument for
 // the change at length: a constant answered every escaped path with the sky as seen
 // from two metres, and an escaped path starts wherever it left the medium.
+//
+// `groundLit` IS THE CLOUDS' SHADOW ON THE GROUND the ray lands on: the fraction of the
+// sun that reaches that spot through the cloud layers, from the shadow maps (build 19).
+// It scales the ground's sunlit term and nothing else. ONE OF TWO DEPARTURES FROM
+// Shading.h, with SkyInput.groundSkyLight, and both safe: 1 multiplies exactly and 0 adds
+// nothing, so with those this is still Shading.h bit for bit, which is what
+// slang.skyParity passes and checks.
 public float3 skyRadiance(SkyInput p, float originAltitude, float3 rayDir,
-                          bool includeSunDisc)
+                          bool includeSunDisc, float groundLit)
 {
     float3 sun = sunDirection(p);
 
@@ -424,7 +449,11 @@ public float3 skyRadiance(SkyInput p, float originAltitude, float3 rayDir,
                               exp(-(betaR.z * depthR + betaMExt * depthM)));
 
         float lambert = p.groundAlbedo * nDotL * 0.3183098862f;
-        radiance = radiance + viewT * sunT * (lambert * irradiance);
+        radiance = radiance + viewT * sunT * (lambert * irradiance * groundLit);
+
+        // THE SKY'S SHARE, which the clouds' shadow leaves alone: the ground under a
+        // cloud still sees most of the dome. A term of its own, so zero adds nothing.
+        radiance = radiance + viewT * p.groundSkyLight;
     }
 
     if (!hitsGround && includeSunDisc)
@@ -727,3 +756,5 @@ public float3 airTransmittance(SkyInput p, float originAltitude, float3 rayDir, 
                   exp(-(betaR.y * depthR + betaMExt * depthM)),
                   exp(-(betaR.z * depthR + betaMExt * depthM)));
 }
+
+#endif // MISTYTUNE_SKY_LIB_SLANG

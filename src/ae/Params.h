@@ -127,9 +127,10 @@ namespace ae {
     FLOAT   (GroundAlbedo,      107, "Ground Albedo",                                   \
              0.0, 1.0,      0.0, 1.0,       0.1,     3)                                 \
     /* READ BY NOTHING UNTIL BUILD 17, which is when the air in front of a cloud began  \
-     * to be rendered. OFF IS FASTER AND WRONG FOR A BACKLIT CLOUD: the hazy air in     \
-     * front of it glows as if the cloud did not shade it. Measured on the default      \
-     * scene: 29% of the frame. See airShadow in BounceLib.slang. */                    \
+     * to be rendered. OFF IS WRONG FOR A BACKLIT CLOUD: the hazy air in front of it    \
+     * glows as if the cloud did not shade it. SINCE BUILD 18 IT COSTS NOTHING          \
+     * MEASURABLE: the shadows come from a map built once per frame (AirMapLib.slang)   \
+     * rather than a shadow ray per camera ray, which cost 20 to 43%. */                \
     CHECK   (CloudShadowsInMedium, 108, "Cloud Shadows In Air", true)                    \
     SPARE   (SkySpare1,         109)                                                     \
     SPARE   (SkySpare2,         110)                                                     \
@@ -289,6 +290,28 @@ namespace ae {
     /* A SPARE TURNED INTO A CONTROL IN PLACE, as it was earmarked to be. ID 525 was    \
      * always this slot, so no saved project is rewired. */                             \
     CHECK   (IceEnabled,        525, "Ice Layer", true)                                 \
+    /* HOW THE GENERATING CELLS ARE ARRANGED (build 20): the spec's Organization group, \
+     * nested so the ice layer's reads as its own. INSERTED BEFORE THE SPARES, which    \
+     * nothing has shipped to make expensive; minor 10. Gap Fraction and Lacunarity are \
+     * the cumulus deck's and are not here. See src/engine/Organization.h.              \
+     *                                                                                  \
+     * ROWS ALONG DEFAULTS TO 90, rows east-west, because that is where the lattice     \
+     * always had them: at 90, with nothing else set, the sky is the one before build   \
+     * 20. Bearings are the winds' convention, clockwise from +Z. */                    \
+    TOPIC   (IceOrgGroup,       530, "Ice Organization")                                \
+    POPUP   (IceOrgMode,        531, "Mode", 4, 1, "Cellular|Rolls|Waves|Chaotic")      \
+    FLOAT   (IceOrgAspect,      532, "Aspect Ratio",                                    \
+             1.0, 100.0,      1.0, 8.0,          1.0,     2)                            \
+    ANGLE   (IceOrgAlignment,   533, "Rows Along",   90.0)                              \
+    FLOAT   (IceOrgCoherence,   534, "Row Coherence",                                   \
+             0.0, 1.0,        0.0, 1.0,          0.0,     3)                            \
+    /* Floored at 10 m in the engine; the valid minimum says so too. */                 \
+    FLOAT   (IceOrgWaveLength,  535, "Wavelength",                                      \
+             10.0, 1000000.0, 200.0, 20000.0,    3000.0,  0)                            \
+    FLOAT   (IceOrgWaveAmp,     536, "Wave Amplitude",                                  \
+             0.0, 1.0,        0.0, 1.0,          0.0,     3)                            \
+    ANGLE   (IceOrgWaveAngle,   537, "Crests Along", 0.0)                               \
+    ENDTOPIC(IceOrgGroupEnd,    538)                                                    \
     SPARE   (IceSpare2,         526)                                                    \
     SPARE   (IceSpare3,         527)                                                    \
     SPARE   (IceSpare4,         528)                                                    \
@@ -361,6 +384,29 @@ namespace ae {
     /* Which cauliflower it wears. CONTINUOUS, so keyframing it morphs the lobes. */    \
     FLOAT   (CumulusHeroVariation, 624, "Hero Variation",                               \
              -1000000.0, 1000000.0, 0.0, 10.0, 0.0,  2)                                 \
+    /* HOW THE CONVECTIVE CELLS ARE ARRANGED (build 20): rows, waves, gaps and holes,   \
+     * which is most of what the WMO's varieties name. The hero ignores it. Inserted    \
+     * before the spares like the hero; minor 10. ROWS ALONG DEFAULTS TO 90 for the     \
+     * reason the ice layer's does. GAP FRACTION AND LACUNARITY act on closed cells:    \
+     * gaps open the seams (perlucidus), lacunarity turns the deck into a sheet with    \
+     * round holes (lacunosus). See ConvectionLib.slang's convOrganize. */              \
+    TOPIC   (CumulusOrgGroup,   625, "Cumulus Organization")                            \
+    POPUP   (CumulusOrgMode,    626, "Mode", 4, 1, "Cellular|Rolls|Waves|Chaotic")      \
+    FLOAT   (CumulusOrgAspect,  627, "Aspect Ratio",                                    \
+             1.0, 100.0,      1.0, 8.0,          1.0,     2)                            \
+    ANGLE   (CumulusOrgAlignment, 628, "Rows Along", 90.0)                              \
+    FLOAT   (CumulusOrgCoherence, 629, "Row Coherence",                                 \
+             0.0, 1.0,        0.0, 1.0,          0.0,     3)                            \
+    FLOAT   (CumulusOrgWaveLength, 630, "Wavelength",                                   \
+             10.0, 1000000.0, 200.0, 20000.0,    3000.0,  0)                            \
+    FLOAT   (CumulusOrgWaveAmp, 631, "Wave Amplitude",                                  \
+             0.0, 1.0,        0.0, 1.0,          0.0,     3)                            \
+    ANGLE   (CumulusOrgWaveAngle, 632, "Crests Along", 0.0)                             \
+    FLOAT   (CumulusOrgGap,     633, "Gap Fraction",                                    \
+             0.0, 1.0,        0.0, 1.0,          0.0,     3)                            \
+    FLOAT   (CumulusOrgLacunarity, 634, "Lacunarity",                                   \
+             0.0, 1.0,        0.0, 1.0,          0.0,     3)                            \
+    ENDTOPIC(CumulusOrgGroupEnd, 635)                                                   \
     SPARE   (CumulusSpare1,     614)                                                    \
     SPARE   (CumulusSpare2,     615)                                                    \
     SPARE   (CumulusSpare3,     616)                                                    \
@@ -514,6 +560,13 @@ constexpr PF_ParamFlags classifierFlags(int index) {
         case kMistytuneCumulusHero:
         case kMistytuneCumulusHeroWidth:
         case kMistytuneCumulusHeroHeight:
+        case kMistytuneCumulusOrgMode:
+        case kMistytuneCumulusOrgCoherence:
+        case kMistytuneCumulusOrgWaveAmp:
+        case kMistytuneCumulusOrgGap:
+        case kMistytuneCumulusOrgLacunarity:
+        case kMistytuneIceOrgMode:
+        case kMistytuneIceOrgCoherence:
         case kMistytuneIceEnabled:
         case kMistytuneIceCellDensity:
         case kMistytuneIceCellStrength:
@@ -926,6 +979,15 @@ inline cloud::IceParams toIce(const ParamValues& p) {
 
     // HONOURED NOW: SlangBridge.h empties the ice slab when this is off.
     out.enabled = p.v[kMistytuneIceEnabled] > 0.5;
+
+    // The ice layer's Organization group. It has no gaps or holes; they stay zero.
+    out.organization.mode          = static_cast<int32_t>(std::lround(p.v[kMistytuneIceOrgMode]));
+    out.organization.aspectRatio   = static_cast<float>(p.v[kMistytuneIceOrgAspect]);
+    out.organization.alignment     = static_cast<float>(p.v[kMistytuneIceOrgAlignment]);
+    out.organization.coherence     = static_cast<float>(p.v[kMistytuneIceOrgCoherence]);
+    out.organization.waveLength    = static_cast<float>(p.v[kMistytuneIceOrgWaveLength]);
+    out.organization.waveAmplitude = static_cast<float>(p.v[kMistytuneIceOrgWaveAmp]);
+    out.organization.waveAngle     = static_cast<float>(p.v[kMistytuneIceOrgWaveAngle]);
     return out;
 }
 
@@ -959,6 +1021,18 @@ inline cloud::ConvectionParams toConvection(const ParamValues& p) {
     out.heroWidth     = static_cast<float>(p.v[kMistytuneCumulusHeroWidth]);
     out.heroHeight    = static_cast<float>(p.v[kMistytuneCumulusHeroHeight]);
     out.heroVariation = static_cast<float>(p.v[kMistytuneCumulusHeroVariation]);
+
+    // THE ORGANIZATION GROUP. The popup is 0-based here, and the bearings are not wrapped,
+    // for the reason Wind From is not. Everything is clamped in resolveOrganization.
+    out.organization.mode          = static_cast<int32_t>(std::lround(p.v[kMistytuneCumulusOrgMode]));
+    out.organization.aspectRatio   = static_cast<float>(p.v[kMistytuneCumulusOrgAspect]);
+    out.organization.alignment     = static_cast<float>(p.v[kMistytuneCumulusOrgAlignment]);
+    out.organization.coherence     = static_cast<float>(p.v[kMistytuneCumulusOrgCoherence]);
+    out.organization.waveLength    = static_cast<float>(p.v[kMistytuneCumulusOrgWaveLength]);
+    out.organization.waveAmplitude = static_cast<float>(p.v[kMistytuneCumulusOrgWaveAmp]);
+    out.organization.waveAngle     = static_cast<float>(p.v[kMistytuneCumulusOrgWaveAngle]);
+    out.organization.gapFraction   = static_cast<float>(p.v[kMistytuneCumulusOrgGap]);
+    out.organization.lacunarity    = static_cast<float>(p.v[kMistytuneCumulusOrgLacunarity]);
 
     // Polarity and coverage are clamped to [0, 1] in SlangBridge.h, where the kernel's
     // bound needs them to be; billow octaves have no control and keep the default.

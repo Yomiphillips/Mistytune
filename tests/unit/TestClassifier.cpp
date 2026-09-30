@@ -106,19 +106,78 @@ PL_TEST(AFiveKilometreMoundIsStillCongestus) {
     checkName(f, "Cumulus congestus");
 }
 
-// CLOSED CELLS ARE A DECK. Polarity is the spec's hero parameter for this line.
+// CLOSED CELLS ARE A DECK. Polarity is the spec's hero parameter for this line. Its
+// species is stratiformis and opacus / perlucidus are VARIETIES, as the atlas has them;
+// until build 20 they were named as species. "Stratocumulus stratiformis opacus" is 33
+// characters, so the genus is abbreviated.
 PL_TEST(ClosedCellsAreStratocumulus) {
     FieldParams f = cumulusOnly();
     f.convection.polarity = 1.0f;
     f.convection.coverage = 0.9f;
-    checkName(f, "Stratocumulus opacus");
+    checkName(f, "Sc stratiformis opacus");
 
     f.convection.coverage = 0.5f;
-    checkName(f, "Stratocumulus perlucidus");
+    checkName(f, "Sc stratiformis perlucidus");
 
     f.convection.instability     = 1.0f;
     f.convection.inversionHeight = 5000.0f;
     checkName(f, "Stratocumulus castellanus");
+}
+
+// THE ORGANIZATION GROUP'S VARIETIES (build 20), each from the control the spec names.
+PL_TEST(OrganizationNamesTheVarieties) {
+    FieldParams deck = cumulusOnly();
+    deck.convection.polarity = 1.0f;
+    deck.convection.coverage = 0.9f;
+
+    // undulatus: a wave a quarter deep, or the Waves mode, which is at least that. In
+    // full it is 32 characters, one over, so the varieties go to the atlas's short forms.
+    FieldParams f = deck;
+    f.convection.organization.waveAmplitude = 0.4f;
+    checkName(f, "Sc stratiformis op un");
+    f.convection.organization.waveAmplitude = 0.0f;
+    f.convection.organization.mode = static_cast<int32_t>(OrganizationMode::Waves);
+    checkName(f, "Sc stratiformis op un");
+
+    // radiatus: Rolls, straight enough. Loose rolls are not yet bands.
+    f = deck;
+    f.convection.organization.mode      = static_cast<int32_t>(OrganizationMode::Rolls);
+    f.convection.organization.coherence = 0.8f;
+    checkName(f, "Sc stratiformis opacus radiatus");
+    f.convection.organization.coherence = 0.2f;
+    checkName(f, "Sc stratiformis opacus");
+
+    // perlucidus from gaps, even on a deck covered enough to be opacus without them.
+    f = deck;
+    f.convection.organization.gapFraction = 0.5f;
+    checkName(f, "Sc stratiformis perlucidus");
+
+    // lacunosus: a sheet with holes, which is a deck whatever the polarity.
+    f = deck;
+    f.convection.organization.lacunarity = 0.7f;
+    checkName(f, "Sc stratiformis lacunosus");
+    f.convection.polarity = 0.0f;
+    checkName(f, "Sc stratiformis lacunosus");
+
+    // Cumulus in rows is radiatus, and its only variety: a wave is not a Cu variety.
+    FieldParams cu = cumulusOnly();
+    cu.convection.organization.mode      = static_cast<int32_t>(OrganizationMode::Rolls);
+    cu.convection.organization.coherence = 0.8f;
+    cu.convection.organization.waveAmplitude = 0.5f;
+    checkName(cu, "Cumulus mediocris radiatus");
+
+    // Cirrus in bands.
+    FieldParams ci = iceOnly();
+    ci.ice.organization.mode      = static_cast<int32_t>(OrganizationMode::Rolls);
+    ci.ice.organization.coherence = 0.9f;
+    checkName(ci, "Cirrus uncinus radiatus");
+
+    // THE LONG ONES FALL BACK TO THE ATLAS'S ABBREVIATIONS, the low layer's first:
+    // "Sc stratiformis op un, Ci uncinus" is 33 characters.
+    FieldParams both = deck;
+    both.ice.enabled = true;
+    both.convection.organization.waveAmplitude = 0.4f;
+    checkName(both, "Sc str op un, Ci uncinus");
 }
 
 // THE HERO NAMES THE SHOT whatever the field's polarity: it is one tower.
@@ -234,6 +293,14 @@ PL_TEST(EveryReadoutFitsInAnAfterEffectsParameterName) {
             f.ice.shear.speed[k]   = next() * 80.0f;
             f.ice.shear.bearing[k] = next() * 720.0f - 360.0f;
         }
+        // The varieties (build 20), which make the longest names of all.
+        f.convection.organization.mode          = static_cast<int32_t>(next() * 4.0f);
+        f.convection.organization.coherence     = next();
+        f.convection.organization.waveAmplitude = next();
+        f.convection.organization.gapFraction   = next();
+        f.convection.organization.lacunarity    = next();
+        f.ice.organization.mode                 = static_cast<int32_t>(next() * 4.0f);
+        f.ice.organization.coherence            = next();
 
         const std::string text = describe(f);
         sweep.require(!text.empty() && text.size() <= static_cast<size_t>(kReadoutMaxChars), i);

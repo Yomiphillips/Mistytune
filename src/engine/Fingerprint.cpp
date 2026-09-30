@@ -24,11 +24,13 @@ static_assert(sizeof(AtmosphereParams) == 32,
               "AtmosphereParams changed -- hash the new member in Fingerprint::add(AtmosphereParams)");
 static_assert(sizeof(ShearProfile) == 48,
               "ShearProfile changed -- hash the new member in Fingerprint::add(ShearProfile)");
-static_assert(sizeof(IceParams) == 100,
+static_assert(sizeof(OrganizationParams) == 36,
+              "OrganizationParams changed -- hash the new member in Fingerprint::add(OrganizationParams)");
+static_assert(sizeof(IceParams) == 136,
               "IceParams changed -- hash the new member in Fingerprint::add(IceParams)");
-static_assert(sizeof(ConvectionParams) == 80,
+static_assert(sizeof(ConvectionParams) == 116,
               "ConvectionParams changed -- hash the new member in Fingerprint::add(ConvectionParams)");
-static_assert(sizeof(FieldParams) == 252,
+static_assert(sizeof(FieldParams) == 324,
               "FieldParams changed -- hash the new member in Fingerprint::add(FieldParams)");
 
 // THE ONE PAIR THAT MUST NOT BE HASHED, asserted so that a future refactor
@@ -106,6 +108,19 @@ void Fingerprint::add(const IceParams& i) {
     add(i.detailAmount);
     add(i.detailScale);
     add(i.detailOctaves);
+    add(i.organization);
+}
+
+void Fingerprint::add(const OrganizationParams& o) {
+    add(o.mode);
+    add(o.aspectRatio);
+    add(o.alignment);
+    add(o.coherence);
+    add(o.waveLength);
+    add(o.waveAmplitude);
+    add(o.waveAngle);
+    add(o.gapFraction);
+    add(o.lacunarity);
 }
 
 void Fingerprint::add(const ConvectionParams& c) {
@@ -129,6 +144,7 @@ void Fingerprint::add(const ConvectionParams& c) {
     add(c.heroWidth);
     add(c.heroHeight);
     add(c.heroVariation);
+    add(c.organization);
 }
 
 void Fingerprint::add(const FieldParams& f) {

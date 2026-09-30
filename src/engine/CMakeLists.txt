@@ -62,6 +62,8 @@ add_library(plugin_engine STATIC
     # function -- each a pure function of the parameters.
     ConvectionField.h
     ConvectionField.cpp
+    Organization.h
+    Organization.cpp
 
     # The classifier readout: the sky the parameters describe, named by genus and
     # species. Rule-based and host-free, per PLAN.md, so every rule has a test.

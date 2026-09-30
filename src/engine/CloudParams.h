@@ -146,6 +146,52 @@ struct ShearProfile {
     Real bearing[kShearKnots] = { 270.0f, 268.0f, 264.0f, 258.0f, 250.0f, 240.0f };
 };
 
+// ---------------------------------------------------------------------------
+// Organization: how a generator's cells are arranged
+// ---------------------------------------------------------------------------
+
+// THE SPEC'S ORGANIZATION GROUP, ONE STRUCT FOR ANY GENERATOR. The WMO's varieties are
+// almost all about how the cells are laid out -- in rows, in waves, with gaps between
+// them or holes through them -- so this is the same set of numbers for the cumulus layer
+// and the ice layer, and each layer has its own. src/engine/Organization.h resolves it
+// into what the kernel reads, and OrganizationLib.slang is the kernel's half.
+//
+// THE DEFAULTS ARE NO ORGANIZATION AT ALL: a Cellular layer with round cells, no rows,
+// no wave, no gaps and no holes, which is every render before build 20 bit for bit.
+enum class OrganizationMode : int32_t {
+    Cellular = 0,   // cells, laid out by Aspect Ratio, Alignment and Coherence
+    Rolls    = 1,   // cloud streets: cells four times longer along the rows
+    Waves    = 2,   // the wave arranges the cells: rows along its crests
+    Chaotic  = 3    // no order: the lattice warped, rows ignored
+};
+
+struct OrganizationParams {
+    int32_t mode = 0;               // OrganizationMode
+
+    // ROWS. A cell is Aspect Ratio times longer along the rows than across them; the
+    // rows run along Alignment, a bearing like the wind's; Coherence straightens them,
+    // from the lattice's full jitter at 0 to ruled lines at 1. Cloud streets run along
+    // the wind, so a Rolls sky usually wants Alignment near Wind From.
+    //
+    // ALIGNMENT DEFAULTS TO 90, rows east-west along +X, because that is where the lattice
+    // before build 20 had them: at 90 the pattern frame is the world's and nothing moves.
+    Real aspectRatio = 1.0f;        // >= 1
+    Real alignment   = 90.0f;       // degrees, the bearing the rows run along
+    Real coherence   = 0.0f;        // 0..1
+
+    // THE WAVE FIELD: bands of thicker and thinner cloud whose crests run along Wave
+    // Angle. Amplitude 1 clears the troughs completely. Undulatus.
+    Real waveLength    = 3000.0f;   // m, crest to crest
+    Real waveAmplitude = 0.0f;      // 0..1
+    Real waveAngle     = 0.0f;      // degrees, the bearing the crests run along
+
+    // CUMULUS ONLY. Gap Fraction opens clear seams between the cells (perlucidus);
+    // Lacunarity opens round holes through their middles (lacunosus). The ice layer's
+    // cells are separate heads already, and ignores both.
+    Real gapFraction = 0.0f;        // 0..1
+    Real lacunarity  = 0.0f;        // 0..1
+};
+
 struct IceParams {
     bool enabled = true;
 
@@ -184,6 +230,9 @@ struct IceParams {
     Real detailAmount    = 0.7f;
     Real detailScale     = 140.0f;   // m, smallest feature
     int32_t detailOctaves = 4;
+
+    // How the generating cells are arranged. Gap Fraction and Lacunarity are ignored.
+    OrganizationParams organization;
 };
 
 // ---------------------------------------------------------------------------
@@ -272,6 +321,9 @@ struct ConvectionParams {
     Real heroWidth      = 3000.0f;  // m, the footprint's diameter at the base
     Real heroHeight     = 1.0f;     // 0..1 of the base-to-inversion depth
     Real heroVariation  = 0.0f;     // picks which cauliflower it wears
+
+    // How the convective cells are arranged. The hero is one placed cloud and ignores it.
+    OrganizationParams organization;
 };
 
 // ---------------------------------------------------------------------------

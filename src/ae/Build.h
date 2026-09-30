@@ -146,6 +146,28 @@
 // A MINOR BUMP BECAUSE THE PARAMETER LIST AND THE FLAGS CHANGED: the readout moved to
 // the top, Sun Placement was inserted at the top of Sun and Sky, thirty controls gained
 // PF_ParamFlag_SUPERVISE, and out_flags gained PF_OutFlag_SEND_UPDATE_PARAMS_UI.
+// BUILD 18 -- THE CLOUDS' SHADOWS IN THE AIR COME FROM A MAP. Build 17 cast one shadow
+// ray per camera ray, which cost 20 to 43% of the frame and speckled the sky. A deep
+// shadow map per layer is now built once per frame on the GPU (up to about 20 ms) and every
+// step of the air reads it. Measured: the air's shadows now cost nothing measurable, and
+// the sky's noise at 1 spp denoised is halved. PROGRESS.md carries the numbers.
+//
+// STILL MINOR 9: no parameter or flag changed.
+// BUILD 19 -- THE CLOUDS' SHADOWS FALL ON THE GROUND, AND THE GROUND SEES THE SKY. Build
+// 18's maps are read where a ray lands on the ground, and they are built whenever the sky
+// is on, so Cloud Shadows In Air off keeps the ground's. Shadowed ground then came out
+// black: since Phase 1 the ground had only the sun. It now also has the sky dome's light,
+// integrated once per change of the sky (about 3 ms).
+//
+// STILL MINOR 9: no parameter or flag changed.
+// MINOR 10, BUILD 20 -- THE ORGANIZATION GROUP. How each layer's cells are arranged:
+// Cellular, Rolls, Waves or Chaotic; Aspect Ratio, Rows Along and Row Coherence; a wave
+// field; and for the cumulus deck Gap Fraction (perlucidus) and Lacunarity (lacunosus).
+// The classifier names the varieties they make. At the defaults the kernel takes the
+// path it took before build 20, and the goldens did not move.
+//
+// A MINOR BUMP BECAUSE THE PARAMETER LIST CHANGED: an Organization topic was inserted
+// into the Ice group and one into the Cumulus group, each before its spares.
 #define PLUGIN_MAJOR 0
-#define PLUGIN_MINOR 9
-#define PLUGIN_BUILD 17
+#define PLUGIN_MINOR 10
+#define PLUGIN_BUILD 20

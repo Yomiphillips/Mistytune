@@ -34,6 +34,7 @@
 // arrangement TestCamera.cpp and TestOutputConvert.cpp already use.
 #include "Shading.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -506,4 +507,96 @@ PL_TEST(LutAgreesWithTheMarchItReplaces) {
 
     PL_CHECK(compared > 500);
     PL_CHECK(worst < 0.04);
+}
+
+// ---------------------------------------------------------------------------
+// The ground's skylight (build 19)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+cloud::FieldParams skyWith(float elevation, float turbidity) {
+    cloud::FieldParams f;
+    f.atmosphere.sunElevation = elevation;
+    f.atmosphere.sunAzimuth   = 135.0f;
+    f.atmosphere.turbidity    = turbidity;
+    return f;
+}
+
+std::vector<Real> tableFor(const cloud::FieldParams& f) {
+    return buildFor(transmittanceParamsFrom(f.physics, f.atmosphere));
+}
+
+} // namespace
+
+// THE RENDERER'S GRID IS CONVERGED: 32 x 64 against 128 x 256, sixteen times as many
+// directions, within 1% in every channel. MEASURED when written: under 0.1% up to a 45
+// degree sun, and 0.49% at 85 degrees, where the aureole sits in the few cells round the
+// zenith. Equal steps of mu^2 were measured at 1.2 to 1.4% here; see groundSkyLightFor.
+PL_TEST(GroundSkyLightConverges) {
+    const float elevations[] = { 2.0f, 12.0f, 45.0f, 85.0f };
+    const float turbidities[] = { 2.2f, 6.0f };
+    double worst = 0.0;
+    for (float el : elevations) {
+        for (float tb : turbidities) {
+            const cloud::FieldParams f = skyWith(el, tb);
+            const std::vector<Real> lut = tableFor(f);
+            float coarse[3], fine[3];
+            const auto t0 = std::chrono::steady_clock::now();
+            plugin::kernel::groundSkyLightFor(f, lut.data(), 32, 64, coarse);
+            const double ms = std::chrono::duration<double, std::milli>(
+                                  std::chrono::steady_clock::now() - t0).count();
+            plugin::kernel::groundSkyLightFor(f, lut.data(), 128, 256, fine);
+            double here = 0.0;
+            for (int c = 0; c < 3; ++c) {
+                PL_CHECK(fine[c] > 0.0f);
+                here = std::fmax(here, std::fabs(double(coarse[c]) / fine[c] - 1.0));
+            }
+            std::printf("      sun %4.0f deg, turbidity %.1f: %.4f%% (32 x 64 took %.1f ms)\n",
+                        el, tb, here * 100.0, ms);
+            worst = std::fmax(worst, here);
+        }
+    }
+    std::printf("      32 x 64 against 128 x 256: worst %.4f%%\n", worst * 100.0);
+    PL_CHECK(worst < 0.01);
+}
+
+// WHAT HAS TO BE TRUE OF SKYLIGHT, whatever computes it:
+//   * it is the ground's albedo times something, so a black ground returns none;
+//   * a sun far below the horizon lights no sky in a single-scattering model;
+//   * a clear sky's light is blue, so the ground's share of it is too;
+//   * against the sun's own light on the same ground it is a minority, and not a
+//     vanishing one: clear-sky diffuse is of order a tenth of the direct beam at 45
+//     degrees. The bounds are wide on purpose; they catch a lost pi, not a model choice.
+PL_TEST(GroundSkyLightIsSkylight) {
+    float out[3];
+
+    cloud::FieldParams black = skyWith(45.0f, 2.2f);
+    black.atmosphere.groundAlbedo = 0.0f;
+    const std::vector<Real> lut45 = tableFor(black);
+    plugin::kernel::groundSkyLightFor(black, lut45.data(), 32, 64, out);
+    PL_CHECK(out[0] == 0.0f && out[1] == 0.0f && out[2] == 0.0f);
+
+    const cloud::FieldParams night = skyWith(-30.0f, 2.2f);
+    const std::vector<Real> lutNight = tableFor(night);
+    plugin::kernel::groundSkyLightFor(night, lutNight.data(), 32, 64, out);
+    std::printf("      sun at -30 deg: %.3g %.3g %.3g\n", out[0], out[1], out[2]);
+    PL_CHECK(out[0] < 1e-6f && out[1] < 1e-6f && out[2] < 1e-6f);
+
+    const cloud::FieldParams day = skyWith(45.0f, 2.2f);
+    plugin::kernel::groundSkyLightFor(day, lut45.data(), 32, 64, out);
+    PL_CHECK(out[2] > out[0]);
+
+    // The direct beam on the same ground, as skyRadiance's ground term has it, with the
+    // albedo / pi that groundSkyLight also carries.
+    const float mu = std::sin(45.0f * 0.01745329252f);
+    const plugin::kernel::Vec3 sunT =
+        plugin::kernel::sampleTransmittanceLut(lut45.data(), day.physics.scaleHeight, 0.0f, mu);
+    const float direct = day.atmosphere.groundAlbedo * 0.3183098862f
+                       * 20.0f * day.atmosphere.sunIntensity * mu;
+    const double ratio[3] = { out[0] / (direct * sunT.x), out[1] / (direct * sunT.y),
+                              out[2] / (direct * sunT.z) };
+    std::printf("      sky / sun on the ground at 45 deg: %.3f %.3f %.3f\n",
+                ratio[0], ratio[1], ratio[2]);
+    for (int c = 0; c < 3; ++c) PL_CHECK(ratio[c] > 0.02 && ratio[c] < 0.5);
 }

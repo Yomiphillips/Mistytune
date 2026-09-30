@@ -17,6 +17,8 @@
 #include "../engine/ConvectionField.h"
 #include "../engine/IceField.h"
 
+#include "AirMapPlan.h"
+
 namespace plugin::kernel {
 
 // WHERE A PIXEL'S FOUR FLOATS SIT IN MEMORY, and it is not the same on both
@@ -111,6 +113,12 @@ struct RenderRequest {
     // pointer before the launch. A caller never sets it.
     const void* transmittanceBuffer = nullptr;
 
+    // THE GROUND'S SKYLIGHT, linear RGB: albedo / pi times the sky's irradiance on flat
+    // ground. Derived, like the table above, and from the same thread-local kind of cache
+    // (deriveRenderInputs). By value, because it is three floats. See
+    // SkyInput.groundSkyLight in SkyLib.slang for why the ground needs it.
+    float groundSkyLight[3] = { 0.0f, 0.0f, 0.0f };
+
     // A sound upper bound on the medium's density per metre, resolved from
     // quality.densityMajorant when the user pinned one and derived structurally
     // otherwise. NEVER sampled from the field: see IceField.h on why a bound that is
@@ -126,6 +134,10 @@ struct RenderRequest {
     // thing rather than as a pattern crawling through a fixed window.
     cloud::Real cellDriftX = 0.0f;
     cloud::Real cellDriftZ = 0.0f;
+
+    // How the ice layer's generating cells are arranged, resolved (build 20). The cumulus
+    // layer's rides in `convection` below.
+    cloud::OrganizationResolved iceOrganization;
 
     // The convection layer's derived half: its base at the condensation level, how tall
     // its towers may grow, where its cells have drifted and how far through their lives
@@ -197,6 +209,30 @@ struct RenderRequest {
     // measured and none changed the verdict. The grid stays because it is proved correct
     // (slang.convection) and a denser or sparser default may yet want it.
     bool convectionGrid = false;
+
+    // THE CLOUDS' SHADOW MAPS, ONE PER LAYER, built once per frame: the clouds' shadows in
+    // the air and, since build 19, on the ground. False falls back to build 17's one shadow
+    // ray per camera ray for the air and leaves the ground unshadowed. An A/B knob for the
+    // CLI, like the two above: not hashed and not a user parameter. Whether the AIR's
+    // shadows are there at all is AtmosphereParams::cloudShadowsInMedium. See AirMapLib.
+    bool airShadowMap = true;
+
+    // THE MAP'S TEXEL BUDGET: this many squared for the cumulus, a quarter of that for the
+    // cirrus. Not hashed, like airShadowMap. See AirMapPlan.h.
+    int airMapResolution = 512;
+
+    // ===================================================================
+    // WHERE THE MAPS LIE AND THE ONE BUFFER THAT HOLDS BOTH, filled by the render entry
+    // points exactly as transmittanceBuffer is: a caller never sets them.
+    //
+    // THE PLAN RIDES HERE BY VALUE, a few dozen scalars, because the kernel marshals it
+    // into LayerShadowMap per sample. THE TEXELS DO NOT. The cumulus map is 16 MB, and
+    // this struct is a kernel argument, capped at 4 KB. They live in a thread-local cache
+    // keyed on everything a column reads, so the bands and sample chunks of one frame build
+    // them once. See AirMapHost.h.
+    // ===================================================================
+    AirMapPlan  airMaps;
+    const void* airMapBuffer = nullptr;
 
     // Linear radiance, four floats per pixel, persisting across the launches of
     // one frame. Null on the CPU reference path, which accumulates in the

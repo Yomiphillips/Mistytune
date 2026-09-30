@@ -47,6 +47,7 @@ public:
     void add(const cloud::IceParams& i);
     void add(const cloud::ConvectionParams& c);
     void add(const cloud::ShearProfile& s);
+    void add(const cloud::OrganizationParams& o);
 
     // NOTE THE ABSENCE OF add(ViewParams) AND add(QualityParams), and that it is
     // a design decision rather than an omission.

@@ -95,6 +95,34 @@ std::vector<Mutation> allMutations() {
         { "convection.lifetime",        [](FieldParams& f) { f.convection.lifetime += 60.0f; } },
         { "convection.dropletDiameter", [](FieldParams& f) { f.convection.dropletDiameter += 2.0f; } },
 
+        // The hero (build 15), which this list missed until build 20.
+        { "convection.heroMode",      [](FieldParams& f) { f.convection.heroMode += 1; } },
+        { "convection.heroX",         [](FieldParams& f) { f.convection.heroX += 100.0f; } },
+        { "convection.heroZ",         [](FieldParams& f) { f.convection.heroZ += 100.0f; } },
+        { "convection.heroWidth",     [](FieldParams& f) { f.convection.heroWidth += 100.0f; } },
+        { "convection.heroHeight",    [](FieldParams& f) { f.convection.heroHeight -= 0.1f; } },
+        { "convection.heroVariation", [](FieldParams& f) { f.convection.heroVariation += 0.5f; } },
+
+        // OrganizationParams, both layers' (build 20)
+        { "convection.organization.mode",          [](FieldParams& f) { f.convection.organization.mode = 1; } },
+        { "convection.organization.aspectRatio",   [](FieldParams& f) { f.convection.organization.aspectRatio += 0.5f; } },
+        { "convection.organization.alignment",     [](FieldParams& f) { f.convection.organization.alignment += 5.0f; } },
+        { "convection.organization.coherence",     [](FieldParams& f) { f.convection.organization.coherence += 0.1f; } },
+        { "convection.organization.waveLength",    [](FieldParams& f) { f.convection.organization.waveLength += 100.0f; } },
+        { "convection.organization.waveAmplitude", [](FieldParams& f) { f.convection.organization.waveAmplitude += 0.1f; } },
+        { "convection.organization.waveAngle",     [](FieldParams& f) { f.convection.organization.waveAngle += 5.0f; } },
+        { "convection.organization.gapFraction",   [](FieldParams& f) { f.convection.organization.gapFraction += 0.1f; } },
+        { "convection.organization.lacunarity",    [](FieldParams& f) { f.convection.organization.lacunarity += 0.1f; } },
+        { "ice.organization.mode",          [](FieldParams& f) { f.ice.organization.mode = 1; } },
+        { "ice.organization.aspectRatio",   [](FieldParams& f) { f.ice.organization.aspectRatio += 0.5f; } },
+        { "ice.organization.alignment",     [](FieldParams& f) { f.ice.organization.alignment += 5.0f; } },
+        { "ice.organization.coherence",     [](FieldParams& f) { f.ice.organization.coherence += 0.1f; } },
+        { "ice.organization.waveLength",    [](FieldParams& f) { f.ice.organization.waveLength += 100.0f; } },
+        { "ice.organization.waveAmplitude", [](FieldParams& f) { f.ice.organization.waveAmplitude += 0.1f; } },
+        { "ice.organization.waveAngle",     [](FieldParams& f) { f.ice.organization.waveAngle += 5.0f; } },
+        { "ice.organization.gapFraction",   [](FieldParams& f) { f.ice.organization.gapFraction += 0.1f; } },
+        { "ice.organization.lacunarity",    [](FieldParams& f) { f.ice.organization.lacunarity += 0.1f; } },
+
         // FieldParams itself
         { "timeSeconds", [](FieldParams& f) { f.timeSeconds += 1.0f; } },
         { "seed",        [](FieldParams& f) { f.seed += 1u; } },

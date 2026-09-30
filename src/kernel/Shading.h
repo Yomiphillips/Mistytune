@@ -697,6 +697,64 @@ MT_DEVICE Vec3 skyRadiance(const cloud::FieldParams& field, float originAltitude
 }
 
 // ---------------------------------------------------------------------------
+// The ground's skylight
+// ---------------------------------------------------------------------------
+//
+// albedo / pi times the irradiance the sky dome puts on flat ground at altitude 0:
+// SkyInput.groundSkyLight in SkyLib.slang, which says why the ground needs it. The
+// kernel's skyRadiance adds it where a ray lands on the ground; THIS FILE'S DOES NOT,
+// because this one is the reference slang.skyParity compares against with it at zero.
+//
+// HOST ONLY, AND DELIBERATELY NOT MT_DEVICE. It is muSteps x azimuthSteps sky marches,
+// once per change of the sky (deriveRenderInputs caches it), and nothing on the device
+// should ever call it.
+//
+// MIDPOINTS IN mu, EACH WEIGHTED BY ITS mu. The weights of N midpoints sum to exactly one
+// half, which is the integral of mu dmu, so a uniform sky of radiance L gives exactly
+// albedo L: the white furnace's answer.
+//
+// NOT EQUAL STEPS OF mu^2, which would make every point carry the same weight. That
+// substitution was tried first and converged to only about 1%, at a high sun as much as
+// a low one: it puts a square root into the radiance at the horizon, where the sky
+// brightens fastest. Measured against a grid sixteen times as fine in TestAtmosphere.
+//
+// THE DISC IS LEFT OUT: it is the ground's sunlit term already, and a grid point that
+// landed in a disc of 7e-5 sr would count it many times over. So the sky is asked with a
+// sun of zero radius, whose disc no direction can land in (cosTheta is clamped to 1).
+//
+// ONE ANSWER FOR ALL THE GROUND IN VIEW. The sky over a patch 40 km off sees the sun
+// 0.36 degrees lower, which only matters for a sun on the horizon, and there the sky's
+// share of the ground's light is dim anyway.
+inline void groundSkyLightFor(const cloud::FieldParams& field, const float* transmittanceLut,
+                              int muSteps, int azimuthSteps, float out[3]) {
+    cloud::FieldParams sky = field;
+    sky.atmosphere.sunAngularRadius = 0.0f;
+
+    double r = 0.0, g = 0.0, b = 0.0;
+    for (int i = 0; i < muSteps; ++i) {
+        const double mu   = (i + 0.5) / muSteps;
+        const double sinT = std::sqrt(1.0 - mu * mu);
+        for (int j = 0; j < azimuthSteps; ++j) {
+            const double phi = 6.283185307179586 * (j + 0.5) / azimuthSteps;
+            const Vec3 d = vec3(static_cast<float>(sinT * std::sin(phi)),
+                                static_cast<float>(mu),
+                                static_cast<float>(sinT * std::cos(phi)));
+            const Vec3 L = skyRadiance(sky, 0.0f, d, transmittanceLut);
+            r += L.x * mu;
+            g += L.y * mu;
+            b += L.z * mu;
+        }
+    }
+
+    // albedo / pi, times 2 pi / azimuthSteps for the azimuth, times 1 / muSteps for mu.
+    const double w = 2.0 * static_cast<double>(field.atmosphere.groundAlbedo)
+                   / (static_cast<double>(muSteps) * azimuthSteps);
+    out[0] = static_cast<float>(r * w);
+    out[1] = static_cast<float>(g * w);
+    out[2] = static_cast<float>(b * w);
+}
+
+// ---------------------------------------------------------------------------
 // Output transform
 // ---------------------------------------------------------------------------
 

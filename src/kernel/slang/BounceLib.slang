@@ -48,6 +48,7 @@
 #include "TransportLib.slang"
 #include "PhaseLib.slang"
 #include "SkyLib.slang"
+#include "AirMapLib.slang"
 
 // ---------------------------------------------------------------------------
 // The environment
@@ -115,12 +116,15 @@ public struct Environment
 // ONLY `.y` REACHES THE SKY, because the atmosphere is spherically symmetric and the
 // march is built around altitude. The full position is taken rather than a float so
 // the call site cannot quietly pass the wrong component.
+//
+// `groundLit` is the clouds' shadow on the ground the ray lands on, 1 where there is none
+// or no map to say. Mode 0 has no ground and ignores it. See groundShadow in AirMapLib.
 public float3 environmentRadiance(Environment e, float3 origin, float3 dir,
-                                  bool includeSunDisc)
+                                  bool includeSunDisc, float groundLit)
 {
     if (e.envMode == 1)
     {
-        return skyRadiance(e.sky, origin.y, dir, includeSunDisc);
+        return skyRadiance(e.sky, origin.y, dir, includeSunDisc, groundLit);
     }
 
     return e.uniformRadiance;
@@ -176,9 +180,10 @@ public struct Scene
     // THE AIR BETWEEN THE EYE AND THE FIRST CLOUD, at envMode 1 only. 0 leaves it out,
     // as every render before build 17 did. 1 is aerial perspective: the airlight in front
     // of the first collision, and its transmittance on everything behind it. 2 also puts
-    // the clouds' shadows in that air, with one shadow ray per camera ray; that is the
-    // Cloud Shadows In Air checkbox, and crepuscular rays are what it draws. See
-    // airSegment in SkyLib.slang and airShadow below.
+    // the clouds' shadows in that air: from the shadow maps when airMapOn says so, else
+    // with one shadow ray per camera ray. That is the Cloud Shadows In Air checkbox, and
+    // crepuscular rays are what it draws. See airSegment in SkyLib.slang, airShadowLoss in
+    // AirMapLib.slang and airShadow below.
     //
     // ZERO IN A ZEROED STRUCT, so every test scene built before this field existed keeps
     // measuring exactly what it measured.
@@ -212,6 +217,17 @@ public struct Scene
     MajorantGrid grid2;
     float3       albedo2;
     PhaseInput   phase2;
+
+    // THE CLOUDS' SHADOW MAPS, ONE PER LAYER. Nonzero puts the clouds' shadows on the
+    // ground the sky's rays land on, always, and in the air at aerialMode 2, where they
+    // replace build 17's one shadow ray per camera ray; see AirMapLib.slang. The host
+    // builds a map for EVERY layer present or leaves this zero, because an empty map
+    // answers 1, which is right only for a layer that is absent.
+    //
+    // ZERO IN A ZEROED STRUCT, so every scene a test builds by hand keeps the shadow ray.
+    int            airMapOn;
+    LayerShadowMap airMapIce;   // medium's
+    LayerShadowMap airMapCu;    // medium2's
 };
 
 // A STRUCTURAL CEILING, SEPARATE FROM THE PARAMETER. A GPU loop wants a bound the
@@ -657,6 +673,10 @@ float3 cameraSegmentSun(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
 // ---------------------------------------------------------------------------
 //
 // ===========================================================================
+// THE FALLBACK SINCE BUILD 18. The shadow maps in AirMapLib.slang replace this whenever
+// the host builds them; it remains for a sun below one degree, for scenes a test builds
+// by hand, and behind the CLI's --air-shadow-rays.
+//
 // ONE SHADOW RAY FOR THE WHOLE CAMERA SEGMENT, from the point airSegment drew in
 // proportion to the airlight. Crepuscular rays are the air in a cloud's shadow going
 // dark; the airlight is the integral of sunlit air along the ray, and this puts the
@@ -750,19 +770,39 @@ public TraceResult trace(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
             // scattering point after that. The sky is asked from there rather than
             // from the ground, which is what makes the skylight on a high cirrus the
             // sky that crystal can actually see.
-            float3 env = environmentRadiance(s.environment, ro, rd, bounce == 0);
+            //
+            // THE GROUND IT LANDS ON IS IN THE CLOUDS' SHADOW where the maps say so, which
+            // is the ground in view AND the light the ground throws back up at the cloud
+            // bases. Without it the ground under a thick deck was lit as if the sky were
+            // clear, and brightened the deck's own underside.
+            float groundLit = s.airMapOn != 0
+                            ? groundShadow(s.airMapIce, s.airMapCu, ro, rd) : 1.0f;
+            float3 env = environmentRadiance(s.environment, ro, rd, bounce == 0, groundLit);
 
             // A CAMERA RAY THAT ESCAPES already has its airlight, in the sky; only the
             // clouds' shadow in it is missing. The segment runs to the top of the air,
             // so its airIn is exactly the airlight inside `env`, and the shadowed part
             // comes off. Never negative: the ground and the disc are what is left.
+            //
+            // FROM THE MAPS WHEN THERE ARE MAPS, and then the sky's own march is not needed:
+            // the loss is taken straight off it, clamped because the two quadratures can
+            // disagree by a fraction of a percent where the whole ray is in shadow.
             if (bounce == 0 && airOn && s.aerialMode >= 2)
             {
                 float u1 = randFloat(airRng);
                 float u2 = randFloat(airRng);
-                AirSegment seg = airSegment(s.environment.sky, ro.y, rd, 1e30f, u1, u2);
-                float v = airShadow(s, bounds, drift, airRng, seg, ro, rd, r.trackingSteps);
-                env = env - seg.airIn * (1.0f - v);
+                if (s.airMapOn != 0)
+                {
+                    env = max(env - airShadowLoss(s.environment.sky, s.airMapIce, s.airMapCu,
+                                                  ro, rd, 1e30f, u2),
+                              float3(0.0f, 0.0f, 0.0f));
+                }
+                else
+                {
+                    AirSegment seg = airSegment(s.environment.sky, ro.y, rd, 1e30f, u1, u2);
+                    float v = airShadow(s, bounds, drift, airRng, seg, ro, rd, r.trackingSteps);
+                    env = env - seg.airIn * (1.0f - v);
+                }
             }
 
             r.pathRadiance += throughput * env;
@@ -779,9 +819,21 @@ public TraceResult trace(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
         {
             float u1 = randFloat(airRng);
             float u2 = randFloat(airRng);
-            AirSegment seg = airSegment(s.environment.sky, ro.y, rd, length(p - ro), u1, u2);
-            float v = airShadow(s, bounds, drift, airRng, seg, ro, rd, r.trackingSteps);
-            r.pathRadiance += throughput * seg.airIn * v;
+            float dist = length(p - ro);
+            AirSegment seg = airSegment(s.environment.sky, ro.y, rd, dist, u1, u2);
+            float3 airIn;
+            if (s.aerialMode >= 2 && s.airMapOn != 0)
+            {
+                airIn = max(seg.airIn - airShadowLoss(s.environment.sky, s.airMapIce,
+                                                      s.airMapCu, ro, rd, dist, u2),
+                            float3(0.0f, 0.0f, 0.0f));
+            }
+            else
+            {
+                airIn = seg.airIn * airShadow(s, bounds, drift, airRng, seg, ro, rd,
+                                              r.trackingSteps);
+            }
+            r.pathRadiance += throughput * airIn;
             throughput *= seg.airT;
         }
 

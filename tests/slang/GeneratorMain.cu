@@ -78,7 +78,26 @@ int main() {
 
     int failures = 0;
 
-    GeneratorInput_0 g;
+    // THE ORGANIZATION GROUP ON THE ICE LAYER (build 20), set in the kernel's own terms:
+    // rows at 35 degrees four times longer than wide, straightened, a wave across them
+    // and Chaotic's warp. The bounds below are checked on this too.
+    auto organized = [](GeneratorInput_0 in, bool withWave) {
+        const float b = 35.0f * 0.01745329252f;
+        in.gnOrg_0.ogOn_0        = 1;
+        in.gnOrg_0.ogAxis_0      = make_float2(std::sin(b), std::cos(b));
+        in.gnOrg_0.ogStretch_0   = 4.0f;
+        in.gnOrg_0.ogCoherence_0 = 0.7f;
+        in.gnOrg_0.ogWarp_0      = 1.2f;
+        if (withWave) {
+            in.gnOrg_0.ogWaveK_0   = make_float2(std::cos(1.2f) / 1800.0f, -std::sin(1.2f) / 1800.0f);
+            in.gnOrg_0.ogWaveAmp_0 = 0.8f;
+        }
+        return in;
+    };
+
+    // ZEROED, which leaves the Organization group off (build 20). It was filled field by
+    // field before, and the new struct inside it came in as whatever was on the stack.
+    GeneratorInput_0 g{};
     g.cellAltitude_0 = 8000.0f;
     g.streakLength_0 = 1500.0f;
     g.cellSize_0     = 400.0f;
@@ -497,6 +516,41 @@ int main() {
             }
         }
 
+        // THE SAME INEQUALITY WITH THE ORGANIZATION GROUP ON (build 20). The bound reads
+        // the rotated, stretched and warped lattice through orgPatternBox; a slip there is
+        // a cell whose bound misses the cells that reach it.
+        {
+            const GeneratorInput_0 go = organized(g, true);
+            cellMax<<<(cells + 63) / 64, 64>>>(go, sDrift, gridLo, cellSize, dims,
+                                               refSamples, sMax, cells);
+            std::vector<float> ref(cells);
+            cudaMemcpy(ref.data(), dMax, ref.size() * sizeof(float), cudaMemcpyDeviceToHost);
+
+            float* dBound = nullptr;
+            cudaMalloc(&dBound, static_cast<size_t>(cells) * sizeof(float));
+            RWStructuredBuffer<float> sBound;
+            sBound.data  = dBound;
+            sBound.count = static_cast<size_t>(cells);
+            cellBound<<<(cells + 63) / 64, 64>>>(go, sDrift, gridLo, cellSize, dims, sBound, cells);
+            std::vector<float> bound(cells);
+            cudaMemcpy(bound.data(), dBound, bound.size() * sizeof(float), cudaMemcpyDeviceToHost);
+            cudaFree(dBound);
+
+            int violations = 0, occupied = 0;
+            for (int i = 0; i < cells; ++i) {
+                if (bound[i] < ref[i]) ++violations;
+                if (ref[i] > 0.0f) ++occupied;
+            }
+            std::printf("\nOrganized (rows at 35 deg, stretch 4, wave, warp), all %d cells\n", cells);
+            std::printf("  cells where the bound is BELOW the field : %d, of %d occupied\n",
+                        violations, occupied);
+            if (violations > 0 || occupied == 0) {
+                std::printf("    FAIL: the structural bound misses the organized field%s\n",
+                            occupied == 0 ? " (or the field is empty)" : "");
+                ++failures;
+            }
+        }
+
         cudaFree(dMax);
     }
 
@@ -665,6 +719,12 @@ int main() {
 
         double sampledMax = 0.0;
 
+        // AND ORGANIZED (build 20), without the wave, which only lowers it: the overlap
+        // theorem is about the lattice in its own units, and the rows' reduced jitter is a
+        // subset of the layouts it already covers, so the same bound must hold.
+        const GeneratorInput_0 cgOrg = organized(cg, false);
+        double sampledMaxOrg = 0.0;
+
         // MANY PATCHES OF THE PLANE, so the answer is not one neighbourhood's luck --
         // and so the note below about how rare the worst jitter is has a number under it.
         // 7 x 7 patches of 4 pitches each is 784 slot neighbourhoods at 1024x1024 apiece.
@@ -684,6 +744,13 @@ int main() {
             sampledMax = std::max(sampledMax,
                                   static_cast<double>(*std::max_element(plane.begin(),
                                                                         plane.end())));
+
+            cellFieldPlane<<<grid, block>>>(cgOrg, origin, span, sPlane, side);
+            cudaMemcpy(plane.data(), dPlane, plane.size() * sizeof(float),
+                       cudaMemcpyDeviceToHost);
+            sampledMaxOrg = std::max(sampledMaxOrg,
+                                     static_cast<double>(*std::max_element(plane.begin(),
+                                                                           plane.end())));
         }
         cudaFree(dPlane);
 
@@ -700,6 +767,12 @@ int main() {
 
         if (!(sampledMax > 0.0)) {
             std::printf("    FAIL: cellField is zero everywhere, so this proved nothing\n");
+            ++failures;
+        }
+
+        std::printf("  organized (rows, stretch 4, warp): sampled maximum %.4f\n", sampledMaxOrg);
+        if (!(sampledMaxOrg > 0.0) || sampledMaxOrg > hostOverlap) {
+            std::printf("    FAIL: the organized cellField is empty or above cellOverlapBound()\n");
             ++failures;
         }
 

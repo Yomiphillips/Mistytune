@@ -4,6 +4,472 @@ Tracked against `PLAN.md`. Newest first.
 
 ---
 
+## 2026-09-30 — THE ORGANIZATION GROUP: ROWS, WAVES, GAPS AND HOLES. Build 20, minor 10. The spec's last Phase 3 group. Each layer gets its own Mode (Cellular, Rolls, Waves, Chaotic), Aspect Ratio, Rows Along, Row Coherence and a wave field. The cumulus deck also gets Gap Fraction and Lacunarity. The classifier names what they make: undulatus, radiatus, perlucidus, lacunosus. At the defaults the kernel runs the code it ran before, bit for bit, and nothing about the default frame's time changed. Phase 3 is done.
+
+### Where builds 18 and 19 stand
+
+Build 18 is installed and not reported on. Build 19 was built while AE was open, so it was
+staged and never installed. Build 20 contains it, so **this is the first time build 19's
+ground shadows and ground skylight reach the host.** Its "What needs the host" list below
+still applies.
+
+### One model for every mode
+
+The kernel knows nothing of Cellular or Rolls. `OrganizationLib.slang` has a **pattern
+frame**: the lattice rotated so its rows run along a bearing, and stretched along them. It
+also has a row jitter, a wave and a warp. `src/engine/Organization.h` turns each mode into a
+setting of those:
+
+| Mode | Setting |
+| --- | --- |
+| Cellular | the controls as they are |
+| Rolls | cells 4x longer again along the rows: cloud streets |
+| Waves | rows turned along the wave's crests, cells 2x longer, amplitude at least 0.6 |
+| Chaotic | the lattice warped by smooth noise (1.2 slot widths over 2.5 cells), rows' coherence dropped |
+
+So a mode is a starting point, and every slider stays live in every mode.
+
+**Why the bounds survive.** Both generators prove their bounds in lattice units: the 3x3
+neighbourhood, the reaches, the ice's overlap count. Rotating and stretching the lattice
+moves it in the world, and it changes none of those statements. A world box becomes a
+parallelogram in the pattern frame, and the bound searches its bounding box, which is sound
+and at worst looser. Coherence shrinks the jitter across the rows, so every layout it
+allows was already allowed. The wave is a factor in [1 - amplitude, 1]. The warp moves the
+read point by at most 1.2 x `kFbmBound` per axis, and the box grows by the same.
+
+**The defaults are off.** Rows Along defaults to 90, rows along +X, which is where the
+lattice always had them. With nothing else set, `OrganizationResolved.on` is false and the
+kernel takes the pre-build-20 path. A Rows Along keyframed round to 450 still counts as off.
+
+**Specialised, because it was measured.** `convUpdraftGrad` is the hottest function in the
+cumulus layer. With one body serving everything, the default scenes were 4% slower with
+the group off, and the organized path at its identity cost 15%. The extra state in the
+lattice loop costs registers whether or not a branch is taken. It is now three
+specialisations chosen once per call: off, organized, and organized with Lacunarity's
+holes.
+
+### Gaps and holes (the cumulus deck only)
+
+**Centre-ness** is `1 - kNext / kTop`, from the two largest cell kernels at a point. It is
+near 1 at a cell's centre and 0 on the seam between two cells. It ignores how vigorous
+the cell is, so a threshold on it gives every cell the same shape of gap or hole.
+
+- **Gap Fraction (perlucidus)** clears the seams to a band of 0 up to half the gap width,
+  then ramps to 1. The width is the square root of the slider, because a closed cell's
+  visible top starts late, around centre-ness 0.4, and on a linear map 0.3 and 0.6 looked
+  like no gap at all. It is scaled by polarity: an open cell's cloud *is* its seam, so on
+  open cells gaps do nothing.
+- **Lacunarity (lacunosus)** turns the layer into a thin sheet, a third of the depth to the
+  lid, with one round hole per cell. Hole radius is 0.5 cells x lacunarity x vigour^¼, so a
+  hole shrinks away as its cell dies instead of popping. Billows on the sheet are cut to 40%
+  so they don't fill the holes. Three versions were wrong first. Holes punched in the deck
+  alone left 0.8% of the cloud, because a closed deck's cloud is at its centres. A blend
+  towards a holed sheet made no hole below about 0.8 on the slider. A sheet that carried
+  each cell's vigour rendered as shards and pits.
+
+**The bound needed nothing new for either.** Holes, gaps and the wave are factors of at
+most one. The sheet is a constant, so the blend stays under the same blend of the bound.
+**The slope did need something.** The density clamps the slope it uses to
+`convSlopeCap`, and the bound divides by the same cap. That makes the bound sound whatever
+the true slope. The added terms are the holes', the gaps' and the wave's own maximum
+slopes, so the clamp only bites under the warp.
+
+### The classifier
+
+| Variety | When |
+| --- | --- |
+| undulatus | wave amplitude ≥ 0.25 (Waves mode is at least 0.6); Sc only |
+| radiatus | Rolls with coherence ≥ 0.5; Cu, Sc and Ci |
+| perlucidus | Gap Fraction ≥ 0.2, or coverage below opacus |
+| lacunosus | Lacunarity ≥ 0.4, which makes the layer a deck at any polarity |
+
+**Opacus and perlucidus were called species until now.** The atlas has them as varieties
+of stratiformis, so the readout now says "Sc stratiformis opacus". When a name doesn't fit
+the panel, the atlas's abbreviations stand in, the low layer's varieties first:
+"Sc str op un, Ci uncinus".
+
+### Measured
+
+**Timings**, CLI, 640x360, 32 spp, best of 3. Scene A is the default backlit hero with Cu
+and Ci. Scene B is a cumulus field, sun at 6°, looking along it.
+
+| | time | against its base |
+| --- | --- | --- |
+| A, default | 24.95 s | build 19: 25.9 s |
+| B, default | 9.57 s | |
+| B, Rolls, coherence 0.8 | 7.56 s | -21% |
+| B, Waves | 7.75 s | -19% |
+| B, Chaotic | 12.44 s | +30% |
+| B, closed cells | 8.32 s | |
+| B, closed, Gap 0.6 | 10.07 s | +21% over closed |
+| B, Lacunarity 0.8 | 14.79 s | +55% |
+
+Rolls and Waves are faster because the same coverage lays down fewer, longer cells. Chaotic
+is slower because its warp reaches 1.8 cells, which pushes every majorant bound off the
+fixed 3x3 path onto the general loop. Gaps and holes raise the slope cap, which shortens
+the steps near walls. A lacunose sheet is also simply more cloud.
+
+**slang.convection check 7**, new:
+
+| | |
+| --- | --- |
+| switched on at the identity, against off | 0 of 100000 updrafts and 0 of 50000 densities differ |
+| Rolls: correlation one cell along the rows / across | 0.521 / 0.044 |
+| coherence 1 | 0 of 1600 centres off their row |
+| wave amplitude 1, 6800 trough points | largest updraft 0 |
+| closed deck, gap width 0 / 0.45 / 0.9 | 72.2% / 66.7% / 46.3% cloud |
+| open cells with gaps | 0 of 100000 updrafts moved |
+| lacunarity 0 / 0.25 / 0.5 / 1 | near-centre cloud 81% / 74% / 33% / 4%; seams 52% / 100% / 100% / 100% |
+
+The box-bound and 3x3-window checks (1 and 4) now also run five organized fields (rolls at
+30°, waves, the chaotic warp, gaps and holes, and everything at small cells): 0 violations
+in 3000 boxes each, and 0 of 100000 points differ between the 3x3 and 5x5 windows.
+**slang.generator**: the ice's structural bound holds in all 512 cells of an organized
+field (rows at 35°, stretch 4, a wave, the warp), and its sampled peak of 1.67 stays under
+`cellOverlapBound()`'s 3.26.
+
+**Goldens: unchanged.** The organization is off in all three, and the CPU and GPU still
+match them.
+
+**Looked at**, from 5 km looking down on a closed deck (`build/tmp/b20/final/`): Rolls
+are clean parallel streets with clear lanes, Waves are bands of stretched cells, Chaotic
+bends the rows and mixes cell sizes, Gap 0.6 opens the seams, and Lacunarity 0.8 is a
+white sheet with round holes that shows ground and shadow through them. The cirrus
+looking up: Rows Along 0 gives bands along +Z, and 90 gives bands across it.
+
+### Tests
+
+- **TestOrganization**, 6 new: the defaults are off (and so is 450°); 90° is the world
+  frame; each mode is the setting its name says; the wave varies across its crests; NaNs
+  and out-of-range expressions come out as numbers the bounds hold for; and the ice ignores
+  gaps and holes.
+- **TestClassifier**: `OrganizationNamesTheVarieties` covers each variety and the
+  abbreviation fallback. The random sweep now drives the organization too, against the
+  panel's length limit.
+- **TestFingerprint**: every OrganizationParams field on both layers moves the hash. So do
+  the hero's six fields, which this list had missed since build 15. They were hashed all
+  along; only the test was missing them.
+- **225 unit tests, 27 ctest suites, all pass.**
+
+### Known limits
+
+- **Chaotic costs 30%** on the default field, for the reason above. A tighter warp bound, or
+  a warp that moves whole cells instead of the point read, would fix it.
+- **Gap Fraction does nothing on open cells**, by design. Their cloud is the seam.
+- **The hero ignores the organization.** It is one placed cloud.
+- **Cirrus has no undulatus.** The atlas gives it none. Cirrocumulus, which has one, isn't a
+  generator here.
+- **Ice organization reads faintly at the default optical depth of 0.45.** It works, but
+  on a thin deck.
+
+### Phase 3's exit test
+
+PLAN.md's exit test is that the two-layer default (cumulus plus thin cirrus, backlit) is
+showable. It has been the default since build 17: the hero With the Field under the Ci deck,
+Sun Placement Backlit. Scene A above is that frame. **Phase 3 is done pending the host's
+look, and pareidolia (Phase 4) can start.**
+
+### What needs the host
+
+- **Two new groups**, "Ice Organization" and "Cumulus Organization", each at the end of its
+  layer. The minor bump is what makes them appear.
+- **Cumulus:** set Polarity to 1 (closed cells), raise the camera and look down. Try Rolls
+  with Row Coherence 0.8, then Gap Fraction 0.6, then Lacunarity 0.8. The readout should
+  name radiatus, perlucidus and lacunosus in turn.
+- **Build 19's items**, below, because this is the first build that carries them.
+- **Apply the effect fresh.** AE stores values by position, and the Ice Organization rows
+  were inserted mid-list, so a project saved by an earlier build reads shifted values for
+  every control after the Ice group: Cumulus, Physics, Camera. Nothing has shipped, which
+  is what makes the insert free (docs/HOST-NOTES.md).
+
+---
+
+## 2026-09-30 — THE CLOUDS' SHADOWS FALL ON THE GROUND, AND THE GROUND SEES THE SKY. Build 19, minor 9. Build 18's shadow maps are read where a ray lands on the ground. Shadowed ground then came out black, which exposed a Phase 1 shortcut: the ground had only ever been lit by the sun. It now also gets the sky dome's light, one colour per frame, integrated on the host in 3 ms.
+
+### Where build 18 stands
+
+Installed, not yet reported on. The host asked to "finish everything" and be told when
+pareidolia can start, so this build and the Organization group follow without a stop.
+
+### Build 18's first "Next" item was measured and dropped
+
+It proposed summing the air along the camera ray to remove the extra noise on the clouds.
+Measured in linear light at `--ev -4` (scene B, 320x180, 4 spp), the absolute noise was
+20.1 with the map, 19.3 with no air shadows and 21.9 with aerial perspective off. There is
+no excess to remove. What build 18 saw was a darker image, through sRGB and 8-bit
+clamping.
+
+### Shadows on the ground
+
+`groundShadow` in AirMapLib.slang: where a ray that escapes the clouds heads down, it
+lands on the flat ground at y = 0, and that point's transmittance to the sun is read from
+both layers' maps. The ground lies below every slab, so the read is slice 0, the whole
+column, the case slang.airMap already held to 0.0001 mean error. `skyRadiance` gained a
+`groundLit` argument that scales the ground's sunlit term and nothing else.
+
+**This covers the ground in view and the light the ground throws back up at the cloud
+bases.** Both are the same escaped ray.
+
+**The maps are now built whenever the sky is the environment**, not only when Cloud
+Shadows In Air is on. Turning the air's shadows off keeps the ground's.
+
+### The ground had no skylight
+
+The first render of the default backlit hero had a black foreground. The camera stands in
+the hero's shadow, and the ground's radiance in the sky model was
+`albedo / pi * sunT * irradiance * cos`: the sun and nothing else. Nothing had shown it
+before, because nothing shadowed the ground. Only the sunset golden gave a hint: its
+ground was a dark orange-brown.
+
+**The fix is one colour per frame.** The sky over flat ground is the same everywhere, so
+its irradiance there depends only on the sky's parameters. `groundSkyLightFor` in
+Shading.h integrates Shading.h's own `skyRadiance` over the upper hemisphere at altitude 0.
+It uses 32 x 64 midpoints, each weighted by its mu, with the disc left out because the
+disc is the sunlit term already. The result, times albedo / pi, rides in
+`SkyInput.groundSkyLight` and is added where a ray lands on the ground. It is not dimmed
+by the clouds' shadow. `deriveGroundSkyLight` (GroundSkyLight.cpp) caches it per thread,
+keyed on the eight sky parameters. Unlike the transmittance table, the sun is in the key,
+so dragging the sun costs one integral per change.
+
+**Measured:**
+
+| | |
+| --- | --- |
+| 32 x 64 against 128 x 256 | under 0.1% to a 45° sun, 0.49% at 85° (aureole near zenith) |
+| equal steps of mu², tried first | 1.2 to 1.4% at every sun: a √ kink at the horizon |
+| time for one integral | 2.9 to 3.0 ms |
+| sky / sun on the ground at 45°, turbidity 2.2 | 0.038 R, 0.077 G, 0.169 B |
+
+The last row is single scattering only. Real clear-sky diffuse is somewhat higher, so
+this is an underestimate, and a blue one, as it should be.
+
+**Shading.h's own `skyRadiance` does not add it.** That function is the reference
+slang.skyParity compares against, with the new term at zero. `0` adds nothing and a
+`groundLit` of 1 multiplies exactly, so the check stays bitwise.
+
+### Measured
+
+**Goldens, in two steps.** The mean change per band against the build 18 references, in
+8-bit levels:
+
+| | upper half | lower half (ground) |
+| --- | --- | --- |
+| midday, shadows only | -0.01 | -0.87 to -1.00 (the cirrus deck's shadow) |
+| horizon, shadows only | 0.00 | -0.09 near the horizon, 0 close up |
+| sunset, shadows only | 0 | 0 |
+| midday, + skylight | +0.03 | +6.6 |
+| horizon, + skylight | +0.03 | +12.8 |
+| sunset, + skylight | +0.01 | +32.5 |
+
+Every changed channel went the expected way: darker for shadows, brighter for skylight.
+Sunset doesn't move with shadows, because a 2° sun puts the cirrus's shadow about 250 km
+away, past the 40 km Render Distance. Horizon's shadow is likewise only on the far ground.
+The small rise in the sky half is the cirrus lit from below by the brighter ground.
+Sunset's ground went from near black to a dim neutral grey-brown, which is ground lit
+mostly by the dome. The goldens were re-blessed after both steps, and the CPU and GPU
+match them.
+
+**Cost: nothing measurable.** A high view over the cumulus field (below) took 8.3 s with
+ground shadows against 8.2 s without. The default backlit hero at 640x360 with 32 spp
+denoised took 25.9 s, against 26.2 s before the skylight.
+
+**Looked at:** `--cumulus --altitude 6000 --pitch -35 --sun-el 40 --sun-az 200`. Every
+cloud has its shadow on the ground, offset away from the sun, with soft edges. Through
+6 km of air they read blue, as in aerial photos.
+
+### Tests
+
+- **slang.airMap check 6**: rays from above the core land on the ground. The error against
+  the closed form is 0.0003 to 0.0008 mean and 0.0046 at worst, and rays going up answer
+  exactly 1. The first version aimed rays 45° either side, which put only 112 of 4000
+  landings in a 300 m core's shadow at a high sun. It now aims within 1 km of the
+  shadow, which puts 1466 to 2719 in shadow.
+- **slang.skyParity** is still bitwise against Shading.h (its SkyInput is now zeroed
+  first). It gained a ground-skylight check: with the term set, no upward ray changes a
+  bit, all 7160 downward rays gain between 0 and the term, and straight down from 2 m
+  gains 0.99992 of it.
+- **TestAtmosphere**, 2 new tests: the grid converges, and the result behaves like
+  skylight. A black ground gets none, a sun at -30° gives exactly 0, it is bluer than it
+  is red, and against the direct beam at 45° it is between 0.02 and 0.5 in every channel.
+- **218 unit tests, 27 ctest suites, all pass.**
+
+### Known limits
+
+- **The clouds don't block the skylight.** Ground under a cloud still sees the whole dome
+  as clear sky, and it doesn't see the cloud's own light. Under a thick deck the shadowed
+  ground is too bright and too blue.
+- **One value for all the ground in view.** A patch 40 km off sees the sun 0.36° lower.
+- **Single-scattering sky**, so the skylight is on the low side.
+
+### What needs the host
+
+- **The default backlit hero changed visibly.** The foreground ground is in the hero's
+  shadow now: a dim blue-grey where it was sunlit brown.
+- **Look down on a cumulus field** (raise the camera, pitch down): the shadows should sit
+  under their clouds. Turn Cloud Shadows In Air off, and the ground's shadows should stay.
+- **A low sun**: the ground is lit by the dome and is no longer near black.
+- **Saved build 18 projects open unchanged**, because no parameter moved.
+
+---
+
+## 2026-09-30 — THE CLOUDS' SHADOWS IN THE AIR COME FROM A MAP. Build 18, minor 9. Build 17's shadow ray per camera ray cost 20 to 43% of the frame and speckled the sky. A deep shadow map per layer, built once per frame, makes those shadows free. They are also exact in colour now, and the sky's noise at 1 spp denoised is halved. On the way, nvcc accepted a host function call from device code, which returned 0 and switched the map off on the GPU only.
+
+### Where build 17 stands
+
+The host committed build 17 and asked to move on. That is recorded as ACCEPTED, NOT
+MEASURED: there was no report on backlit-by-default, the haze or the readout. The next
+item was the one build 17 queued: the shadow map.
+
+### What it is
+
+`src/kernel/slang/AirMapLib.slang`. One map per layer, because the transmittance through
+two media is the product of the two:
+
+- **Texels** lie on the layer's bottom plane, on a grid laid out along the sun's azimuth.
+- **Each texel is a column**: the sun ray that crosses the plane there, climbing through the
+  slab. There are 16 slices for the cumulus and 8 for the cirrus, at equal steps of
+  altitude. Slice k holds the transmittance to the sun from where that ray is at slice k's
+  altitude.
+- **A lookup** slides the point along the sun to the plane to find its column, and its
+  altitude picks the slice. Below the slab it reads slice 0, which is exact but for the
+  bilinear read. Inside the slab it interpolates between slices. Above the slab it is 1.
+- **The build** is a deterministic midpoint march from the top of each column down. It stops
+  at optical depth 12, below which the column is black. One thread per column on the GPU,
+  a thread pool on the CPU, both through the same generated Slang.
+- **`airShadowLoss`** takes the shadowed airlight off the sky (for a ray that escapes) or
+  off `airSegment`'s airIn (for one that hits a cloud). It uses 48 jittered quadratic
+  steps over the stretch of the ray where a shadow can fall, and it has the same integrand
+  as the sky. Where nothing is shadowed the loss is exactly zero, so the sky is untouched
+  bit for bit.
+- **Build 17's shadow ray** is kept behind `--air-shadow-rays` (RenderRequest::airShadowMap)
+  and is also the fallback below a 1° sun, where the grid would be stretched 57 times the
+  slab's depth.
+
+**The grid covers exactly what the density can reach.** The host fills a Scene as a sample
+does and reads each layer's slab, hero box and Render Distance off the kernel's own Medium
+(`AirMapHost.h`). The box is that footprint stretched away from the sun by depth /
+tan(elevation). The texels are square, from a budget of 512² for the cumulus and 256² for
+the cirrus. A lone hero's map is a few kilometres across, with texels of tens of metres
+(TestAirMapPlan holds a hero's under 40 m). The field's cumulus map in scene B below has
+169 m texels.
+
+**Built once per frame, not per launch.** The cache is thread-local and keyed on the bytes a
+column reads: both media, the drift table and the plan. It is compared whole, so a key
+cannot collide. The bands and sample chunks of a frame, and an exposure change, all hit
+it. On the GPU the key also records the allocation, because DeviceScratch reallocates when
+it grows.
+
+### The GPU bug: a host function in device code, accepted by nvcc
+
+The first GPU renders with the map were BYTE-IDENTICAL to renders with no air shadows at
+all. On the CPU the map worked. On the GPU it had been built correctly, with slice means
+matching the CPU's to four places. A device printf showed every map's buffer count as 0,
+so every lookup answered 1.
+
+`fillAirMap` in SlangBridge.h runs on the device and computed the count with
+`airMapFloats()`, a plain host inline in AirMapPlan.h. nvcc compiled a host function
+called from `__host__ __device__` code without an error, and on the device it came back 0.
+The product is now written out, and the comment says why.
+
+### Measured
+
+Two scenes, 640x360 on the RTX 2070 SUPER. A is the backlit hero: `--orbit 0 --hero 1
+--sun-placement backlit --render-distance 40000 --turbidity 5`. B is a low sun into a cumulus
+field: `--cumulus --sun-el 6 --sun-az 180 --heading 180 --pitch 4 --turbidity 5
+--render-distance 40000`.
+
+| | shadow ray (b17) | map (b18) | no air shadows |
+| --- | --- | --- | --- |
+| A, 32 spp | 29.9 s | 25.9 s | 25.0 s |
+| A, 128 spp | 123.0 s | 99.7 s | 98.6 s |
+| B, 32 spp | 14.2 s | 10.2 s | 9.9 s |
+| B, 128 spp | 57.1 s | 41.2 s | 40.0 s |
+
+**The map build** is 0 to about 20 ms a frame on the GPU (the difference between 32x18
+renders, min of 3, over four scenes). On the CPU reference it is 0.7 to 3.3 s. That is
+nothing beside a CPU path trace, and the whole ctest run still takes 46 s.
+
+**Noise**, RMSE against each estimator's own 128-spp reference. Sky pixels are those a
+cloud-free render matches within 4 levels, above the horizon. Cloud pixels are those it
+misses by 12 or more:
+
+| 1 spp denoised | sky A | sky B | clouds A | clouds B |
+| --- | --- | --- | --- | --- |
+| shadow ray (b17) | 8.11 | 12.24 | 21.4 | 17.5 |
+| map (b18) | **4.95** | **6.09** | 21.0 | 16.3 |
+| no air shadows | 3.94 | 3.73 | 16.0 | 10.4 |
+
+Raw at 1 spp, the whole of B: 67.4 with the ray, 37.3 with the map, 23.0 with no shadows.
+
+**The map's own estimator adds no noise the frame can show.** Pinning its jitter at 0.5 left
+both the sky and the clouds unchanged to the second decimal. Four map reads per step, with
+golden-ratio offsets, also changed nothing and cost up to 5%, so they were reverted.
+
+**What remains above "no air shadows" is delta tracking's escape-or-collide coin toss.** The
+air in front of a backlit cloud is now correctly dark, so a sample that collides and one
+that escapes differ by more than they did. The excess sits on the clouds, not the sky (a
+difference image shows it). It is the variance cameraSegmentSun removed for the sun, and
+the same cure would work for the air. See "Next".
+
+### Colour: exact now, where build 17 averaged
+
+At 128 spp the two estimators agree in luminance to within one level in every third of
+both frames. In the sky band the map is redder by 4.3 and bluer by 4.5 to 6.6. Build 17's
+estimator was unbiased in luminance only: it gave a shadowed stretch the whole segment's
+average colour. The map colours each step with its own. The direction fits shadows lying
+in the far, reddened air towards a low sun, where build 17 took out too little red.
+
+### Tests
+
+- **slang.airMap** (new, 8 s) checks three suns, including a 5° sun on a diagonal azimuth:
+  1. **Lookups against the closed form** of a Gaussian core (an erf), 40,000 points. Below
+     the slab: mean |ΔT| 0.0001, 99th percentile ≤ 0.003. Inside the slab: mean ≤ 0.0015,
+     99th ≤ 0.018.
+  2. **The loss against an independent march** of 20,000 fixed midpoints: worst 0.018% of
+     the loss, over 360 rays.
+  3. **Rays that never meet the grid lose exactly nothing.**
+  4. **No maps, no loss.**
+  5. **The build is deterministic.**
+- **TestAirMapPlan** (9 new unit tests): every cloud point's shadow lands on the grid, for
+  30 suns over the field and 9 over a hero. The box is the footprint plus the stretch, the
+  texels are square within budget, and the column's step budget holds. Also the 1° cutoff,
+  the shared buffer's offsets and absent layers.
+- **With `--air-shadow-rays`, all three goldens reproduce build 17's references byte for
+  byte on the CPU.** Nothing else in the renderer moved. The goldens were then re-blessed
+  from the map after inspection. The band means moved by at most 2.3 levels (sunset's blue),
+  and the CPU and GPU renders agree.
+- **216 unit tests, 27 ctest suites, all pass.**
+
+### Known limits
+
+- **Inside the slab at a low sun** the slices are far apart along the ray: 1.4 km at 5°.
+  Air between towers can then get a smeared shadow, and the worst point in slang.airMap
+  is off by 0.58. Air below the base, which is most of what a ground camera sees, is
+  unaffected.
+- **Below a 1° sun** the renderer falls back to build 17's shadow ray.
+- **Memory:** 19 MB of VRAM per render thread for the two maps, and the same in host
+  memory on the CPU path.
+
+### Next
+
+1. *(Measured and dropped in build 19: the noise was not what this says. See that
+   entry.)* **The air along the camera ray as a sum, not a coin toss.** This is the cloud-pixel noise
+   above. It uses cameraSegmentSun's own ratio-tracked transmittance, applied to the
+   shadowed airlight, so the air stops depending on where the path happens to collide.
+2. **Cloud shadows on the ground.** The map makes this one lookup where the sky's ray hits
+   the ground, and it would also darken the ground light that reaches cloud bases.
+3. **The Organization group**, which is the rest of Phase 3.
+
+### What needs the host
+
+- **Does Cloud Shadows In Air now look right and cost nothing?** Try a backlit hero, and a
+  low sun into the field for crepuscular rays.
+- **Draft at 1 sample**: the sky should be cleaner than build 17. The clouds are about the
+  same.
+- **Saved build 17 projects open unchanged**, because no parameter moved.
+
+---
+
 ## 2026-09-30 — THE AIR IN FRONT OF THE CLOUD, THE SUN THAT FOLLOWS THE LENS, AND A NAME FOR THE SKY. Build 17, minor 9. The first three of Phase 3's remaining items. On the way, the sky's own march turned out to have been 16.5% dark at the horizon since Phase 1, and the Cloud Shadows In Air checkbox turned out never to have been read.
 
 ### Where build 16 stands

@@ -107,8 +107,53 @@ constexpr int kRussianRouletteStart = 4;
 // `V` supplies the backend's vector constructors: V::v2(x, y), V::v3(x, y, z) and
 // V::i3(x, y, z). It is a type rather than three arguments so the call site reads as
 // "fill these, for this backend".
+// One layer's shadow map, from the plan and the buffer both layers share.
+//
+// EVERY FIELD IS WRITTEN, the absent case included, for the reason the unread medium
+// fields are: this struct travels to a GPU. An absent map is an EMPTY buffer, which
+// layerMapTransmittance answers with 1.
+template <class V, class MapT>
+MT_DEVICE void fillAirMap(const AirMapGeometry& g, const void* buffer, MapT& m) {
+    const bool have = buffer != nullptr && g.present != 0;
+    m.smTexels_0.data  = have ? const_cast<float*>(static_cast<const float*>(buffer)) + g.offset
+                              : nullptr;
+    // THE PRODUCT WRITTEN OUT, NOT airMapFloats(): that is a host function, and this runs
+    // on the device. nvcc accepted the call from here without an error and it came back
+    // 0, so every map on the GPU was empty, which answers 1, and the air had no shadows.
+    m.smTexels_0.count = have ? static_cast<size_t>(g.dimU) * static_cast<size_t>(g.dimV)
+                                  * static_cast<size_t>(g.slices)
+                              : 0;
+
+    m.smSun_0    = V::v3(g.sunX, g.sunY, g.sunZ);
+    m.smCentre_0 = V::v2(g.centreX, g.centreZ);
+    m.smAxisU_0  = V::v2(g.axisUX, g.axisUZ);
+    m.smLo_0     = V::v2(g.loU, g.loV);
+    m.smTexel_0  = V::v2(g.texelU, g.texelV);
+    m.smDimU_0   = g.dimU;
+    m.smDimV_0   = g.dimV;
+    m.smSlices_0 = g.slices;
+    m.smBottom_0 = g.bottom;
+    m.smTop_0    = g.top;
+    m.smStep_0   = g.step;
+}
+
+// One layer's Organization group, resolved on the host (src/engine/Organization.h).
+// EVERY FIELD WRITTEN, the off case included, for the reason the absent map's are.
+template <class V, class OrgT>
+MT_DEVICE void fillOrganization(const cloud::OrganizationResolved& o, OrgT& out) {
+    out.ogOn_0        = o.on ? 1 : 0;
+    out.ogAxis_0      = V::v2(o.axisX, o.axisZ);
+    out.ogStretch_0   = o.stretch;
+    out.ogCoherence_0 = o.coherence;
+    out.ogWaveK_0     = V::v2(o.waveKX, o.waveKZ);
+    out.ogWaveAmp_0   = o.waveAmplitude;
+    out.ogWarp_0      = o.warp;
+}
+
+// HOST AND DEVICE, because the host fills a Scene of its own to plan and key the shadow
+// maps from -- see AirMapHost.h. Nothing in here reaches the generated code.
 template <class V, class SceneT, class PhaseT>
-MT_RENDER void fillSlangScene(const RenderRequest& req, SceneT& s, PhaseT& ph) {
+MT_DEVICE void fillSlangScene(const RenderRequest& req, SceneT& s, PhaseT& ph) {
     const cloud::FieldParams& f   = req.field;
     const cloud::IceParams&   ice = f.ice;
 
@@ -128,6 +173,7 @@ MT_RENDER void fillSlangScene(const RenderRequest& req, SceneT& s, PhaseT& ph) {
     s.medium_0.gen_0.opticalDepth_0 = ice.opticalDepth;
     s.medium_0.gen_0.timeSeconds_0  = f.timeSeconds;
     s.medium_0.gen_0.octaves_0      = ice.detailOctaves;
+    fillOrganization<V>(req.iceOrganization, s.medium_0.gen_0.gnOrg_0);
 
     // -----------------------------------------------------------------------
     // The medium
@@ -243,6 +289,9 @@ MT_RENDER void fillSlangScene(const RenderRequest& req, SceneT& s, PhaseT& ph) {
         const_cast<float*>(static_cast<const float*>(req.transmittanceBuffer));
     s.environment_0.sky_0.transmittanceLut_0.count =
         req.transmittanceBuffer ? static_cast<size_t>(cloud::kTransmittanceFloats) : 0;
+    s.environment_0.sky_0.groundSkyLight_0   = V::v3(req.groundSkyLight[0],
+                                                     req.groundSkyLight[1],
+                                                     req.groundSkyLight[2]);
     s.environment_0.envMode_0                = 1;
 
     // Mode 0's uniform radiance, unread at mode 1 and zeroed rather than left as
@@ -284,6 +333,13 @@ MT_RENDER void fillSlangScene(const RenderRequest& req, SceneT& s, PhaseT& ph) {
     // In Air checkbox asks. That checkbox was hashed into the fingerprint from Phase 1 and
     // read by nothing until build 17. See Scene.aerialMode in BounceLib.slang.
     s.aerialMode_0 = !req.aerialPerspective ? 0 : (atm.cloudShadowsInMedium ? 2 : 1);
+
+    // THE CLOUDS' SHADOW MAPS, when the render entry point built them: the air's shadows at
+    // aerialMode 2 and the ground's always. With no buffer the plan is off, the ground is
+    // unshadowed, and the air's shadows fall back to build 17's shadow ray.
+    s.airMapOn_0 = (req.airMaps.on != 0 && req.airMapBuffer != nullptr) ? 1 : 0;
+    fillAirMap<V>(req.airMaps.layer[0], req.airMapBuffer, s.airMapIce_0);
+    fillAirMap<V>(req.airMaps.layer[1], req.airMapBuffer, s.airMapCu_0);
 
     // -----------------------------------------------------------------------
     // The second layer: cellular convection
@@ -330,6 +386,12 @@ MT_RENDER void fillSlangScene(const RenderRequest& req, SceneT& s, PhaseT& ph) {
     s.medium2_0.conv_0.cvHeroTop_0    = cd.heroTop;
     s.medium2_0.conv_0.cvHeroSeed_0   = V::v3(cd.heroSeedX, cd.heroSeedY, cd.heroSeedZ);
     s.medium2_0.conv_0.cvHeroBillow_0 = cd.heroBillow;
+
+    // HOW THE CELLS ARE ARRANGED (build 20). The widths only mean anything when the
+    // organization is on, and the resolve leaves them zero when it is not.
+    fillOrganization<V>(cd.organization, s.medium2_0.conv_0.cvOrg_0);
+    s.medium2_0.conv_0.cvGapWidth_0  = cd.organization.gapWidth;
+    s.medium2_0.conv_0.cvLacunarity_0 = cd.organization.lacunarity;
 
     // THE SLAB IS THE TALLEST THE CLOUD CAN BE: the tallest tower or the hero, plus the
     // biggest outward billow. convectionDensity() returns zero outside exactly this range.

@@ -50,6 +50,9 @@ add_executable(plugin_tests
     # The classifier readout. The contract is AE's 31-character parameter name,
     # swept across the parameter space; the rest pin each atlas rule to a scene.
     unit/TestClassifier.cpp
+    # The Organization group's host half: each control lands where the kernel reads
+    # it, each mode is its setting, and the defaults are off.
+    unit/TestOrganization.cpp
 
     # The output conversion: 8, 16 and 32 bpc, the sRGB curve and the alpha rule.
     # PLAN.md's Phase 1 exit asks for all three bit depths to be CORRECT, and until
@@ -69,6 +72,10 @@ add_executable(plugin_tests
     # stored numbers. Every way of getting a lookup table wrong produces a smooth,
     # plausible, wrong sky -- see the file's header for the four that matter.
     unit/TestAtmosphere.cpp
+
+    # Where the clouds' shadow maps lie. The contract is coverage: a lookup off the grid
+    # answers "lit", so a grid that misses part of a shadow fails silently in a render.
+    unit/TestAirMapPlan.cpp
 
     unit/TestFramework.h
 )

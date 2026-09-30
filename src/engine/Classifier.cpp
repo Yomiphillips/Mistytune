@@ -1,9 +1,11 @@
 #include "Classifier.h"
 
 #include "ConvectionField.h"
+#include "Organization.h"
 
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 
 namespace plugin::cloud {
 
@@ -48,6 +50,14 @@ constexpr Real kFloccusBelow = 600.0f;   // m
 constexpr Real kUncinusTurn  = 15.0f;   // degrees, top knot to bottom knot
 constexpr Real kUncinusShear = 10.0f;   // m/s, top knot to bottom knot
 
+// THE ORGANIZATION GROUP'S VARIETIES (build 20), each where the look reads as the word.
+// A wave a quarter deep is visible bands; lacunarity 0.4 has opened holes in most cells
+// (slang.convection measures the share); a gap of 0.2 on the slider opens seams wide
+// enough to see sky through. Radiatus is kRadiatusCoherence in Organization.h.
+constexpr Real kUndulatusFrom  = 0.25f;
+constexpr Real kLacunosusFrom  = 0.4f;
+constexpr Real kPerlucidusGap  = 0.2f;
+
 const char* cumulusSpecies(Real height, Real width) {
     const Real w = width > Real(1) ? width : Real(1);
     const Real aspect = height / w;
@@ -64,6 +74,13 @@ Real bearingDifference(Real a, Real b) {
     double d = std::fmod(std::fabs(static_cast<double>(a) - static_cast<double>(b)), 360.0);
     if (d > 180.0) d = 360.0 - d;
     return static_cast<Real>(d);
+}
+
+// ROWS THE EYE READS AS PARALLEL BANDS: Rolls, straightened. Radiatus, in any genus that
+// has it. The rows' convergence towards the horizon is the camera's, and needs no rule.
+bool inRows(const OrganizationParams& p, const OrganizationResolved& o) {
+    return o.on && p.mode == static_cast<int32_t>(OrganizationMode::Rolls) &&
+           o.coherence >= kRadiatusCoherence;
 }
 
 LayerClass classifyLow(const FieldParams& field, bool& tooDry) {
@@ -84,21 +101,40 @@ LayerClass classifyLow(const FieldParams& field, bool& tooDry) {
     deriveConvection(field, cd);
     if (!cd.present) return {};
 
-    // THE HERO NAMES THE SHOT. It is a single tower whatever the polarity, because the
-    // hero is the one cloud that got all the way up.
+    // THE HERO NAMES THE SHOT. It is a single tower whatever the polarity or the
+    // organization, because the hero is the one cloud that got all the way up.
     if (cd.heroTop > Real(1)) {
         return { CloudGenus::Cumulus, cumulusSpecies(cd.heroTop, c.heroWidth) };
     }
 
     if (clamp01(c.coverage) < kNoCoverage) return {};
 
+    const OrganizationResolved& org = cd.organization;
     const Real cell = c.cellSize > Real(1) ? c.cellSize : Real(1);
-    if (clamp01(c.polarity) >= kStratocumulusFrom) {
-        if (cd.depth / cell >= kCongestusFrom)       return { CloudGenus::Stratocumulus, "castellanus" };
-        if (clamp01(c.coverage) >= kOpacusFrom)      return { CloudGenus::Stratocumulus, "opacus" };
-        return { CloudGenus::Stratocumulus, "perlucidus" };
+
+    // A SHEET WITH HOLES IS A DECK whatever the polarity: lacunarity fills the seams of
+    // open cells too (convOrganize), and the atlas files lacunosus under the layer genera.
+    const bool lacunose = org.lacunarity >= kLacunosusFrom;
+
+    if (clamp01(c.polarity) >= kStratocumulusFrom || lacunose) {
+        if (cd.depth / cell >= kCongestusFrom) return { CloudGenus::Stratocumulus, "castellanus" };
+
+        LayerClass sc{ CloudGenus::Stratocumulus, "stratiformis" };
+        if (lacunose) {
+            sc.variety[0] = "lacunosus";
+            return sc;
+        }
+        const bool gaps = clamp01(c.organization.gapFraction) >= kPerlucidusGap;
+        sc.variety[0] = gaps || clamp01(c.coverage) < kOpacusFrom ? "perlucidus" : "opacus";
+        if (inRows(c.organization, org))                 sc.variety[1] = "radiatus";
+        else if (org.waveAmplitude >= kUndulatusFrom)    sc.variety[1] = "undulatus";
+        return sc;
     }
-    return { CloudGenus::Cumulus, cumulusSpecies(cd.depth, cell) };
+
+    // Cumulus's only variety is radiatus: cloud streets.
+    LayerClass cu{ CloudGenus::Cumulus, cumulusSpecies(cd.depth, cell) };
+    if (inRows(c.organization, org)) cu.variety[0] = "radiatus";
+    return cu;
 }
 
 LayerClass classifyHigh(const FieldParams& field) {
@@ -108,13 +144,22 @@ LayerClass classifyHigh(const FieldParams& field) {
         return {};
     }
 
-    if (ice.opticalDepth >= kSpissatusFrom) return { CloudGenus::Cirrus, "spissatus" };
-    if (ice.streakLength < kFloccusBelow)    return { CloudGenus::Cirrus, "floccus" };
+    LayerClass ci{ CloudGenus::Cirrus, "fibratus" };
+    if (ice.opticalDepth >= kSpissatusFrom) {
+        ci.species = "spissatus";
+    } else if (ice.streakLength < kFloccusBelow) {
+        ci.species = "floccus";
+    } else {
+        const Real turn  = bearingDifference(ice.shear.bearing[0], ice.shear.bearing[kShearKnots - 1]);
+        const Real shear = std::fabs(ice.shear.speed[0] - ice.shear.speed[kShearKnots - 1]);
+        if (turn >= kUncinusTurn || shear >= kUncinusShear) ci.species = "uncinus";
+    }
 
-    const Real turn  = bearingDifference(ice.shear.bearing[0], ice.shear.bearing[kShearKnots - 1]);
-    const Real shear = std::fabs(ice.shear.speed[0] - ice.shear.speed[kShearKnots - 1]);
-    if (turn >= kUncinusTurn || shear >= kUncinusShear) return { CloudGenus::Cirrus, "uncinus" };
-    return { CloudGenus::Cirrus, "fibratus" };
+    // Cirrus radiatus: the generating heads in parallel bands.
+    if (inRows(ice.organization, resolveOrganization(ice.organization, false))) {
+        ci.variety[0] = "radiatus";
+    }
+    return ci;
 }
 
 const char* genusName(CloudGenus g) {
@@ -138,6 +183,35 @@ const char* genusAbbrev(CloudGenus g) {
     return "";
 }
 
+// THE ATLAS'S ABBREVIATIONS FOR SPECIES AND VARIETIES, for when even the genus
+// abbreviations leave the readout too long. A word it does not list is kept whole.
+const char* wordAbbrev(const char* word) {
+    static const char* const table[][2] = {
+        { "humilis", "hum" },      { "mediocris", "med" },   { "congestus", "con" },
+        { "stratiformis", "str" }, { "castellanus", "cas" }, { "fibratus", "fib" },
+        { "uncinus", "unc" },      { "spissatus", "spi" },   { "floccus", "flo" },
+        { "opacus", "op" },        { "perlucidus", "pe" },   { "undulatus", "un" },
+        { "radiatus", "ra" },      { "lacunosus", "la" },
+    };
+    for (const auto& row : table) {
+        if (std::strcmp(row[0], word) == 0) return row[1];
+    }
+    return word;
+}
+
+// ONE LAYER'S NAME AT A LEVEL OF SHORTENING: 0 all in full; 1 the genus abbreviated;
+// 2 the varieties too; 3 the species too.
+void layerText(const LayerClass& l, int level, char* out, size_t cap) {
+    const char* genus   = level >= 1 ? genusAbbrev(l.genus) : genusName(l.genus);
+    const char* species = level >= 3 ? wordAbbrev(l.species) : l.species;
+    std::snprintf(out, cap, "%s %s", genus, species);
+    for (const char* v : l.variety) {
+        if (!v || !*v) continue;
+        const size_t n = std::strlen(out);
+        std::snprintf(out + n, cap - n, " %s", level >= 2 ? wordAbbrev(v) : v);
+    }
+}
+
 } // namespace
 
 SkyClass classifySky(const FieldParams& field) {
@@ -152,26 +226,40 @@ void describeSky(const SkyClass& sky, char* out, int capacity) {
 
     // NEVER MORE THAN AE CAN SHOW, whatever the caller's buffer.
     const int limit = capacity - 1 < kReadoutMaxChars ? capacity - 1 : kReadoutMaxChars;
-    char text[64];
+    char text[128];
 
     const bool low  = sky.low.genus  != CloudGenus::None;
     const bool high = sky.high.genus != CloudGenus::None;
 
-    if (low && high) {
-        std::snprintf(text, sizeof(text), "%s %s, %s %s",
-                      genusAbbrev(sky.low.genus), sky.low.species,
-                      genusAbbrev(sky.high.genus), sky.high.species);
-    } else if (low) {
-        std::snprintf(text, sizeof(text), "%s %s", genusName(sky.low.genus), sky.low.species);
-    } else if (high && sky.tooDryForCumulus) {
-        std::snprintf(text, sizeof(text), "%s %s (too dry for Cu)",
-                      genusAbbrev(sky.high.genus), sky.high.species);
-    } else if (high) {
-        std::snprintf(text, sizeof(text), "%s %s", genusName(sky.high.genus), sky.high.species);
-    } else if (sky.tooDryForCumulus) {
-        std::snprintf(text, sizeof(text), "No cloud: too dry for Cu");
-    } else {
-        std::snprintf(text, sizeof(text), "Clear sky");
+    // THE LONGEST FORM THAT FITS: full names where there is room, the atlas's
+    // abbreviations where there is not. Two layers always abbreviate their genera, as
+    // they did before varieties existed, so the default sky reads the same. The LOW layer
+    // is shortened first, since it is the one with varieties to spare: "Sc str op un,
+    // Ci uncinus" rather than "Sc str op un, Ci unc".
+    const bool shared = (low && high) || (high && sky.tooDryForCumulus);
+    static const int kSteps[][2] = { { 0, 0 }, { 1, 1 }, { 2, 1 }, { 3, 1 }, { 3, 2 }, { 3, 3 } };
+    for (int step = shared ? 1 : 0; step < 6; ++step) {
+        // One layer alone walks its own levels, 0 to 3, with whichever column is its own.
+        const int lowLevel  = shared ? kSteps[step][0] : (step < 4 ? step : 3);
+        const int highLevel = shared ? kSteps[step][1] : (step < 4 ? step : 3);
+        char a[64], b[64];
+        if (low)  layerText(sky.low, lowLevel, a, sizeof(a));
+        if (high) layerText(sky.high, highLevel, b, sizeof(b));
+
+        if (low && high) {
+            std::snprintf(text, sizeof(text), "%s, %s", a, b);
+        } else if (low) {
+            std::snprintf(text, sizeof(text), "%s", a);
+        } else if (high && sky.tooDryForCumulus) {
+            std::snprintf(text, sizeof(text), "%s (too dry for Cu)", b);
+        } else if (high) {
+            std::snprintf(text, sizeof(text), "%s", b);
+        } else if (sky.tooDryForCumulus) {
+            std::snprintf(text, sizeof(text), "No cloud: too dry for Cu");
+        } else {
+            std::snprintf(text, sizeof(text), "Clear sky");
+        }
+        if (static_cast<int>(std::strlen(text)) <= limit) break;
     }
 
     int n = 0;

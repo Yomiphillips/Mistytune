@@ -68,6 +68,13 @@ public struct ConvectionInput
     // the field's. A cloud twice a cell's width is built from thermals about twice as
     // big, and with the field's lobes a 4 km hero read as a beehive of small ones.
     float  cvHeroBillow;
+
+    // HOW THE CELLS ARE ARRANGED (build 20): the Organization group, which the hero
+    // ignores. Zero is none, for this and for both widths, so a zeroed input is still
+    // the field as it was. The widths are the deck's own: see convOrganize.
+    Organization cvOrg;
+    float  cvGapWidth;     // seams clear where a cell's centre-ness is under this
+    float  cvLacunarity;   // 0..1: towards a sheet with round holes
 };
 
 // ---------------------------------------------------------------------------
@@ -182,7 +189,16 @@ static const uint kConvSaltLife   = 0xb5297a4du;
 // One cell
 // ---------------------------------------------------------------------------
 
-public float2 convCellCentre(int2 slot)
+// THE JITTER ACROSS THE ROWS SHRINKS WITH COHERENCE, and every layout that allows was
+// one the full jitter allowed already, so the 3x3 argument above only gets more room.
+public float2 convCellCentre(ConvectionInput c, int2 slot)
+{
+    float2 j = hash22(slot, kConvSaltCentre) - 0.5f;
+    return float2(slot) + 0.5f + j * orgJitter(c.cvOrg, kConvJitter);
+}
+
+// ...and the same centre with no organization, for the unorganized updraft's own loop.
+float2 convCellCentrePlain(int2 slot)
 {
     float2 j = hash22(slot, kConvSaltCentre) - 0.5f;
     return float2(slot) + 0.5f + j * kConvJitter;
@@ -245,9 +261,23 @@ public float convBump(float d2, float reach)
 // the top" into "how far from the wall": see convSurfaceDistance. It is exact wherever
 // the kernels' order does not change, which is almost everywhere; where it does, the
 // field has a crease and either side's slope is an honest answer.
+//
+// THREE SPECIALISATIONS, CHOSEN ONCE PER CALL: ORG 0 is the field before build 20, with
+// none of the Organization group's code in it; ORG 1 is organized without Lacunarity; ORG
+// 2 carries Lacunarity's holes through the lattice loop as well. MEASURED: with one body
+// serving all, the default scenes were 4% slower with the group switched OFF, and the
+// organized path at its identity cost 15% -- state carried through the lattice loop costs
+// registers in the hottest function there is, whether or not a branch is taken.
 public float convUpdraftGrad(ConvectionInput c, float2 q, out float2 grad)
 {
-    float2 g  = q / c.cvSpacing;
+    if (c.cvOrg.ogOn == 0)       return convUpdraftGradT<0>(c, q, grad);
+    if (c.cvLacunarity <= 0.0f)  return convUpdraftGradT<1>(c, q, grad);
+    return convUpdraftGradT<2>(c, q, grad);
+}
+
+float convUpdraftGradT<let ORG : int>(ConvectionInput c, float2 q, out float2 grad)
+{
+    float2 g  = ORG != 0 ? orgPattern(c.cvOrg, q, c.cvSpacing) : q / c.cvSpacing;
     int2   gi = int2(floor(g));
 
     float oTop = 0.0f, oNext = 0.0f;   // the short kernels' two largest: the rims
@@ -258,6 +288,10 @@ public float convUpdraftGrad(ConvectionInput c, float2 q, out float2 grad)
     float ro2 = kConvReachOpen * kConvReachOpen;
     float rk2 = kConvReachClosed * kConvReachClosed;
 
+    // LACUNARITY'S HOLES, one round one per cell: the least of the cells' factors here.
+    float  keep  = 1.0f;
+    float2 gKeep = float2(0.0f, 0.0f);
+
     for (int j = -1; j <= 1; ++j)
     {
         for (int i = -1; i <= 1; ++i)
@@ -267,10 +301,12 @@ public float convUpdraftGrad(ConvectionInput c, float2 q, out float2 grad)
             float vig = convVigour(c, slot);
             if (vig <= 0.0f) continue;
 
-            float2 d  = g - convCellCentre(slot);
+            float2 d  = g - (ORG != 0 ? convCellCentre(c, slot) : convCellCentrePlain(slot));
             float  d2 = dot(d, d);
             float  ko = vig * convBump(d2, kConvReachOpen);
             float  kk = vig * convBump(d2, kConvReachClosed);
+
+            if (ORG == 2) convHole(c, d, d2, vig, keep, gKeep);
 
             // d/dg of vig (1 - d2/R2)^2 is -4 vig (1 - d2/R2) d / R2.
             float2 gko = d2 < ro2 ? d * (-4.0f * vig * (1.0f - d2 / ro2) / ro2) : float2(0.0f, 0.0f);
@@ -291,9 +327,180 @@ public float convUpdraftGrad(ConvectionInput c, float2 q, out float2 grad)
     float2 gOpen   = openRaw < 1.0f ? goNext / kConvOpenNorm : float2(0.0f, 0.0f);
     float2 gClosed = gkTop - gkNext;
 
+    if (ORG != 0)
+    {
+        return convOrganize(c, q, kTop, kNext, gkTop, gkNext, keep, gKeep,
+                            lerp(openField, closedField, c.cvPolarity),
+                            lerp(gOpen, gClosed, c.cvPolarity), grad);
+    }
+
     // Per slot width, to per metre.
     grad = lerp(gOpen, gClosed, c.cvPolarity) / c.cvSpacing;
     return lerp(openField, closedField, c.cvPolarity);
+}
+
+// ===========================================================================
+// THE ORGANIZATION GROUP'S LAST STEP: gaps, holes and the wave, on an updraft `w` whose
+// gradient in lattice units is `gp`. Returns the organized updraft and its gradient per
+// metre. kTop, kNext and their gradients are the long kernels' two largest at the point.
+//
+// A CELL'S CENTRE-NESS is 1 - kNext / kTop: near one at a cell's centre, where its own
+// kernel is alone, and zero on the seam between two cells, where the two largest are
+// equal. It does not care how vigorous the cell is, which is what makes a threshold on
+// it the same shape of gap or hole in every cell.
+//
+//   LACUNARITY     turns the layer into a THIN SHEET WITH ROUND HOLES, one per cell.
+//                  It blends the updraft towards kConvSheetLevel everywhere, which fills
+//                  the seams, and multiplies by each cell's hole: a disc of radius
+//                  kConvHoleRadius x lacunarity x vigour^(1/4) round its centre, soft over
+//                  its outer (1 - kConvHoleEdge). Lacunosus. THREE VERSIONS WERE MEASURED
+//                  OR SEEN WRONG FIRST: holes punched in the deck alone left 0.8% of it,
+//                  because a closed deck's cloud is at its centres; a blend towards a
+//                  holed sheet of kTop opened no hole below about 0.8 on the slider; and
+//                  with kTop as the sheet, which carries each cell's vigour through its
+//                  life, the render was shards and pits rather than a sheet.
+//                  THE RADIUS SHRINKS TO NOTHING WITH ITS CELL'S VIGOUR, so a hole closes
+//                  as its cell dies and opens from nothing, rather than popping. As the
+//                  fourth root, not the square root: SEEN at the square root, most holes
+//                  were smaller than the billows and closed, and a frame with dozens of
+//                  cells showed half a dozen holes.
+//   GAP FRACTION   clears the seams: a factor of 0 up to kConvGapStart of cvGapWidth,
+//                  rising to 1 at cvGapWidth. Distinct cells with sky between them --
+//                  perlucidus. THE CLEAR BAND IS THE POINT: the closed updraft is already
+//                  kTop x centre-ness, so a ramp starting from zero only squared what was
+//                  there, and MEASURED, the widest such gap took a closed deck from 72%
+//                  cloud to 64%. SCALED BY POLARITY, because open cells' cloud IS the
+//                  seams: a gap there would erase the rims, so on open cells it does
+//                  nothing and it comes in with the deck.
+//
+// THE BOUND STILL HOLDS, and only the sheet needed anything for it. The holes, the gap and
+// the wave are factors of at most one; the sheet is a constant, so the blend is at most
+// the same blend of the updraft's bound and it (convUpdraftBound). The slope is a
+// different matter; see convSlopeCap.
+// ===========================================================================
+
+// THE SHEET IS THIN: its towers stand at about a third of the room under the lid. At the
+// deck's full height, 830 m in the test scene, its holes seen from above were deep pits
+// with sunlit walls. Lacunosus is a thin layer.
+public static const float kConvSheetLevel = 0.4f;
+
+// ...AND WEARS SMALLER BILLOWS: at full lacunarity, (1 - this) of the field's. A billow as
+// big as a tower's on a sheet a third as thick filled every hole narrower than itself.
+public static const float kConvSheetBillowCut = 0.6f;
+
+// A full-vigour cell's hole at full lacunarity, in lattice units: nearly touching its
+// neighbours', which is a net. Each is fully open inside kConvHoleEdge of its radius.
+public static const float kConvHoleRadius = 0.5f;
+public static const float kConvHoleEdge   = 0.7f;
+
+public static const float kConvGapStart  = 0.5f;
+
+// Per lattice unit: w |grad centre-ness| is at most kConvCentreSlope, since centre-ness
+// moves at most (|grad kNext| + |grad kTop|) / kTop <= 2 x 1.466 / kTop and w is at most
+// kTop / kConvOpenNorm, each short kernel being under its cell's long one.
+public static const float kConvCentreSlope = 9.5f;
+
+// One cell's hole at offset d (lattice units) from its centre, folded into the least
+// factor so far and its gradient.
+void convHole(ConvectionInput c, float2 d, float d2, float vig,
+              inout float keep, inout float2 gKeep)
+{
+    float r = kConvHoleRadius * c.cvLacunarity * sqrt(sqrt(vig));
+    if (!(d2 < r * r)) return;
+
+    float dist  = sqrt(d2);
+    float inner = kConvHoleEdge * r;
+    float band  = r - inner;
+    float t     = saturate((dist - inner) / band);
+    float k     = t * t * (3.0f - 2.0f * t);
+    if (k < keep)
+    {
+        keep  = k;
+        gKeep = dist > 1e-6f ? d * (6.0f * t * (1.0f - t) / (band * dist)) : float2(0.0f, 0.0f);
+    }
+}
+
+float convOrganize(ConvectionInput c, float2 q, float kTop, float kNext, float2 gkTop,
+                   float2 gkNext, float keep, float2 gKeep, float w, float2 gp,
+                   out float2 grad)
+{
+    if (c.cvLacunarity > 0.0f)
+    {
+        // Fill the seams towards the sheet, then open the holes in what that leaves.
+        float  fill  = lerp(w, kConvSheetLevel, c.cvLacunarity);
+        float2 gFill = gp * (1.0f - c.cvLacunarity);
+        gp = gFill * keep + gKeep * fill;
+        w  = fill * keep;
+    }
+
+    if (c.cvPolarity > 0.0f && c.cvGapWidth > 0.0f)
+    {
+        float  cn  = 0.0f;
+        float2 gcn = float2(0.0f, 0.0f);
+        if (kTop > 0.0f)
+        {
+            cn  = 1.0f - kNext / kTop;
+            gcn = (gkTop * kNext - gkNext * kTop) / (kTop * kTop);
+        }
+
+        float ramp = (1.0f - kConvGapStart) * c.cvGapWidth;
+        float t  = saturate((cn - kConvGapStart * c.cvGapWidth) / ramp);
+        float f  = t * t * (3.0f - 2.0f * t);
+        float df = 6.0f * t * (1.0f - t) / ramp;
+
+        // Polarity's share: open cells keep all their cloud.
+        float s  = lerp(1.0f, f, c.cvPolarity);
+        float ds = df * c.cvPolarity;
+        gp = gp * s + gcn * (w * ds);
+        w  = w * s;
+    }
+
+    grad = orgGradToWorld(c.cvOrg, gp, c.cvSpacing);
+
+    float2 gm;
+    float  m = orgWave(c.cvOrg, q, gm);
+    grad = grad * m + gm * w;
+    return w * m;
+}
+
+// ===========================================================================
+// THE STEEPEST SLOPE THE DENSITY WILL USE, per metre, and the one the bound divides by.
+//
+// WITHOUT ORGANIZATION it is kConvGradMax per slot, the proved bound on the updraft's
+// gradient, and the density's clamp to it never bites.
+//
+// WITH IT, the sheet, gaps and wave steepen the updraft, and Chaotic's warp bends it by
+// a Jacobian the gradient leaves out. So the density CLAMPS the slope it uses to this,
+// and the bound divides by the same number. That makes the bound sound by construction,
+// whatever the true slope: the density's distance to a wall is |v delta| /
+// sqrt(v^2 G^2 + delta^2), which only grows as G is lowered, and the bound's floor is
+// that expression at G = this cap. The terms added are the true slope's own bounds, so
+// the clamp stays a no-op everywhere but the warp:
+//
+//   holes    1.5 over the edge band of the smallest hole the cap covers, a cell at
+//            kConvHoleVigourFloor of full vigour. Smaller holes, of dying cells, are
+//            steeper than this and are clamped to it, which is what the clamp is for.
+//   gaps     1.5 over the gap's ramp of centre-ness, times kConvCentreSlope, times polarity
+//   wave     3 x amplitude x |k|, see orgWave
+//
+// A stretch only lengthens the cells, so each per-slot slope over the spacing still
+// covers its term.
+// ===========================================================================
+public static const float kConvHoleVigourFloor = 0.1f;
+
+public float convSlopeCap(ConvectionInput c)
+{
+    float cap = kConvGradMax / c.cvSpacing;
+    if (c.cvOrg.ogOn == 0) return cap;
+
+    if (c.cvLacunarity > 0.0f)
+        cap += 1.5f / ((1.0f - kConvHoleEdge) * kConvHoleRadius * c.cvLacunarity
+                       * sqrt(sqrt(kConvHoleVigourFloor)) * c.cvSpacing);
+    if (c.cvGapWidth > 0.0f)
+        cap += kConvCentreSlope * 1.5f * c.cvPolarity
+             / ((1.0f - kConvGapStart) * c.cvGapWidth * c.cvSpacing);
+    cap += 3.0f * c.cvOrg.ogWaveAmp * length(c.cvOrg.ogWaveK);
+    return cap;
 }
 
 public float convUpdraft(ConvectionInput c, float2 q)
@@ -575,7 +782,9 @@ public float convectionDensity(ConvectionInput c, float3 p)
     // NOTHING BELOW THE CONDENSATION LEVEL, EXACTLY. That line is the flat base.
     if (above < 0.0f || above > convCeiling(c)) return 0.0f;
 
-    float lift   = convLift(c, above, 1.0f);
+    // A LACUNOSE SHEET WEARS SMALLER BILLOWS: see kConvSheetBillowCut. The bound keeps the
+    // full lift, which is only ever more. Without lacunarity the factor is exactly one.
+    float lift   = convLift(c, above, 1.0f - kConvSheetBillowCut * c.cvLacunarity);
     float inside = -1e30f;
 
     // THE CELL FIELD. The updraft and its slope give the distance to the surface; the
@@ -586,9 +795,11 @@ public float convectionDensity(ConvectionInput c, float3 p)
         float2 slope;
         float  w = convUpdraftGrad(c, q, slope);
 
+        // THE SLOPE CLAMPED TO WHAT THE BOUND DIVIDES BY: see convSlopeCap. Without
+        // organization the true slope is always under it, and this is the old line.
         float v     = convTowerHeight(c, w) - above;
         float delta = w - convNeededUpdraft(c, above);
-        float d     = convSurfaceDistance(v, delta, length(slope));
+        float d     = convSurfaceDistance(v, delta, min(length(slope), convSlopeCap(c)));
 
         if (d + lift > 0.0f)
         {
@@ -668,7 +879,7 @@ void convSlotBound(ConvectionInput c, int2 slot, float2 a, float2 b,
     float vig = convVigour(c, slot);
     if (vig <= 0.0f) return;
 
-    float2 ctr = convCellCentre(slot);
+    float2 ctr = convCellCentre(c, slot);
 
     float2 nearGap = max(max(a - ctr, ctr - b), float2(0.0f, 0.0f));
     float  dNear   = dot(nearGap, nearGap);
@@ -693,10 +904,14 @@ void convSlotBound(ConvectionInput c, int2 slot, float2 a, float2 b,
 }
 
 // The largest the updraft can be anywhere in the footprint [q0, q1] (pattern frame, m).
+//
+// THE ORGANIZED UPDRAFT INCLUDED: every factor convOrganize applies is at most one, so
+// the unorganized updraft's bound holds for it, over the lattice box the footprint maps
+// into -- orgPatternBox's, which is the footprint itself when there is no organization.
 public float convUpdraftBound(ConvectionInput c, float2 q0, float2 q1)
 {
-    float2 a = q0 / c.cvSpacing;
-    float2 b = q1 / c.cvSpacing;
+    float2 a, b;
+    orgPatternBox(c.cvOrg, q0, q1, c.cvSpacing, a, b);
 
     float openTop = 0.0f, openNext = 0.0f;   // the short kernels' two largest UPPER bounds
     float hiTop   = 0.0f;                    // the long kernels' largest upper bound
@@ -758,7 +973,13 @@ public float convUpdraftBound(ConvectionInput c, float2 q0, float2 q1)
     // The epsilon is float rounding: the bound and the density compute the kernel along
     // different expressions, and a one-ulp disagreement at the moisture threshold would
     // otherwise be a zero bound over a sliver of cloud.
-    return lerp(openHi, closedHi, c.cvPolarity) + 1e-5f;
+    float field = lerp(openHi, closedHi, c.cvPolarity);
+
+    // LACUNARITY'S SHEET is the constant kConvSheetLevel, and its holes only lower it, so
+    // the blend is at most the same blend of the field's bound and it. Zero lacunarity is
+    // the line above exactly: lerp(x, y, 0) is x.
+    if (c.cvLacunarity > 0.0f) field = lerp(field, kConvSheetLevel, c.cvLacunarity);
+    return field + 1e-5f;
 }
 
 public float convectionBound(ConvectionInput c, float3 lo, float3 hi)
@@ -797,7 +1018,8 @@ public float convectionBound(ConvectionInput c, float3 lo, float3 hi)
 
         if (wHi < need)
         {
-            float slopeMax = kConvGradMax / c.cvSpacing;
+            // The density's own clamp, so this floor holds for the distance it computes.
+            float slopeMax = convSlopeCap(c);
             float floorD = convDistanceFloor(low - tower, (need - wHi) / slopeMax);
             inside = lift - floorD;
         }

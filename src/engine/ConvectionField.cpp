@@ -129,6 +129,7 @@ void deriveConvection(const FieldParams& field, ConvectionDerived& out) {
     // mean something rather than zeros that would divide.
     out.phase = truncateDiffraction(dropletPhase(c.dropletDiameter));
     out.sigma = (c.density > Real(0) ? c.density : Real(0)) * out.phase.extinctionScale;
+    out.organization = resolveOrganization(c.organization, true);
 
     if (!c.enabled) return;
 

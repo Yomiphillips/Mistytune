@@ -62,7 +62,7 @@ void convCells(uint3 tid : SV_DispatchThreadID,
 {
     int i = int(tid.x);
     if (i >= count) return;
-    float2 ctr = convCellCentre(slots[i]);
+    float2 ctr = convCellCentre(c, slots[i]);
     outCell[i] = float3(ctr.x, ctr.y, convVigour(c, slots[i]));
 }
 
@@ -86,7 +86,9 @@ void convBillowAt(uint3 tid : SV_DispatchThreadID,
 // kernel of zero never displaces the two largest, so the two agree to the bit.
 //
 // A COPY OF convUpdraft'S COMBINATION, deliberately: if the library's changes and this
-// one does not, the two disagree and the test says so.
+// one does not, the two disagree and the test says so. THE ORGANIZATION STEP IS SHARED
+// rather than copied (convOrganize): what this checks is the neighbourhood, and the gaps,
+// holes and wave act on the two largest kernels after it, whichever window found them.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void convUpdraftWide(uint3 tid : SV_DispatchThreadID,
@@ -98,11 +100,13 @@ void convUpdraftWide(uint3 tid : SV_DispatchThreadID,
     int i = int(tid.x);
     if (i >= count) return;
 
-    float2 g  = points[i] / c.cvSpacing;
+    float2 g  = orgPattern(c.cvOrg, points[i], c.cvSpacing);
     int2   gi = int2(floor(g));
 
     float oTop = 0.0f, oNext = 0.0f;
     float kTop = 0.0f, kNext = 0.0f;
+    float  keep  = 1.0f;
+    float2 gKeep = float2(0.0f, 0.0f);
     for (int dj = -2; dj <= 2; ++dj)
     {
         for (int di = -2; di <= 2; ++di)
@@ -112,10 +116,12 @@ void convUpdraftWide(uint3 tid : SV_DispatchThreadID,
             float vig = convVigour(c, slot);
             if (vig <= 0.0f) continue;
 
-            float2 d  = g - convCellCentre(slot);
+            float2 d  = g - convCellCentre(c, slot);
             float  d2 = dot(d, d);
             float  ko = vig * convBump(d2, kConvReachOpen);
             float  kk = vig * convBump(d2, kConvReachClosed);
+
+            if (c.cvLacunarity > 0.0f) convHole(c, d, d2, vig, keep, gKeep);
 
             if (ko > oTop) { oNext = oTop; oTop = ko; }
             else if (ko > oNext) { oNext = ko; }
@@ -127,5 +133,12 @@ void convUpdraftWide(uint3 tid : SV_DispatchThreadID,
 
     float openField   = min(oNext / kConvOpenNorm, 1.0f);
     float closedField = kTop - kNext;
-    outUpdraft[i] = lerp(openField, closedField, c.cvPolarity);
+    float w = lerp(openField, closedField, c.cvPolarity);
+    if (c.cvOrg.ogOn != 0)
+    {
+        float2 unused;
+        float2 none = float2(0.0f, 0.0f);
+        w = convOrganize(c, points[i], kTop, kNext, none, none, keep, gKeep, w, none, unused);
+    }
+    outUpdraft[i] = w;
 }

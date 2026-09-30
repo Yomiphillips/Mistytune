@@ -9,6 +9,7 @@
 // plain arithmetic over CloudParams, tests/unit/ can check it without a card.
 
 #include "CloudParams.h"
+#include "Organization.h"
 
 namespace plugin::cloud {
 
@@ -158,6 +159,9 @@ struct ConvectionDerived {
     Real heroBillow = 1;
 
     TruncatedPhase phase;
+
+    // How the cells are arranged, resolved (build 20). Off for the defaults.
+    OrganizationResolved organization;
 };
 
 // The steering wind as a velocity, m/s. BEARING IS WHERE IT COMES FROM, as in

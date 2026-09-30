@@ -35,3 +35,19 @@ void cpuRenderRays(uint3 tid : SV_DispatchThreadID,
     outRadiance[i] = renderSample(scene, phase, bounds, drift,
                                   origins[i], directions[i], seed + uint(i));
 }
+
+// The twin of Render.slang's buildAirMap, named apart for the same `extern "C"` reason.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cpuBuildAirMap(uint3 tid : SV_DispatchThreadID,
+                    uniform Medium medium,
+                    uniform StructuredBuffer<float2> drift,
+                    uniform LayerShadowMap map,
+                    uniform RWStructuredBuffer<float> outTexels,
+                    uniform int count)
+{
+    int i = int(tid.x);
+    if (i >= count) return;
+
+    layerMapColumn(medium, drift, map, i, outTexels);
+}

@@ -46,3 +46,21 @@ void renderRays(uint3 tid : SV_DispatchThreadID,
     outRadiance[i] = renderSample(scene, phase, bounds, drift,
                                   origins[i], directions[i], seed + uint(i));
 }
+
+// THE CLOUDS' SHADOW MAP, one texel's column per thread. Mistytune.cu calls
+// layerMapColumn from a kernel of its own, as it calls renderSample; this entry point is
+// what makes slangc emit it. See AirMapLib.slang.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void buildAirMap(uint3 tid : SV_DispatchThreadID,
+                 uniform Medium medium,
+                 uniform StructuredBuffer<float2> drift,
+                 uniform LayerShadowMap map,
+                 uniform RWStructuredBuffer<float> outTexels,
+                 uniform int count)
+{
+    int i = int(tid.x);
+    if (i >= count) return;
+
+    layerMapColumn(medium, drift, map, i, outTexels);
+}

@@ -61,6 +61,7 @@ struct SkyInput_0
     float sunIntensity_0;
     float sunAngularRadius_0;
     float groundAlbedo_0;
+    float3  groundSkyLight_0;
     StructuredBuffer<float> transmittanceLut_0;
 };
 
@@ -290,7 +291,7 @@ static __device__ float sunIrradianceTop_0(SkyInput_0 * p_2)
     return 20.0f * p_2->sunIntensity_0;
 }
 
-static __device__ float3  skyRadiance_0(SkyInput_0 * p_3, float originAltitude_0, float3  rayDir_0, bool includeSunDisc_0)
+static __device__ float3  skyRadiance_0(SkyInput_0 * p_3, float originAltitude_0, float3  rayDir_0, bool includeSunDisc_0, float groundLit_0)
 {
     float hc_0;
     float3  _S25 = sunDirection_0(p_3);
@@ -425,7 +426,8 @@ static __device__ float3  skyRadiance_0(SkyInput_0 * p_3, float originAltitude_0
         float nDotL_0 = clampf_0(dot_0(normalizeExact_0(groundPoint_0), _S25), 0.0f, 1.0f);
         float3  _S40 = sampleTransmittanceLut_0(p_3, 0.0f, lutMuFor_0(groundPoint_0, _S25));
         float _S41 = betaMExt_0 * depthM_0;
-        radiance_1 = radiance_0 + make_float3 ((F32_exp((- (betaR_0.x * depthR_0 + _S41)))), (F32_exp((- (betaR_0.y * depthR_0 + _S41)))), (F32_exp((- (betaR_0.z * depthR_0 + _S41))))) * _S40 * make_float3 (p_3->groundAlbedo_0 * nDotL_0 * 0.31830987334251404f * _S39);
+        float3  viewT_0 = make_float3 ((F32_exp((- (betaR_0.x * depthR_0 + _S41)))), (F32_exp((- (betaR_0.y * depthR_0 + _S41)))), (F32_exp((- (betaR_0.z * depthR_0 + _S41)))));
+        radiance_1 = radiance_0 + viewT_0 * _S40 * make_float3 (p_3->groundAlbedo_0 * nDotL_0 * 0.31830987334251404f * _S39 * groundLit_0) + viewT_0 * p_3->groundSkyLight_0;
     }
     else
     {
@@ -446,7 +448,7 @@ static __device__ float3  skyRadiance_0(SkyInput_0 * p_3, float originAltitude_0
         if(cosTheta_0 > cosRadius_0)
         {
             float _S43 = betaMExt_0 * depthM_0;
-            float3  viewT_0 = make_float3 ((F32_exp((- (betaR_0.x * depthR_0 + _S43)))), (F32_exp((- (betaR_0.y * depthR_0 + _S43)))), (F32_exp((- (betaR_0.z * depthR_0 + _S43)))));
+            float3  viewT_1 = make_float3 ((F32_exp((- (betaR_0.x * depthR_0 + _S43)))), (F32_exp((- (betaR_0.y * depthR_0 + _S43)))), (F32_exp((- (betaR_0.z * depthR_0 + _S43)))));
             float solidAngle_0 = 6.28318548202514648f * (1.0f - cosRadius_0);
             if(solidAngle_0 > 9.99999971718068537e-10f)
             {
@@ -456,7 +458,7 @@ static __device__ float3  skyRadiance_0(SkyInput_0 * p_3, float originAltitude_0
             {
                 hc_0 = 9.99999971718068537e-10f;
             }
-            radiance_1 = radiance_1 + viewT_0 * make_float3 (_S39 / hc_0);
+            radiance_1 = radiance_1 + viewT_1 * make_float3 (_S39 / hc_0);
         }
     }
     return radiance_1;
@@ -472,7 +474,7 @@ extern "C" __global__ void skyMain(SkyInput_0 params_0, float originAltitude_1, 
     float3  * _S44 = (&(output_0)[i_1]);
     float3  _S45 = slang_ldg_0((&(directions_0)[i_1]));
     SkyInput_0 _S46 = params_0;
-    float3  _S47 = skyRadiance_0(&_S46, originAltitude_1, _S45, true);
+    float3  _S47 = skyRadiance_0(&_S46, originAltitude_1, _S45, true, 1.0f);
     *_S44 = _S47;
     return;
 }
@@ -816,7 +818,7 @@ extern "C" __global__ void airMain(SkyInput_0 params_1, float originAltitude_4, 
     *_S80 = _S83;
     float3  * _S84 = (&(sky_0)[i_4]);
     SkyInput_0 _S85 = params_1;
-    float3  _S86 = skyRadiance_0(&_S85, originAltitude_4, _S72, false);
+    float3  _S86 = skyRadiance_0(&_S85, originAltitude_4, _S72, false, 1.0f);
     *_S84 = _S86;
     return;
 }

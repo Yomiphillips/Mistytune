@@ -9,23 +9,35 @@
 // profile -- so it names the sky the parameters describe, including a sky the camera
 // happens not to be pointed at.
 //
-// THE NAMES ARE THE WMO INTERNATIONAL CLOUD ATLAS'S GENERA AND SPECIES, reduced to the
-// ones these two generators can make:
+// THE NAMES ARE THE WMO INTERNATIONAL CLOUD ATLAS'S GENERA, SPECIES AND VARIETIES, reduced
+// to the ones these two generators can make:
 //
-//   cumulus         humilis    wider than tall; flattened
-//                   mediocris  moderate vertical extent
-//                   congestus  markedly sprouting, of great vertical extent
-//   stratocumulus   opacus     a closed deck, cells merged
-//                   perlucidus a deck with distinct gaps
-//                   castellanus closed cells that tower
-//   cirrus          fibratus   filaments without hooks or tufts
-//                   uncinus    filaments ending in hooks: a turning or shearing wind
-//                   spissatus  dense enough to grey against the sun
-//                   floccus    tufts whose fall streaks barely leave them
+//   cumulus         humilis      wider than tall; flattened
+//                   mediocris    moderate vertical extent
+//                   congestus    markedly sprouting, of great vertical extent
+//                     radiatus     in parallel rows: Rolls, straight enough
+//   stratocumulus   stratiformis a closed deck
+//                   castellanus  closed cells that tower
+//                     opacus       cells merged, no sky between
+//                     perlucidus   distinct gaps between the elements
+//                     undulatus    in waves
+//                     radiatus     in parallel rows
+//                     lacunosus    a sheet with round holes
+//   cirrus          fibratus     filaments without hooks or tufts
+//                   uncinus      filaments ending in hooks: a turning or shearing wind
+//                   spissatus    dense enough to grey against the sun
+//                   floccus      tufts whose fall streaks barely leave them
+//                     radiatus     in parallel bands
+//
+// UNTIL BUILD 20 opacus AND perlucidus WERE CALLED SPECIES. The atlas has them as
+// varieties of a species, stratiformis, and a readout meant to teach the atlas should
+// not teach that wrong. The varieties come from the Organization group (build 20).
 //
 // THE READOUT IS AN AFTER EFFECTS PARAMETER NAME, WHICH HOLDS 31 CHARACTERS. That limit
 // is PF_MAX_EFFECT_PARAM_NAME_LEN and is the one hard contract here: a longer string is
-// cut off in the panel, and TestClassifier sweeps the parameter space against it.
+// cut off in the panel, and TestClassifier sweeps the parameter space against it. When
+// the full names do not fit, the atlas's own abbreviations stand in, varieties first:
+// "Sc stratiformis op un".
 // ===========================================================================
 
 #include "CloudParams.h"
@@ -42,6 +54,9 @@ enum class CloudGenus : int32_t {
 struct LayerClass {
     CloudGenus  genus   = CloudGenus::None;
     const char* species = "";   // a string literal, never owned
+
+    // Up to two varieties, "" for none: the deck's opacity first, then its pattern.
+    const char* variety[2] = { "", "" };
 };
 
 struct SkyClass {

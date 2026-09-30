@@ -65,6 +65,11 @@ inline const cloud::Real* cachedTransmittanceLut(const cloud::TransmittanceParam
     return table.data();
 }
 
+// The ground's skylight into req.groundSkyLight, from the sky req.field describes and
+// the HOST table already in req.transmittanceBuffer. Cached per thread, keyed on the sky.
+// In GroundSkyLight.cpp, so this header need not include Shading.h.
+void deriveGroundSkyLight(RenderRequest& req);
+
 inline void deriveRenderInputs(RenderRequest& req) {
     cloud::buildDriftTable(req.field.ice, req.drift);
 
@@ -74,6 +79,9 @@ inline void deriveRenderInputs(RenderRequest& req) {
     // that forgets is a null table and a black sky.
     req.transmittanceBuffer = cachedTransmittanceLut(
         cloud::transmittanceParamsFrom(req.field.physics, req.field.atmosphere));
+
+    // AFTER THE TABLE, which the integral reads, and while it is still the host's.
+    deriveGroundSkyLight(req);
 
     // A PINNED MAJORANT WINS, and it is allowed to be wrong. QualityParams calls it
     // "0 = derive from the field", so a positive value is the user overriding the
@@ -88,6 +96,8 @@ inline void deriveRenderInputs(RenderRequest& req) {
 
     cloud::cellDriftAt(req.field.ice, req.field.timeSeconds,
                        req.cellDriftX, req.cellDriftZ);
+
+    req.iceOrganization = cloud::resolveOrganization(req.field.ice.organization, false);
 
     cloud::deriveConvection(req.field, req.convection);
 }

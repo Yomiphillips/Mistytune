@@ -29,6 +29,8 @@
 
 #include <cstdio>
 #include <cmath>
+#include <string>
+#include <utility>
 #include <vector>
 #include <algorithm>
 
@@ -116,6 +118,73 @@ ConvectionInput_0 defaults(float polarity) {
     return c;
 }
 
+// THE ORGANIZATION GROUP, SET IN THE KERNEL'S OWN TERMS (build 20), so this test does not
+// lean on the engine's resolve -- TestOrganization checks that half. Bearings are the
+// winds' convention: clockwise from +Z.
+void organize(ConvectionInput_0& c, float rowsAlongDeg, float stretch, float coherence) {
+    const float b = rowsAlongDeg * 0.01745329252f;
+    c.cvOrg_0.ogOn_0        = 1;
+    c.cvOrg_0.ogAxis_0      = make_float2(std::sin(b), std::cos(b));
+    c.cvOrg_0.ogStretch_0   = stretch;
+    c.cvOrg_0.ogCoherence_0 = coherence;
+}
+
+void addWave(ConvectionInput_0& c, float crestsAlongDeg, float length, float amplitude) {
+    const float b = crestsAlongDeg * 0.01745329252f;
+    c.cvOrg_0.ogWaveK_0   = make_float2(std::cos(b) / length, -std::sin(b) / length);
+    c.cvOrg_0.ogWaveAmp_0 = amplitude;
+}
+
+// A cell centre (lattice units) back to the world, for an organization without a warp.
+float2 centreToWorld(const ConvectionInput_0& c, float2 g) {
+    const float2 axis = c.cvOrg_0.ogAxis_0;
+    const float along  = g.x * c.cvSpacing_0 * c.cvOrg_0.ogStretch_0;
+    const float across = g.y * c.cvSpacing_0;
+    return make_float2(axis.x * along - axis.y * across, axis.y * along + axis.x * across);
+}
+
+// The organized fields the bound and the window are checked on, beside the plain ones.
+std::vector<std::pair<const char*, ConvectionInput_0>> organizedCases() {
+    std::vector<std::pair<const char*, ConvectionInput_0>> out;
+    {
+        ConvectionInput_0 c = defaults(0.3f);
+        organize(c, 30.0f, 4.0f, 0.9f);
+        out.push_back({ "rolls at 30 deg", c });
+    }
+    {
+        ConvectionInput_0 c = defaults(0.7f);
+        organize(c, 70.0f, 2.0f, 0.4f);
+        addWave(c, 70.0f, 2500.0f, 0.8f);
+        out.push_back({ "waves, amplitude 0.8", c });
+    }
+    {
+        ConvectionInput_0 c = defaults(0.5f);
+        organize(c, 115.0f, 1.5f, 0.0f);
+        c.cvOrg_0.ogWarp_0 = 1.2f;
+        out.push_back({ "chaotic warp", c });
+    }
+    {
+        ConvectionInput_0 c = defaults(1.0f);
+        c.cvCoverage_0 = 0.9f;
+        organize(c, 90.0f, 1.0f, 0.0f);
+        c.cvGapWidth_0   = 0.28f;
+        c.cvLacunarity_0 = 0.6f;
+        out.push_back({ "gaps and holes, closed", c });
+    }
+    {
+        ConvectionInput_0 c = defaults(0.8f);
+        c.cvSpacing_0  = 400.0f;
+        c.cvCoverage_0 = 1.0f;
+        organize(c, 200.0f, 3.0f, 0.6f);
+        addWave(c, 20.0f, 900.0f, 1.0f);
+        c.cvOrg_0.ogWarp_0 = 1.2f;
+        c.cvGapWidth_0   = 0.9f;
+        c.cvLacunarity_0 = 1.0f;
+        out.push_back({ "everything, small cells", c });
+    }
+    return out;
+}
+
 } // namespace
 
 int main() {
@@ -164,6 +233,9 @@ int main() {
         c.cvHeroAlone_0  = 1;
         cases.push_back({ "hero alone", c });
     }
+    // THE ORGANIZATION GROUP (build 20): its factors are all at most one and its slope is
+    // clamped to what the bound divides by, and this is where a slip in either shows.
+    for (const auto& oc : organizedCases()) cases.push_back({ oc.first, oc.second });
 
     const float extents[] = { 15.0f, 60.0f, 250.0f, 900.0f, 2500.0f };
     const int   perBox    = 192;
@@ -460,13 +532,24 @@ int main() {
         std::vector<float2> pts(100000);
         for (float2& p : pts) p = make_float2(rng.range(-50000.0f, 50000.0f), rng.range(-50000.0f, 50000.0f));
 
+        // The plain field at three polarities, then every organized case: the lattice is
+        // rotated, stretched, straightened and warped there, and the window must still be
+        // all of it.
+        std::vector<std::pair<std::string, ConvectionInput_0>> windowCases;
         for (float pol : { 0.0f, 0.5f, 1.0f }) {
-            const ConvectionInput_0 c = defaults(pol);
+            char name[32];
+            std::snprintf(name, sizeof name, "polarity %.1f", pol);
+            windowCases.push_back({ name, defaults(pol) });
+        }
+        for (const auto& oc : organizedCases()) windowCases.push_back({ oc.first, oc.second });
+
+        for (const auto& wc : windowCases) {
+            const ConvectionInput_0& c = wc.second;
             const std::vector<float> a = updrafts(c, pts, false);
             const std::vector<float> b = updrafts(c, pts, true);
             int differ = 0;
             for (size_t i = 0; i < a.size(); ++i) if (a[i] != b[i]) ++differ;
-            std::printf("  polarity %.1f: %d of %zu points differ\n", pol, differ, a.size());
+            std::printf("  %-26s %d of %zu points differ\n", wc.first.c_str(), differ, a.size());
             if (differ > 0) {
                 std::printf("    FAIL: a cell two slots away reaches the point -- the 3x3\n");
                 std::printf("          window is not the whole field, and the bound's slot\n");
@@ -529,6 +612,242 @@ int main() {
             std::printf("    FAIL: the billows are off-centre -- they %s the cloud on average\n",
                         m > 0 ? "inflate" : "shrink");
             ++failures;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 7. The Organization group does what each control says (build 20)
+    // -----------------------------------------------------------------------
+    std::printf("\n7. Organization\n\n");
+    {
+        auto check = [&](bool ok, const char* what) {
+            if (!ok) { std::printf("    FAIL: %s\n", what); ++failures; }
+        };
+
+        HostRng rng(2020);
+        std::vector<float2> flat(100000);
+        for (float2& p : flat) p = make_float2(rng.range(-30000.0f, 30000.0f), rng.range(-30000.0f, 30000.0f));
+
+        // (a) SWITCHED ON AT THE IDENTITY IS THE OLD FIELD, BIT FOR BIT: rows along +X,
+        // no stretch, no coherence, no wave. The updraft AND the density, since the
+        // density also reads the slope cap, which must then be the old constant.
+        {
+            ConvectionInput_0 off = defaults(0.4f);
+            ConvectionInput_0 on  = off;
+            on.cvOrg_0.ogOn_0      = 1;
+            on.cvOrg_0.ogAxis_0    = make_float2(1.0f, 0.0f);
+            on.cvOrg_0.ogStretch_0 = 1.0f;
+            const std::vector<float> a = updrafts(off, flat, false);
+            const std::vector<float> b = updrafts(on, flat, false);
+            std::vector<float3> pts;
+            for (size_t i = 0; i < 50000; ++i)
+                pts.push_back(make_float3(flat[i].x, off.cvBase_0 + rng.range(0.0f, 1400.0f), flat[i].y));
+            const std::vector<float> da = densities(off, pts);
+            const std::vector<float> db = densities(on, pts);
+            int differ = 0, differD = 0;
+            for (size_t i = 0; i < a.size(); ++i) if (a[i] != b[i]) ++differ;
+            for (size_t i = 0; i < da.size(); ++i) if (da[i] != db[i]) ++differD;
+            std::printf("  identity on vs off: %d updrafts and %d densities differ\n", differ, differD);
+            check(differ == 0 && differD == 0, "organization at the identity moved the field");
+        }
+
+        // (b) ROLLS ARE LONGER ALONG THE ROWS: the updraft one cell away along the rows is
+        // far more like the updraft here than one cell away across them.
+        {
+            ConvectionInput_0 c = defaults(0.3f);
+            organize(c, 30.0f, 4.0f, 1.0f);
+            const float2 along  = c.cvOrg_0.ogAxis_0;
+            const float2 across = make_float2(-along.y, along.x);
+            const float  lag    = c.cvSpacing_0;
+            std::vector<float2> here, alongPts, acrossPts;
+            for (size_t i = 0; i < 40000; ++i) {
+                here.push_back(flat[i]);
+                alongPts.push_back(make_float2(flat[i].x + along.x * lag, flat[i].y + along.y * lag));
+                acrossPts.push_back(make_float2(flat[i].x + across.x * lag, flat[i].y + across.y * lag));
+            }
+            const std::vector<float> w0 = updrafts(c, here, false);
+            const std::vector<float> w1 = updrafts(c, alongPts, false);
+            const std::vector<float> w2 = updrafts(c, acrossPts, false);
+            auto corr = [](const std::vector<float>& x, const std::vector<float>& y) {
+                double mx = 0, my = 0;
+                for (size_t i = 0; i < x.size(); ++i) { mx += x[i]; my += y[i]; }
+                mx /= x.size(); my /= y.size();
+                double sxy = 0, sxx = 0, syy = 0;
+                for (size_t i = 0; i < x.size(); ++i) {
+                    sxy += (x[i] - mx) * (y[i] - my);
+                    sxx += (x[i] - mx) * (x[i] - mx);
+                    syy += (y[i] - my) * (y[i] - my);
+                }
+                return sxy / std::sqrt(sxx * syy + 1e-30);
+            };
+            const double ca = corr(w0, w1), cx = corr(w0, w2);
+            std::printf("  rolls: correlation one cell along the rows %.3f, across %.3f\n", ca, cx);
+            check(ca > cx + 0.3, "rolls are not longer along their rows than across them");
+        }
+
+        // (c) COHERENCE 1 RULES THE ROWS: every centre sits exactly mid-slot across them.
+        {
+            ConvectionInput_0 c = defaults(0.3f);
+            organize(c, 30.0f, 1.0f, 1.0f);
+            std::vector<int2> slots;
+            for (int j = -20; j < 20; ++j) for (int i = -20; i < 20; ++i) slots.push_back(make_int2(i, j));
+            Device<int2>   in(slots.size());
+            Device<float3> out(slots.size());
+            in.put(slots);
+            convCells<<<blocks(slots.size()), 64>>>(c, in.ro(), out.rw(), static_cast<int>(slots.size()));
+            const std::vector<float3> cells = out.get();
+            int offRow = 0, movedAlong = 0;
+            for (size_t i = 0; i < cells.size(); ++i) {
+                if (cells[i].y != static_cast<float>(slots[i].y) + 0.5f) ++offRow;
+                if (cells[i].x != static_cast<float>(slots[i].x) + 0.5f) ++movedAlong;
+            }
+            std::printf("  coherence 1: %d of %zu centres off their row (must be 0), %d jittered along it\n",
+                        offRow, cells.size(), movedAlong);
+            check(offRow == 0 && movedAlong > static_cast<int>(cells.size()) / 2,
+                  "coherence 1 left centres off their rows, or stopped the jitter along them");
+        }
+
+        // (d) AMPLITUDE 1 CLEARS THE TROUGHS: on a trough line the updraft is nothing.
+        {
+            ConvectionInput_0 c = defaults(0.6f);
+            organize(c, 90.0f, 1.0f, 0.0f);
+            addWave(c, 40.0f, 3000.0f, 1.0f);
+            // Trough n is where q . k = n; a point slides along it in the crests' direction.
+            const float2 k  = c.cvOrg_0.ogWaveK_0;
+            const float  kk = k.x * k.x + k.y * k.y;
+            const float  kl = std::sqrt(kk);
+            const float2 crest = make_float2(-k.y / kl, k.x / kl);
+            std::vector<float2> trough;
+            for (int n = -8; n <= 8; ++n)
+                for (int t = 0; t < 400; ++t) {
+                    const float s = rng.range(-20000.0f, 20000.0f);
+                    trough.push_back(make_float2(k.x / kk * n + crest.x * s, k.y / kk * n + crest.y * s));
+                }
+            const std::vector<float> w = updrafts(c, trough, false);
+            float worst = 0.0f;
+            for (float v : w) worst = std::max(worst, v);
+            std::printf("  wave amplitude 1: largest updraft on %zu trough points %.2e\n", w.size(), worst);
+            check(worst < 1e-4f, "a trough of a full-amplitude wave still has updraft");
+        }
+
+        // (e) GAP FRACTION THINS A DECK, MONOTONICALLY, AND LEAVES OPEN CELLS ALONE.
+        {
+            std::vector<float3> pts;
+            for (size_t i = 0; i < 60000; ++i) pts.push_back(make_float3(flat[i].x, 680.0f + 100.0f, flat[i].y));
+            double previous = 2.0;
+            bool monotone = true;
+            for (float gap : { 0.0f, 0.2f, 0.45f, 0.7f, 0.9f }) {
+                ConvectionInput_0 c = defaults(1.0f);
+                c.cvCoverage_0 = 0.9f;
+                organize(c, 90.0f, 1.0f, 0.0f);
+                c.cvGapWidth_0 = gap;
+                const std::vector<float> d = densities(c, pts);
+                int cloudy = 0;
+                for (float v : d) if (v > 0.0f) ++cloudy;
+                const double frac = static_cast<double>(cloudy) / d.size();
+                std::printf("  closed deck, gap width %.2f: %5.1f%% cloud\n", gap, 100.0 * frac);
+                monotone = monotone && frac < previous;
+                previous = frac;
+            }
+            check(monotone, "a wider gap did not make less cloud");
+
+            ConvectionInput_0 open = defaults(0.0f);
+            organize(open, 90.0f, 1.0f, 0.0f);
+            ConvectionInput_0 openGap = open;
+            openGap.cvGapWidth_0 = 0.5f;
+            const std::vector<float> a = updrafts(open, flat, false);
+            const std::vector<float> b = updrafts(openGap, flat, false);
+            int differ = 0;
+            for (size_t i = 0; i < a.size(); ++i) if (a[i] != b[i]) ++differ;
+            std::printf("  open cells with gaps: %d of %zu updrafts moved (must be 0)\n", differ, a.size());
+            check(differ == 0, "gaps changed open cells");
+        }
+
+        // (f) LACUNARITY: A THIN SHEET WITH A ROUND HOLE AT EVERY CELL. From a quarter of
+        // the slider up, every vigorous centre is a hole, and the holes widen from there
+        // (less cloud near the centres); the sheet fills the seams and keeps them filled
+        // (more cloud on them than without it); and at full lacunarity the layer is mostly
+        // cloud with holes in it, not a few shards.
+        //
+        // NEAR-CENTRE CLOUD FIRST RISES, and that is the model: at a quarter the sheet has
+        // already filled what the deck left clear, while the holes are still small. MEASURED
+        // when written: 81% near the centres with no lacunarity, 86% at 0.25, 20% at 1.
+        //
+        // THREE VERSIONS FAILED BEFORE THIS ONE, which is why each claim is here: holes in
+        // the deck alone left 0.8% of it; a blend towards a holed sheet opened no hole
+        // below about 0.8 on the slider; and a sheet of the largest kernel rendered as
+        // shards and pits, because that kernel carries each cell's vigour.
+        {
+            ConvectionInput_0 c = defaults(1.0f);
+            c.cvCoverage_0 = 0.9f;
+            organize(c, 60.0f, 1.0f, 0.0f);
+            std::vector<int2> slots;
+            for (int j = -15; j < 15; ++j) for (int i = -15; i < 15; ++i) slots.push_back(make_int2(i, j));
+            Device<int2>   in(slots.size());
+            Device<float3> out(slots.size());
+            in.put(slots);
+            convCells<<<blocks(slots.size()), 64>>>(c, in.ro(), out.rw(), static_cast<int>(slots.size()));
+            const std::vector<float3> cells = out.get();
+
+            std::vector<float2> allCentres, vigorous;
+            for (const float3& cell : cells) {
+                if (cell.z <= 0.0f) continue;
+                const float2 w = centreToWorld(c, make_float2(cell.x, cell.y));
+                allCentres.push_back(w);
+                if (cell.z > 0.2f) vigorous.push_back(w);
+            }
+
+            // Points at 100 m, each with its distance to the nearest centre in cells.
+            std::vector<float3> pts;
+            std::vector<float>  nearest;
+            HostRng pr(77);
+            for (int n = 0; n < 60000; ++n) {
+                const float x = pr.range(-20000.0f, 20000.0f), z = pr.range(-20000.0f, 20000.0f);
+                float best = 1e30f;
+                for (const float2& ce : allCentres) {
+                    const float dx = x - ce.x, dz = z - ce.y;
+                    best = std::min(best, dx * dx + dz * dz);
+                }
+                pts.push_back(make_float3(x, 680.0f + 100.0f, z));
+                nearest.push_back(std::sqrt(best) / c.cvSpacing_0);
+            }
+
+            bool holedEverywhere = true, widening = true, filling = true;
+            double prevNear = 2.0, prevSeam = -1.0, fullFrac = 0.0, seamAtZero = 0.0;
+            for (float lac : { 0.0f, 0.25f, 0.5f, 1.0f }) {
+                ConvectionInput_0 holed = c;
+                holed.cvLacunarity_0 = lac;
+                const std::vector<float> w = updrafts(holed, vigorous, false);
+                int centresWithUpdraft = 0;
+                for (float v : w) if (v > 0.0f) ++centresWithUpdraft;
+
+                const std::vector<float> d = densities(holed, pts);
+                int nearN = 0, nearCloud = 0, seamN = 0, seamCloud = 0, cloudy = 0;
+                for (size_t k = 0; k < d.size(); ++k) {
+                    const bool cloud = d[k] > 0.0f;
+                    cloudy += cloud ? 1 : 0;
+                    if (nearest[k] < 0.15f) { ++nearN; nearCloud += cloud ? 1 : 0; }
+                    if (nearest[k] > 0.6f)  { ++seamN; seamCloud += cloud ? 1 : 0; }
+                }
+                const double nearFrac = nearN ? static_cast<double>(nearCloud) / nearN : 0.0;
+                const double seamFrac = seamN ? static_cast<double>(seamCloud) / seamN : 0.0;
+                const double frac     = static_cast<double>(cloudy) / d.size();
+                std::printf("  lacunarity %.2f: updraft at %4d of %zu centres; cloud %5.1f%%, "
+                            "near centres %5.1f%%, on seams %5.1f%%\n", lac, centresWithUpdraft,
+                            vigorous.size(), 100.0 * frac, 100.0 * nearFrac, 100.0 * seamFrac);
+
+                if (lac >= 0.25f && centresWithUpdraft > 0) holedEverywhere = false;
+                if (lac > 0.25f) widening = widening && nearFrac < prevNear;
+                if (lac > 0.0f)  filling  = filling && seamFrac >= prevSeam && seamFrac > seamAtZero + 0.2;
+                if (lac == 0.0f) seamAtZero = seamFrac;
+                prevNear = nearFrac;
+                prevSeam = seamFrac;
+                fullFrac = frac;
+            }
+            check(holedEverywhere, "a vigorous centre kept its updraft with lacunarity on");
+            check(widening, "the holes did not widen as lacunarity rose");
+            check(filling, "the sheet did not fill the seams as lacunarity rose");
+            check(fullFrac > 0.3 && fullFrac < 0.95, "full lacunarity is not a sheet with holes");
         }
     }
 

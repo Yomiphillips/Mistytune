@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <thread>
 #include <vector>
 
@@ -52,7 +53,27 @@ namespace mistytune_cpu_backend {
 // CUDA path uses; only the vector constructors below differ.
 #include "SlangBridge.h"
 
+#include "AirMapHost.h"
+
 namespace plugin::kernel {
+
+namespace {
+
+// The backend's vector constructors, handed to the shared marshalling in SlangBridge.h.
+// This is the entire difference between the two backends' Scenes.
+struct CpuVectors {
+    static mistytune_cpu_backend::Vector<float, 2> v2(float x, float y) {
+        mistytune_cpu_backend::Vector<float, 2> v; v.x = x; v.y = y; return v;
+    }
+    static mistytune_cpu_backend::Vector<float, 3> v3(float x, float y, float z) {
+        mistytune_cpu_backend::Vector<float, 3> v; v.x = x; v.y = y; v.z = z; return v;
+    }
+    static mistytune_cpu_backend::Vector<int32_t, 3> i3(int x, int y, int z) {
+        mistytune_cpu_backend::Vector<int32_t, 3> v; v.x = x; v.y = y; v.z = z; return v;
+    }
+};
+
+} // namespace
 
 // ---------------------------------------------------------------------------
 // The seam Shading.h declares
@@ -64,18 +85,6 @@ namespace plugin::kernel {
 MT_RENDER Vec3 mistytuneTrace(const RenderRequest& req, Vec3 ro, Vec3 rd,
                               unsigned int seed) {
     namespace be = mistytune_cpu_backend;
-
-    struct CpuVectors {
-        static be::Vector<float, 2> v2(float x, float y) {
-            be::Vector<float, 2> v; v.x = x; v.y = y; return v;
-        }
-        static be::Vector<float, 3> v3(float x, float y, float z) {
-            be::Vector<float, 3> v; v.x = x; v.y = y; v.z = z; return v;
-        }
-        static be::Vector<int32_t, 3> i3(int x, int y, int z) {
-            be::Vector<int32_t, 3> v; v.x = x; v.y = y; v.z = z; return v;
-        }
-    };
 
     be::Scene_0      scene{};
     be::PhaseInput_0 phase{};
@@ -122,6 +131,91 @@ float* reserveAccumulator(size_t floats) {
     return g_accum.data();
 }
 
+// ---------------------------------------------------------------------------
+// The clouds' shadow maps
+// ---------------------------------------------------------------------------
+//
+// OWNED BY THE CALLING THREAD, like the accumulator and for the same reason: the bands of
+// one frame are rendered by one caller, so they find the map the first band built. Under
+// multi-frame rendering each worker has its own, and nothing is locked.
+//
+// REBUILT ONLY WHEN ITS KEY MOVES -- see AirMapHost.h for what the key is. A sample chunk
+// or a band of the same frame is a hit, and so is re-rendering a frame whose exposure
+// changed.
+thread_local std::vector<float>         g_airMapTexels;
+thread_local std::vector<unsigned char> g_airMapKey;
+
+void prepareAirMapsCpu(RenderRequest& work, int threads) {
+    namespace be = mistytune_cpu_backend;
+
+    be::Scene_0 scene;
+    std::vector<unsigned char> key;
+    const AirMapPlan plan =
+        planAirMapsFor<CpuVectors, be::Scene_0, be::PhaseInput_0>(work, scene, key);
+
+    work.airMaps      = plan;
+    work.airMapBuffer = nullptr;
+    if (!plan.on || plan.totalFloats <= 0) return;
+
+    const size_t floats = static_cast<size_t>(plan.totalFloats);
+    if (key != g_airMapKey || g_airMapTexels.size() < floats) {
+        g_airMapKey.clear();
+        g_airMapTexels.resize(floats);
+
+        be::StructuredBuffer<be::Vector<float, 2>> drift;
+        drift.data  = reinterpret_cast<be::Vector<float, 2>*>(work.drift.xz);
+        drift.count = static_cast<size_t>(cloud::kDriftKnots);
+
+        for (int layer = 0; layer < 2; ++layer) {
+            const AirMapGeometry& g = plan.layer[layer];
+            if (!g.present) continue;
+
+            be::LayerShadowMap_0 map;
+            std::memset(static_cast<void*>(&map), 0, sizeof map);
+            fillAirMap<CpuVectors>(g, g_airMapTexels.data(), map);
+
+            be::Medium_0 medium = layer == 0 ? scene.medium_0 : scene.medium2_0;
+
+            be::RWStructuredBuffer<float> out;
+            out.data  = g_airMapTexels.data() + g.offset;
+            out.count = static_cast<size_t>(airMapFloats(g));
+
+            // COLUMNS ACROSS THREADS IN CONTIGUOUS RUNS. Each column writes only its own
+            // texels, so any split gives the same bytes.
+            const int texels = g.dimU * g.dimV;
+            int pool = threads;
+            if (pool <= 0) {
+                const unsigned int hw = std::thread::hardware_concurrency();
+                pool = hw == 0 ? 1 : static_cast<int>(hw);
+            }
+            if (pool > texels) pool = texels;
+
+            const auto columns = [&](int i0, int i1) {
+                be::Medium_0         m  = medium;
+                be::LayerShadowMap_0 mp = map;
+                for (int i = i0; i < i1; ++i) be::layerMapColumn_0(&m, drift, &mp, i, out);
+            };
+
+            if (pool <= 1) {
+                columns(0, texels);
+            } else {
+                std::vector<std::thread> workers;
+                workers.reserve(static_cast<size_t>(pool));
+                const int run = (texels + pool - 1) / pool;
+                for (int w = 0; w < pool; ++w) {
+                    const int i0 = w * run;
+                    const int i1 = std::min(i0 + run, texels);
+                    if (i0 >= i1) break;
+                    workers.emplace_back(columns, i0, i1);
+                }
+                for (std::thread& th : workers) th.join();
+            }
+        }
+        g_airMapKey = key;
+    }
+    work.airMapBuffer = g_airMapTexels.data();
+}
+
 } // namespace
 
 void renderCpu(const RenderRequest& req, int threads, int rowBegin, int rowEnd) {
@@ -134,6 +228,10 @@ void renderCpu(const RenderRequest& req, int threads, int rowBegin, int rowEnd) 
     if (rowBegin >= rowEnd) return;
 
     const int height = rowEnd - rowBegin;
+
+    // THE SHADOW MAPS' POOL IS SIZED BEFORE THE ROWS CLAMP IT. A thin band would otherwise
+    // build a 512 x 512 map on one or two threads.
+    const int mapThreads = threads;
 
     // ROWS ACROSS THREADS, AT THE MACHINE'S FULL WIDTH.
     //
@@ -184,6 +282,10 @@ void renderCpu(const RenderRequest& req, int threads, int rowBegin, int rowEnd) 
     // and eight-byte aligned rather than two tidy parallel ones. See IceField.h.
     deriveRenderInputs(work);
     work.driftBuffer = work.drift.xz;
+
+    // THE CLOUDS' SHADOW MAPS, built here at most once per change and found again by every
+    // later band and sample chunk of the frame. See AirMapLib.slang.
+    prepareAirMapsCpu(work, mapThreads);
 
     // THE TRANSMITTANCE TABLE NEEDS NOTHING DOING TO IT HERE, and that asymmetry with
     // the CUDA path is worth a line rather than silence: deriveRenderInputs left the

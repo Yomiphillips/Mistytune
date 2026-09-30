@@ -35,7 +35,7 @@ void skyMain(uint3 tid : SV_DispatchThreadID,
 {
     int i = int(tid.x);
     if (i >= count) return;
-    output[i] = skyRadiance(params, originAltitude, directions[i], true);
+    output[i] = skyRadiance(params, originAltitude, directions[i], true, 1.0f);
 }
 
 // THE AIR IN FRONT OF A CLOUD, for slang.skyParity's second half. Not a parity check
@@ -68,5 +68,5 @@ void airMain(uint3 tid : SV_DispatchThreadID,
     airT[i]     = seg.airT;
     shadowAt[i] = seg.shadowAt;
     trans[i]    = airTransmittance(params, originAltitude, d, distances[i]);
-    sky[i]      = skyRadiance(params, originAltitude, d, false);
+    sky[i]      = skyRadiance(params, originAltitude, d, false, 1.0f);
 }

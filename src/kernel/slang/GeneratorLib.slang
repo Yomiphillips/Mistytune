@@ -75,6 +75,10 @@
 #ifndef MISTYTUNE_GENERATOR_LIB_SLANG
 #define MISTYTUNE_GENERATOR_LIB_SLANG
 
+// The Organization group, which both generators share. It reads gradientNoise and
+// kFbmBound from further down this file; Slang resolves a module's names in any order.
+#include "OrganizationLib.slang"
+
 public struct GeneratorInput
 {
     float cellAltitude;   // m, the release level
@@ -90,6 +94,9 @@ public struct GeneratorInput
     float opticalDepth;   // what a vertical path through a thick streak integrates to
     float timeSeconds;
     int   octaves;
+
+    // How the generating cells are arranged (build 20). Zero is no organization.
+    Organization gnOrg;
 };
 
 // THE GRID IS WIDER THAN THE CELLS, and that spacing is the whole reason this reads
@@ -212,9 +219,10 @@ public float fbm(float3 p, int octaves)
 public float cellField(GeneratorInput g, float2 q)
 {
     float spacing = g.cellSize * kCellSpacing;
-    float2 gq = (q - g.cellDrift) / spacing;
+    float2 gq = orgPattern(g.gnOrg, q - g.cellDrift, spacing);
     float2 gf = floor(gq);
     int2   gi = int2(gf);
+    float2 jitterWidth = orgJitter(g.gnOrg, kCellJitter);
 
     float acc = 0.0f;
 
@@ -233,7 +241,7 @@ public float cellField(GeneratorInput g, float2 q)
             if (hash22(o, 0x9e3779b9u).x > g.cellDensity) continue;
 
             float2 jitter = hash22(o, 0u) - 0.5f;
-            float2 c = float2(o) + 0.5f + jitter * kCellJitter;
+            float2 c = float2(o) + 0.5f + jitter * jitterWidth;
 
             // Measured in cell-sizes rather than grid units, so cellSize means the
             // cell and not the spacing.
@@ -242,7 +250,9 @@ public float cellField(GeneratorInput g, float2 q)
         }
     }
 
-    return acc * g.cellStrength;
+    // THE WAVE, at most one, so cellOverlapBound's majorant still holds. Exactly one when
+    // there is no organization.
+    return acc * g.cellStrength * orgWaveFactor(g.gnOrg, q - g.cellDrift);
 }
 
 // ---------------------------------------------------------------------------
@@ -351,8 +361,9 @@ public static const float kFbmBound = 1.5f;
 public float cellFieldBound(GeneratorInput g, float2 q0, float2 q1)
 {
     float spacing = g.cellSize * kCellSpacing;
-    float2 a = (q0 - g.cellDrift) / spacing;
-    float2 b = (q1 - g.cellDrift) / spacing;
+    float2 a, b;
+    orgPatternBox(g.gnOrg, q0 - g.cellDrift, q1 - g.cellDrift, spacing, a, b);
+    float2 jitterWidth = orgJitter(g.gnOrg, kCellJitter);
 
     int2 i0 = int2(floor(a)) - int2(1, 1);
     int2 i1 = int2(floor(b)) + int2(1, 1);
@@ -370,7 +381,7 @@ public float cellFieldBound(GeneratorInput g, float2 q0, float2 q1)
         if (hash22(o, 0x9e3779b9u).x > g.cellDensity) continue;
 
         float2 jitter = hash22(o, 0u) - 0.5f;
-        float2 c = float2(o) + 0.5f + jitter * kCellJitter;
+        float2 c = float2(o) + 0.5f + jitter * jitterWidth;
 
         // Per-axis distance from the box to the centre; zero on an axis where the
         // centre lies inside the box's span.

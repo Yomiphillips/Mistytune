@@ -509,7 +509,11 @@ int main() {
     }
     cudaMemcpy(dLut, lut.data(), lut.size() * sizeof(float), cudaMemcpyHostToDevice);
 
+    // ZEROED FIRST, which leaves groundSkyLight at zero: the kernel's one addition to
+    // Shading.h's sky, and zero is where the two must agree bit for bit. The ground-light
+    // check after the bitwise one sets it.
     SkyInput_0 slangIn;
+    std::memset(static_cast<void*>(&slangIn), 0, sizeof slangIn);
     slangIn.transmittanceLut_0.data  = dLut;
     slangIn.transmittanceLut_0.count = lut.size();
     slangIn.planetRadius_0     = field.physics.planetRadius;
@@ -640,7 +644,54 @@ int main() {
     }
     std::printf("\n");
 
-    const int airFailures = airChecks(
+    // ===================================================================
+    // THE GROUND'S SKYLIGHT (build 19), the kernel's one term Shading.h lacks. Set, it
+    // must leave every ray that cannot reach the ground bit for bit alone, brighten every
+    // ray that lands on it by no more than itself, and, looking straight down from 2 m
+    // through almost no air, by almost exactly itself.
+    // ===================================================================
+    int groundFailures = 0;
+    {
+        const float3 light = make_float3(0.1f, 0.2f, 0.3f);
+        SkyInput_0 lit = slangIn;
+        lit.groundSkyLight_0 = light;
+
+        std::vector<float3> base(count), with(count);
+        skyMain<<<grid, block>>>(slangIn, 2.0f, sDirs, sOut, count);
+        cudaDeviceSynchronize();
+        cudaMemcpy(base.data(), dSlang, count * sizeof(float3), cudaMemcpyDeviceToHost);
+        skyMain<<<grid, block>>>(lit, 2.0f, sDirs, sOut, count);
+        cudaDeviceSynchronize();
+        cudaMemcpy(with.data(), dSlang, count * sizeof(float3), cudaMemcpyDeviceToHost);
+
+        int upChanged = 0, downWrong = 0, down = 0;
+        double straightDown = 1.0;
+        for (int i = 0; i < count; ++i) {
+            const float gain[3] = { with[i].x - base[i].x, with[i].y - base[i].y,
+                                    with[i].z - base[i].z };
+            const float lim[3]  = { light.x, light.y, light.z };
+            if (dirs[i].y >= 0.0f) {
+                if (std::memcmp(&with[i], &base[i], sizeof(float3)) != 0) ++upChanged;
+            } else if (dirs[i].y < -0.01f) {
+                ++down;
+                for (int c = 0; c < 3; ++c) {
+                    if (!(gain[c] > 0.0f) || gain[c] > lim[c] * 1.0001f) { ++downWrong; break; }
+                }
+                if (dirs[i].y < -0.9999f) {
+                    for (int c = 0; c < 3; ++c) {
+                        straightDown = std::fmin(straightDown, gain[c] / lim[c]);
+                    }
+                }
+            }
+        }
+        const bool ok = upChanged == 0 && downWrong == 0 && down > 0 && straightDown > 0.999;
+        std::printf("ground skylight: %d rays up changed (must be 0), %d of %d rays down "
+                    "outside (0, light] (must be 0), straight down gains %.5f of it  %s\n",
+                    upChanged, downWrong, down, straightDown, ok ? "ok" : "FAIL");
+        if (!ok) groundFailures = 1;
+    }
+
+    const int airFailures = groundFailures + airChecks(
         slangIn, lut, plugin::cloud::transmittanceParamsFrom(field.physics, field.atmosphere));
     if (airFailures) {
         std::printf("\nTHE AIR IN FRONT OF A CLOUD FAILED %d CHECK(S). See the numbered lines\n"
