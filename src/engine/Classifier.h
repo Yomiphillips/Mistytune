@@ -23,6 +23,12 @@
 //                     undulatus    in waves
 //                     radiatus     in parallel rows
 //                     lacunosus    a sheet with round holes
+//     + mamma       pouches hanging from the underside, after any variety (build 23).
+//     + pileus      a smooth cap over the hero's crown (build 24)
+//     + velum       a wide thin veil the hero rises through (build 24)
+//                   THE ATLAS LISTS IT UNDER Sc AND Cb, NOT Cu: on a cumulus here it is the
+//                   hero standing in for the cumulonimbus this generator cannot make yet,
+//                   and the readout names what the user sees rather than refusing to.
 //   cirrus          fibratus     filaments without hooks or tufts
 //                   uncinus      filaments ending in hooks: a turning or shearing wind
 //                   spissatus    dense enough to grey against the sun
@@ -57,6 +63,12 @@ struct LayerClass {
 
     // Up to two varieties, "" for none: the deck's opacity first, then its pattern.
     const char* variety[2] = { "", "" };
+
+    // SUPPLEMENTARY FEATURES AND ACCESSORY CLOUDS, "" for none: mamma (build 23), then
+    // pileus and velum (build 24). The atlas writes them after the varieties, features
+    // before accessory clouds -- "Cumulus congestus mamma pileus" -- and none is a variety:
+    // each hangs off the cloud, or sits on it.
+    const char* feature[3] = { "", "", "" };
 };
 
 struct SkyClass {

@@ -43,6 +43,30 @@ struct ConvectionInput_0
     Organization_0 cvOrg_0;
     float cvGapWidth_0;
     float cvLacunarity_0;
+    int cvShapeOn_0;
+    StructuredBuffer<float> cvShapeMap_0;
+    int2  cvShapeDim_0;
+    float2  cvShapeOffset_0;
+    float cvShapeTexel_0;
+    float2  cvShapeAxisU_0;
+    float cvShapeRound_0;
+    float cvShapeHalfWidth_0;
+    float cvShapeDecay_0;
+    float cvShapeBillow_0;
+    float cvMoat_0;
+    float cvGroupReach_0;
+    int cvTurretCount_0;
+    float4  cvTurret0_0;
+    float4  cvTurret1_0;
+    float4  cvTurret2_0;
+    float4  cvTurret3_0;
+    float4  cvTurret4_0;
+    float cvMammaDepth_0;
+    float cvPouchSize_0;
+    float cvPileusThick_0;
+    float cvPileusGap_0;
+    float cvVelumThick_0;
+    float cvVelumHeight_0;
 };
 
 static __device__ float dot_0(float2  x_0, float2  y_0)
@@ -925,14 +949,14 @@ static __device__ int clamp_1(int x_9, int minBound_1, int maxBound_1)
     return (I32_min(((I32_max((x_9), (minBound_1)))), (maxBound_1)));
 }
 
-static __device__ float length_0(float2  x_10)
+static __device__ float3  lerp_2(float3  x_10, float3  y_4, float3  s_6)
 {
-    return (F32_sqrt((dot_0(x_10, x_10))));
+    return x_10 + (y_4 - x_10) * s_6;
 }
 
-static __device__ float2  abs_0(float2  x_11)
+static __device__ int2  min_0(int2  x_11, int2  y_5)
 {
-    float2  result_3;
+    int2  result_3;
     int i_6 = int(0);
     for(;;)
     {
@@ -943,15 +967,15 @@ static __device__ float2  abs_0(float2  x_11)
         {
             break;
         }
-        *_slang_vector_get_element_ptr(&result_3, i_6) = (F32_abs((_slang_vector_get_element(x_11, i_6))));
+        *_slang_vector_get_element_ptr(&result_3, i_6) = (I32_min((_slang_vector_get_element(x_11, i_6)), (_slang_vector_get_element(y_5, i_6))));
         i_6 = i_6 + int(1);
     }
     return result_3;
 }
 
-static __device__ bool all_0(bool2  x_12)
+static __device__ float2  max_0(float2  x_12, float2  y_6)
 {
-    bool result_4 = true;
+    float2  result_4;
     int i_7 = int(0);
     for(;;)
     {
@@ -962,26 +986,13 @@ static __device__ bool all_0(bool2  x_12)
         {
             break;
         }
-        if(result_4)
-        {
-            result_4 = (bool((_slang_vector_get_element(x_12, i_7))));
-        }
-        else
-        {
-            result_4 = false;
-        }
+        *_slang_vector_get_element_ptr(&result_4, i_7) = (F32_max((_slang_vector_get_element(x_12, i_7)), (_slang_vector_get_element(y_6, i_7))));
         i_7 = i_7 + int(1);
     }
     return result_4;
 }
 
-static __device__ float smoothstep_0(float min_0, float max_0, float x_13)
-{
-    float _S72 = saturate_0((x_13 - min_0) / (max_0 - min_0));
-    return _S72 * _S72 * (3.0f - (_S72 + _S72));
-}
-
-static __device__ float2  min_1(float2  x_14, float2  y_4)
+static __device__ float2  min_1(float2  x_13, float2  y_7)
 {
     float2  result_5;
     int i_8 = int(0);
@@ -994,13 +1005,23 @@ static __device__ float2  min_1(float2  x_14, float2  y_4)
         {
             break;
         }
-        *_slang_vector_get_element_ptr(&result_5, i_8) = (F32_min((_slang_vector_get_element(x_14, i_8)), (_slang_vector_get_element(y_4, i_8))));
+        *_slang_vector_get_element_ptr(&result_5, i_8) = (F32_min((_slang_vector_get_element(x_13, i_8)), (_slang_vector_get_element(y_7, i_8))));
         i_8 = i_8 + int(1);
     }
     return result_5;
 }
 
-static __device__ float2  max_1(float2  x_15, float2  y_5)
+static __device__ float2  clamp_2(float2  x_14, float2  minBound_2, float2  maxBound_2)
+{
+    return min_1(max_0(x_14, minBound_2), maxBound_2);
+}
+
+static __device__ float length_0(float2  x_15)
+{
+    return (F32_sqrt((dot_0(x_15, x_15))));
+}
+
+static __device__ float2  abs_0(float2  x_16)
 {
     float2  result_6;
     int i_9 = int(0);
@@ -1013,10 +1034,42 @@ static __device__ float2  max_1(float2  x_15, float2  y_5)
         {
             break;
         }
-        *_slang_vector_get_element_ptr(&result_6, i_9) = (F32_max((_slang_vector_get_element(x_15, i_9)), (_slang_vector_get_element(y_5, i_9))));
+        *_slang_vector_get_element_ptr(&result_6, i_9) = (F32_abs((_slang_vector_get_element(x_16, i_9))));
         i_9 = i_9 + int(1);
     }
     return result_6;
+}
+
+static __device__ bool all_0(bool2  x_17)
+{
+    bool result_7 = true;
+    int i_10 = int(0);
+    for(;;)
+    {
+        if(i_10 < int(2))
+        {
+        }
+        else
+        {
+            break;
+        }
+        if(result_7)
+        {
+            result_7 = (bool((_slang_vector_get_element(x_17, i_10))));
+        }
+        else
+        {
+            result_7 = false;
+        }
+        i_10 = i_10 + int(1);
+    }
+    return result_7;
+}
+
+static __device__ float smoothstep_0(float min_2, float max_1, float x_18)
+{
+    float _S72 = saturate_0((x_18 - min_2) / (max_1 - min_2));
+    return _S72 * _S72 * (3.0f - (_S72 + _S72));
 }
 
 struct Rng_0
@@ -1145,7 +1198,7 @@ static __device__ bool slabRange_0(Medium_0 * m_0, float3  ro_0, float3  rd_0, f
     if((m_0->fadeRadius_0) > 0.0f)
     {
         float2  _S81 = min_1(hi_1, m_0->fadeAt_0 + make_float2 (_S80));
-        lo_1 = max_1(lo_1, m_0->fadeAt_0 - make_float2 (_S80));
+        lo_1 = max_0(lo_1, m_0->fadeAt_0 - make_float2 (_S80));
         hi_1 = _S81;
     }
     bool _S82 = clipAxis_0(ro_0.x, rd_0.x, lo_1.x, hi_1.x, t0_1, t1_1);
@@ -1253,26 +1306,156 @@ static __device__ Dda_0 ddaInit_0(MajorantGrid_0 * g_3, float3  ro_1, float3  rd
     return d_5;
 }
 
-static __device__ float convCeiling_0(ConvectionInput_0 * c_9)
+static __device__ float convCapCeiling_0(ConvectionInput_0 * c_9)
 {
-    float _S95 = c_9->cvBillow_0;
-    float field_0 = c_9->cvDepth_0 + c_9->cvBillow_0;
-    float _S96 = c_9->cvHeroTop_0;
-    float hero_0;
-    if((c_9->cvHeroTop_0) > 0.0f)
+    float _S95 = c_9->cvHeroTop_0;
+    if((c_9->cvHeroTop_0) <= 0.0f)
     {
-        hero_0 = _S96 + _S95 * c_9->cvHeroBillow_0;
+        return 0.0f;
+    }
+    float _S96 = c_9->cvPileusThick_0;
+    float cap_0;
+    if((c_9->cvPileusThick_0) > 0.0f)
+    {
+        cap_0 = _S95 + c_9->cvPileusGap_0 + _S96;
+    }
+    else
+    {
+        cap_0 = 0.0f;
+    }
+    float _S97 = c_9->cvVelumThick_0;
+    float veil_0;
+    if((c_9->cvVelumThick_0) > 0.0f)
+    {
+        veil_0 = c_9->cvVelumHeight_0 + 1.5f * _S97;
+    }
+    else
+    {
+        veil_0 = 0.0f;
+    }
+    return (F32_max((cap_0), (veil_0)));
+}
+
+static __device__ float convCeiling_0(ConvectionInput_0 * c_10)
+{
+    float _S98 = c_10->cvBillow_0;
+    float field_0 = c_10->cvDepth_0 + c_10->cvBillow_0;
+    float _S99 = c_10->cvHeroTop_0;
+    float hero_0;
+    if((c_10->cvHeroTop_0) > 0.0f)
+    {
+        hero_0 = _S99 + _S98 * c_10->cvHeroBillow_0;
     }
     else
     {
         hero_0 = 0.0f;
     }
-    return (F32_max((field_0), (hero_0)));
+    float _S100 = (F32_max((field_0), (hero_0)));
+    float _S101 = convCapCeiling_0(c_10);
+    return (F32_max((_S100), (_S101)));
 }
 
-static __device__ float convLift_0(ConvectionInput_0 * c_10, float above_0, float k_1)
+static __device__ float convDomeHeight_0(float top_0, float radius_0, float shape_0, float r_2)
 {
-    return (F32_min((c_10->cvBillow_0 * k_1 * smoothstep_0(0.0f, 150.0f, above_0) * lerp_0(0.60000002384185791f, 1.0f, saturate_0(above_0 / (F32_max((c_10->cvDepth_0), (1.0f)))))), (0.69999998807907104f * (F32_max((above_0), (0.0f))))));
+    bool _S102;
+    if(top_0 <= 0.0f)
+    {
+        _S102 = true;
+    }
+    else
+    {
+        _S102 = r_2 >= radius_0;
+    }
+    if(_S102)
+    {
+        return 0.0f;
+    }
+    return top_0 * (F32_pow((1.0f - r_2 * r_2 / (radius_0 * radius_0)), (shape_0)));
+}
+
+static __device__ float convHeroHeight_0(ConvectionInput_0 * c_11, float r_3)
+{
+    return convDomeHeight_0(c_11->cvHeroTop_0, c_11->cvHeroRadius_0, c_11->cvShape_0, r_3);
+}
+
+static __device__ float convCapBound_0(ConvectionInput_0 * c_12, float3  lo_2, float3  hi_2, float low_0, float high_0)
+{
+    float2  nearGap_0 = max_0(max_0(float2 {lo_2.x, lo_2.z} - c_12->cvHeroAt_0, c_12->cvHeroAt_0 - float2 {hi_2.x, hi_2.z}), make_float2 (0.0f, 0.0f));
+    float gap2_0 = dot_0(nearGap_0, nearGap_0);
+    float _S103 = c_12->cvHeroRadius_0;
+    float _S104 = c_12->cvPileusThick_0;
+    bool _S105;
+    float best_0;
+    if((c_12->cvPileusThick_0) > 0.0f)
+    {
+        float rp_0 = 0.60000002384185791f * _S103;
+        float _S106 = c_12->cvPileusGap_0;
+        float _S107 = convHeroHeight_0(c_12, rp_0 * 0.60000002384185791f);
+        float _S108 = 0.5f * _S104;
+        float bottom_0 = _S106 + _S107 - _S108;
+        float top_1 = _S106 + c_12->cvHeroTop_0 + _S108;
+        if(gap2_0 < (rp_0 * rp_0))
+        {
+            _S105 = high_0 >= bottom_0;
+        }
+        else
+        {
+            _S105 = false;
+        }
+        if(_S105)
+        {
+            _S105 = low_0 <= top_1;
+        }
+        else
+        {
+            _S105 = false;
+        }
+        if(_S105)
+        {
+            best_0 = (F32_max((0.0f), (0.44999998807907104f)));
+        }
+        else
+        {
+            best_0 = 0.0f;
+        }
+    }
+    else
+    {
+        best_0 = 0.0f;
+    }
+    float _S109 = c_12->cvVelumThick_0;
+    if((c_12->cvVelumThick_0) > 0.0f)
+    {
+        float ext_0 = 1.89999997615814209f * _S103;
+        float bottom_1 = c_12->cvVelumHeight_0 - 0.5f * _S109;
+        float top_2 = c_12->cvVelumHeight_0 + _S109;
+        if(gap2_0 < (ext_0 * ext_0))
+        {
+            _S105 = high_0 >= bottom_1;
+        }
+        else
+        {
+            _S105 = false;
+        }
+        if(_S105)
+        {
+            _S105 = low_0 <= top_2;
+        }
+        else
+        {
+            _S105 = false;
+        }
+        if(_S105)
+        {
+            best_0 = (F32_max((best_0), (0.2199999988079071f)));
+        }
+    }
+    return c_12->cvSigma_0 * best_0 * 1.00001001358032227f;
+}
+
+static __device__ float convLift_0(ConvectionInput_0 * c_13, float above_0, float k_1)
+{
+    return (F32_min((c_13->cvBillow_0 * k_1 * smoothstep_0(0.0f, 150.0f, above_0) * lerp_0(0.60000002384185791f, 1.0f, saturate_0(above_0 / (F32_max((c_13->cvDepth_0), (1.0f)))))), (0.69999998807907104f * (F32_max((above_0), (0.0f))))));
 }
 
 static __device__ void orgPatternBox_0(Organization_0 * o_6, float2  q0_0, float2  q1_0, float spacing_2, float2  * a_1, float2  * b_0)
@@ -1285,41 +1468,41 @@ static __device__ void orgPatternBox_0(Organization_0 * o_6, float2  q0_0, float
     }
     Organization_0 flat_0 = *o_6;
     (&flat_0)->ogWarp_0 = 0.0f;
-    Organization_0 _S97 = flat_0;
-    float2  _S98 = orgPattern_0(&_S97, q0_0, spacing_2);
-    Organization_0 _S99 = flat_0;
-    float2  _S100 = orgPattern_0(&_S99, q1_0, spacing_2);
-    float2  _S101 = make_float2 (q0_0.x, q1_0.y);
-    Organization_0 _S102 = flat_0;
-    float2  _S103 = orgPattern_0(&_S102, _S101, spacing_2);
-    float2  _S104 = make_float2 (q1_0.x, q0_0.y);
-    Organization_0 _S105 = flat_0;
-    float2  _S106 = orgPattern_0(&_S105, _S104, spacing_2);
-    float grow_0 = o_6->ogWarp_0 * 1.5f + 0.00009999999747379f + 9.99999997475242708e-07f * (F32_max(((F32_max(((F32_abs((_S98.x)))), ((F32_abs((_S98.y))))))), ((F32_max(((F32_abs((_S100.x)))), ((F32_abs((_S100.y)))))))));
-    *a_1 = min_1(min_1(_S98, _S103), min_1(_S106, _S100)) - make_float2 (grow_0);
-    *b_0 = max_1(max_1(_S98, _S103), max_1(_S106, _S100)) + make_float2 (grow_0);
+    Organization_0 _S110 = flat_0;
+    float2  _S111 = orgPattern_0(&_S110, q0_0, spacing_2);
+    Organization_0 _S112 = flat_0;
+    float2  _S113 = orgPattern_0(&_S112, q1_0, spacing_2);
+    float2  _S114 = make_float2 (q0_0.x, q1_0.y);
+    Organization_0 _S115 = flat_0;
+    float2  _S116 = orgPattern_0(&_S115, _S114, spacing_2);
+    float2  _S117 = make_float2 (q1_0.x, q0_0.y);
+    Organization_0 _S118 = flat_0;
+    float2  _S119 = orgPattern_0(&_S118, _S117, spacing_2);
+    float grow_0 = o_6->ogWarp_0 * 1.5f + 0.00009999999747379f + 9.99999997475242708e-07f * (F32_max(((F32_max(((F32_abs((_S111.x)))), ((F32_abs((_S111.y))))))), ((F32_max(((F32_abs((_S113.x)))), ((F32_abs((_S113.y)))))))));
+    *a_1 = min_1(min_1(_S111, _S116), min_1(_S119, _S113)) - make_float2 (grow_0);
+    *b_0 = max_0(max_0(_S111, _S116), max_0(_S119, _S113)) + make_float2 (grow_0);
     return;
 }
 
-static __device__ void convSlotBound_0(ConvectionInput_0 * c_11, int2  slot_6, float2  a_2, float2  b_1, float * openTop_0, float * openNext_0, float * hiTop_0, float * loTop_0, float * loNext_0)
+static __device__ void convSlotBound_0(ConvectionInput_0 * c_14, int2  slot_6, float2  a_2, float2  b_1, float * openTop_0, float * openNext_0, float * hiTop_0, float * loTop_0, float * loNext_0)
 {
-    float _S107 = convVigour_0(c_11, slot_6);
-    if(_S107 <= 0.0f)
+    float _S120 = convVigour_0(c_14, slot_6);
+    if(_S120 <= 0.0f)
     {
         return;
     }
-    float2  _S108 = convCellCentre_0(c_11, slot_6);
-    float2  _S109 = a_2 - _S108;
-    float2  nearGap_0 = max_1(max_1(_S109, _S108 - b_1), make_float2 (0.0f, 0.0f));
-    float dNear_0 = dot_0(nearGap_0, nearGap_0);
+    float2  _S121 = convCellCentre_0(c_14, slot_6);
+    float2  _S122 = a_2 - _S121;
+    float2  nearGap_1 = max_0(max_0(_S122, _S121 - b_1), make_float2 (0.0f, 0.0f));
+    float dNear_0 = dot_0(nearGap_1, nearGap_1);
     if(dNear_0 >= 1.10249984264373779f)
     {
         return;
     }
-    float2  farGap_0 = max_1(abs_0(_S109), abs_0(b_1 - _S108));
-    float oHi_0 = _S107 * convBump_0(dNear_0, 0.75f);
-    float kHi_0 = _S107 * convBump_0(dNear_0, 1.04999995231628418f);
-    float kLo_0 = _S107 * convBump_0(dot_0(farGap_0, farGap_0), 1.04999995231628418f);
+    float2  farGap_0 = max_0(abs_0(_S122), abs_0(b_1 - _S121));
+    float oHi_0 = _S120 * convBump_0(dNear_0, 0.75f);
+    float kHi_0 = _S120 * convBump_0(dNear_0, 1.04999995231628418f);
+    float kLo_0 = _S120 * convBump_0(dot_0(farGap_0, farGap_0), 1.04999995231628418f);
     if(oHi_0 > (*openTop_0))
     {
         *openNext_0 = *openTop_0;
@@ -1348,32 +1531,32 @@ static __device__ void convSlotBound_0(ConvectionInput_0 * c_11, int2  slot_6, f
     return;
 }
 
-static __device__ float convUpdraftBound_0(ConvectionInput_0 * c_12, float2  q0_1, float2  q1_1)
+static __device__ float convUpdraftBound_0(ConvectionInput_0 * c_15, float2  q0_1, float2  q1_1)
 {
     float2  a_3;
     float2  b_2;
-    orgPatternBox_0(&c_12->cvOrg_0, q0_1, q1_1, c_12->cvSpacing_0, &a_3, &b_2);
+    orgPatternBox_0(&c_15->cvOrg_0, q0_1, q1_1, c_15->cvSpacing_0, &a_3, &b_2);
     float openTop_1 = 0.0f;
     float openNext_1 = 0.0f;
     float hiTop_1 = 0.0f;
     float loTop_1 = 0.0f;
     float loNext_1 = 0.0f;
-    float2  _S110 = floor_1((a_3 + b_2) * make_float2 (0.5f));
-    int2  _S111 = make_int2 ((int)_S110.x, (int)_S110.y);
-    float2  _S112 = make_float2 ((float)_S111.x, (float)_S111.y);
-    float2  highEdge_0 = _S112 + make_float2 (1.0f) + make_float2 (0.00009999999747379f);
-    bool _S113;
-    if(all_0(a_3 >= (_S112 - make_float2 (0.00009999999747379f))))
+    float2  _S123 = floor_1((a_3 + b_2) * make_float2 (0.5f));
+    int2  _S124 = make_int2 ((int)_S123.x, (int)_S123.y);
+    float2  _S125 = make_float2 ((float)_S124.x, (float)_S124.y);
+    float2  highEdge_0 = _S125 + make_float2 (1.0f) + make_float2 (0.00009999999747379f);
+    bool _S126;
+    if(all_0(a_3 >= (_S125 - make_float2 (0.00009999999747379f))))
     {
-        _S113 = all_0(b_2 <= highEdge_0);
+        _S126 = all_0(b_2 <= highEdge_0);
     }
     else
     {
-        _S113 = false;
+        _S126 = false;
     }
     int j_7;
-    int i_10;
-    if(_S113)
+    int i_11;
+    if(_S126)
     {
         j_7 = int(-1);
         for(;;)
@@ -1385,82 +1568,82 @@ static __device__ float convUpdraftBound_0(ConvectionInput_0 * c_12, float2  q0_
             {
                 break;
             }
-            i_10 = int(-1);
+            i_11 = int(-1);
             for(;;)
             {
-                if(i_10 <= int(1))
+                if(i_11 <= int(1))
                 {
                 }
                 else
                 {
                     break;
                 }
-                convSlotBound_0(c_12, _S111 + make_int2 (i_10, j_7), a_3, b_2, &openTop_1, &openNext_1, &hiTop_1, &loTop_1, &loNext_1);
-                i_10 = i_10 + int(1);
+                convSlotBound_0(c_15, _S124 + make_int2 (i_11, j_7), a_3, b_2, &openTop_1, &openNext_1, &hiTop_1, &loTop_1, &loNext_1);
+                i_11 = i_11 + int(1);
             }
             j_7 = j_7 + int(1);
         }
     }
     else
     {
-        float2  _S114 = floor_1(a_3);
-        int2  _S115 = make_int2 ((int)_S114.x, (int)_S114.y);
-        int2  _S116 = make_int2 (int(1), int(1));
-        int2  i0_0 = _S115 - _S116;
-        float2  _S117 = floor_1(b_2);
-        int2  _S118 = make_int2 ((int)_S117.x, (int)_S117.y);
-        int2  _S119 = _S118 + _S116;
-        int _S120 = i0_0.y;
-        j_7 = _S120;
+        float2  _S127 = floor_1(a_3);
+        int2  _S128 = make_int2 ((int)_S127.x, (int)_S127.y);
+        int2  _S129 = make_int2 (int(1), int(1));
+        int2  i0_0 = _S128 - _S129;
+        float2  _S130 = floor_1(b_2);
+        int2  _S131 = make_int2 ((int)_S130.x, (int)_S130.y);
+        int2  _S132 = _S131 + _S129;
+        int _S133 = i0_0.y;
+        j_7 = _S133;
         for(;;)
         {
-            if(j_7 <= (_S119.y))
+            if(j_7 <= (_S132.y))
             {
-                _S113 = j_7 <= (_S120 + int(32));
+                _S126 = j_7 <= (_S133 + int(32));
             }
             else
             {
-                _S113 = false;
+                _S126 = false;
             }
-            if(_S113)
+            if(_S126)
             {
             }
             else
             {
                 break;
             }
-            int _S121 = i0_0.x;
-            i_10 = _S121;
+            int _S134 = i0_0.x;
+            i_11 = _S134;
             for(;;)
             {
-                bool _S122;
-                if(i_10 <= (_S119.x))
+                bool _S135;
+                if(i_11 <= (_S132.x))
                 {
-                    _S122 = i_10 <= (_S121 + int(32));
+                    _S135 = i_11 <= (_S134 + int(32));
                 }
                 else
                 {
-                    _S122 = false;
+                    _S135 = false;
                 }
-                if(_S122)
+                if(_S135)
                 {
                 }
                 else
                 {
                     break;
                 }
-                convSlotBound_0(c_12, make_int2 (i_10, j_7), a_3, b_2, &openTop_1, &openNext_1, &hiTop_1, &loTop_1, &loNext_1);
-                i_10 = i_10 + int(1);
+                convSlotBound_0(c_15, make_int2 (i_11, j_7), a_3, b_2, &openTop_1, &openNext_1, &hiTop_1, &loTop_1, &loNext_1);
+                i_11 = i_11 + int(1);
             }
             j_7 = j_7 + int(1);
         }
     }
-    float field_1 = lerp_0((F32_min((openNext_1 / 0.31000000238418579f), (1.0f))), (F32_max((hiTop_1 - loNext_1), (0.0f))), c_12->cvPolarity_0);
-    float _S123 = c_12->cvLacunarity_0;
+    float field_1 = lerp_0((F32_min((openNext_1 / 0.31000000238418579f), (1.0f))), (F32_max((hiTop_1 - loNext_1), (0.0f))), c_15->cvPolarity_0);
+    float _S136 = c_15->cvLacunarity_0;
     float field_2;
-    if((c_12->cvLacunarity_0) > 0.0f)
+    if((c_15->cvLacunarity_0) > 0.0f)
     {
-        field_2 = lerp_0(field_1, 0.40000000596046448f, _S123);
+        field_2 = lerp_0(field_1, 0.40000000596046448f, _S136);
     }
     else
     {
@@ -1469,9 +1652,9 @@ static __device__ float convUpdraftBound_0(ConvectionInput_0 * c_12, float2  q0_
     return field_2 + 0.00000999999974738f;
 }
 
-static __device__ float convTowerHeight_0(ConvectionInput_0 * c_13, float w_1)
+static __device__ float convTowerHeight_0(ConvectionInput_0 * c_16, float w_1)
 {
-    float cover_0 = clamp_0(c_13->cvCoverage_0, 0.0f, 1.0f);
+    float cover_0 = clamp_0(c_16->cvCoverage_0, 0.0f, 1.0f);
     if(cover_0 <= 0.0f)
     {
         return 0.0f;
@@ -1482,238 +1665,598 @@ static __device__ float convTowerHeight_0(ConvectionInput_0 * c_13, float w_1)
     {
         return 0.0f;
     }
-    return c_13->cvDepth_0 * (F32_pow((u_2), (c_13->cvShape_0)));
+    return c_16->cvDepth_0 * (F32_pow((u_2), (c_16->cvShape_0)));
 }
 
-static __device__ float convNeededUpdraft_0(ConvectionInput_0 * c_14, float above_1)
+static __device__ float convNeededUpdraft_0(ConvectionInput_0 * c_17, float above_1)
 {
-    float cover_1 = clamp_0(c_14->cvCoverage_0, 0.0f, 1.0f);
-    bool _S124;
+    float cover_1 = clamp_0(c_17->cvCoverage_0, 0.0f, 1.0f);
+    bool _S137;
     if(cover_1 <= 0.0f)
     {
-        _S124 = true;
+        _S137 = true;
     }
     else
     {
-        _S124 = (c_14->cvDepth_0) <= 0.0f;
+        _S137 = (c_17->cvDepth_0) <= 0.0f;
     }
-    if(_S124)
+    if(_S137)
     {
         return 1.0e+09f;
     }
     float span_1 = (F32_sqrt((cover_1)));
-    return 1.0f - span_1 + span_1 * (F32_pow(((F32_max((above_1), (0.0f))) / c_14->cvDepth_0), (1.0f / (F32_max((c_14->cvShape_0), (0.00100000004749745f))))));
+    return 1.0f - span_1 + span_1 * (F32_pow(((F32_max((above_1), (0.0f))) / c_17->cvDepth_0), (1.0f / (F32_max((c_17->cvShape_0), (0.00100000004749745f))))));
 }
 
-static __device__ float convSlopeCap_0(ConvectionInput_0 * c_15)
+static __device__ float convSlopeCap_0(ConvectionInput_0 * c_18)
 {
-    float _S125 = c_15->cvSpacing_0;
-    float cap_0 = 7.0f / c_15->cvSpacing_0;
-    if(((&c_15->cvOrg_0)->ogOn_0) == int(0))
+    float _S138 = c_18->cvSpacing_0;
+    float cap_1 = 7.0f / c_18->cvSpacing_0;
+    if(((&c_18->cvOrg_0)->ogOn_0) == int(0))
     {
-        return cap_0;
+        return cap_1;
     }
-    float _S126 = c_15->cvLacunarity_0;
-    float cap_1;
-    if((c_15->cvLacunarity_0) > 0.0f)
+    float _S139 = c_18->cvLacunarity_0;
+    float cap_2;
+    if((c_18->cvLacunarity_0) > 0.0f)
     {
-        cap_1 = cap_0 + 1.5f / (0.15000000596046448f * _S126 * (F32_sqrt(((F32_sqrt((0.10000000149011612f)))))) * _S125);
+        cap_2 = cap_1 + 1.5f / (0.15000000596046448f * _S139 * (F32_sqrt(((F32_sqrt((0.10000000149011612f)))))) * _S138);
     }
     else
     {
-        cap_1 = cap_0;
+        cap_2 = cap_1;
     }
-    float _S127 = c_15->cvGapWidth_0;
-    if((c_15->cvGapWidth_0) > 0.0f)
+    float _S140 = c_18->cvGapWidth_0;
+    if((c_18->cvGapWidth_0) > 0.0f)
     {
-        cap_1 = cap_1 + 14.25f * c_15->cvPolarity_0 / (0.5f * _S127 * _S125);
+        cap_2 = cap_2 + 14.25f * c_18->cvPolarity_0 / (0.5f * _S140 * _S138);
     }
-    return cap_1 + 3.0f * (&c_15->cvOrg_0)->ogWaveAmp_0 * length_0((&c_15->cvOrg_0)->ogWaveK_0);
+    return cap_2 + 3.0f * (&c_18->cvOrg_0)->ogWaveAmp_0 * length_0((&c_18->cvOrg_0)->ogWaveK_0);
 }
 
-static __device__ float convDistanceFloor_0(float vMin_0, float hMin_0)
+static __device__ float4  convTurret_0(ConvectionInput_0 * c_19, int k_2)
 {
-    bool _S128;
-    if(vMin_0 <= 0.0f)
+    if(k_2 == int(0))
     {
-        _S128 = true;
+        return c_19->cvTurret0_0;
     }
-    else
+    if(k_2 == int(1))
     {
-        _S128 = hMin_0 <= 0.0f;
+        return c_19->cvTurret1_0;
     }
-    if(_S128)
+    if(k_2 == int(2))
     {
-        return 0.0f;
+        return c_19->cvTurret2_0;
     }
-    return 1.0f / (F32_sqrt((1.0f / (vMin_0 * vMin_0) + 1.0f / (hMin_0 * hMin_0))));
+    if(k_2 == int(3))
+    {
+        return c_19->cvTurret3_0;
+    }
+    return c_19->cvTurret4_0;
 }
 
-static __device__ float convHeroReach_0(ConvectionInput_0 * c_16)
+static __device__ float convMoatSlopeOver_0(ConvectionInput_0 * c_20, float2  lo_3, float2  hi_3)
 {
-    return c_16->cvHeroRadius_0 + 1.5f * c_16->cvBillow_0 * c_16->cvHeroBillow_0 + 24.0f;
-}
-
-static __device__ float convHeroHeight_0(ConvectionInput_0 * c_17, float r_2)
-{
-    float _S129 = c_17->cvHeroTop_0;
-    bool _S130;
-    if((c_17->cvHeroTop_0) <= 0.0f)
-    {
-        _S130 = true;
-    }
-    else
-    {
-        _S130 = r_2 >= (c_17->cvHeroRadius_0);
-    }
-    if(_S130)
-    {
-        return 0.0f;
-    }
-    return _S129 * (F32_pow((1.0f - r_2 * r_2 / (c_17->cvHeroRadius_0 * c_17->cvHeroRadius_0)), (c_17->cvShape_0)));
-}
-
-static __device__ float convHeroRadiusAt_0(ConvectionInput_0 * c_18, float above_2)
-{
-    float _S131 = c_18->cvHeroTop_0;
-    bool _S132;
-    if((c_18->cvHeroTop_0) <= 0.0f)
-    {
-        _S132 = true;
-    }
-    else
-    {
-        _S132 = above_2 >= _S131;
-    }
-    if(_S132)
-    {
-        return -1.0f;
-    }
-    return c_18->cvHeroRadius_0 * (F32_sqrt(((F32_max((1.0f - (F32_pow(((F32_max((above_2), (0.0f))) / _S131), (1.0f / (F32_max((c_18->cvShape_0), (0.00100000004749745f))))))), (0.0f))))));
-}
-
-static __device__ float convectionBound_0(ConvectionInput_0 * c_19, float3  lo_2, float3  hi_2)
-{
-    float low_0 = lo_2.y - c_19->cvBase_0;
-    float high_0 = hi_2.y - c_19->cvBase_0;
-    float _S133 = convCeiling_0(c_19);
-    bool _S134;
-    if(high_0 < 0.0f)
-    {
-        _S134 = true;
-    }
-    else
-    {
-        _S134 = low_0 > _S133;
-    }
-    if(_S134)
-    {
-        return 0.0f;
-    }
-    float _S135 = (F32_max((low_0), (0.0f)));
-    float _S136 = (F32_min((high_0), (_S133)));
-    float _S137 = convLift_0(c_19, _S136, 1.0f);
-    float inside_0;
-    if((c_19->cvHeroAlone_0) == int(0))
-    {
-        float _S138 = convUpdraftBound_0(c_19, float2 {lo_2.x, lo_2.z} - c_19->cvDrift_0, float2 {hi_2.x, hi_2.z} - c_19->cvDrift_0);
-        float _S139 = convTowerHeight_0(c_19, _S138);
-        float _S140 = convNeededUpdraft_0(c_19, _S135);
-        if(_S138 < _S140)
-        {
-            float _S141 = convSlopeCap_0(c_19);
-            inside_0 = _S137 - convDistanceFloor_0(_S135 - _S139, (_S140 - _S138) / _S141);
-        }
-        else
-        {
-            inside_0 = (F32_max((_S139 - _S135), (0.0f))) + _S137;
-        }
-    }
-    else
-    {
-        inside_0 = -1.00000001504746622e+30f;
-    }
-    if((c_19->cvHeroTop_0) > 0.0f)
-    {
-        float rMin_0 = length_0(max_1(max_1(float2 {lo_2.x, lo_2.z} - c_19->cvHeroAt_0, c_19->cvHeroAt_0 - float2 {hi_2.x, hi_2.z}), make_float2 (0.0f, 0.0f)));
-        float _S142 = convHeroReach_0(c_19);
-        if(rMin_0 < _S142)
-        {
-            float _S143 = convHeroHeight_0(c_19, rMin_0);
-            float _S144 = convHeroRadiusAt_0(c_19, _S135);
-            float _S145 = convLift_0(c_19, _S136, c_19->cvHeroBillow_0);
-            bool _S146 = _S144 < 0.0f;
-            if(_S146)
-            {
-                _S134 = true;
-            }
-            else
-            {
-                _S134 = rMin_0 >= _S144;
-            }
-            float heroIn_0;
-            if(_S134)
-            {
-                if(_S146)
-                {
-                    heroIn_0 = 1.00000001504746622e+30f;
-                }
-                else
-                {
-                    heroIn_0 = rMin_0 - _S144;
-                }
-                heroIn_0 = _S145 - convDistanceFloor_0(_S135 - _S143, heroIn_0);
-            }
-            else
-            {
-                heroIn_0 = (F32_max((_S143 - _S135), (0.0f))) + _S145;
-            }
-            inside_0 = (F32_max((inside_0), (heroIn_0)));
-        }
-    }
-    float inside_1 = inside_0 + 0.00100000004749745f;
-    if(inside_1 <= 0.0f)
-    {
-        return 0.0f;
-    }
-    return c_19->cvSigma_0 * (F32_sqrt((saturate_0(_S136 / 40.0f)))) * smoothstep_0(0.0f, 12.0f, inside_1) * 1.00001001358032227f;
-}
-
-static __device__ float2  driftAt_0(GeneratorInput_0 * g_4, StructuredBuffer<float2 > disp_0, float depth_0)
-{
-    float x_16 = clamp_0(depth_0 / g_4->streakLength_0, 0.0f, 1.0f) * 32.0f;
-    int i_11 = clamp_1(int((F32_floor((x_16)))), int(0), int(31));
-    float2  _S147 = __ldg((&(disp_0)[i_11]));
-    float2  _S148 = __ldg((&(disp_0)[i_11 + int(1)]));
-    return lerp_1(_S147, _S148, make_float2 (x_16 - float(i_11)));
-}
-
-static __device__ void driftRange_0(GeneratorInput_0 * g_5, StructuredBuffer<float2 > disp_1, float d0_0, float d1_0, float2  * lo_3, float2  * hi_3)
-{
-    float2  _S149 = driftAt_0(g_5, disp_1, d0_0);
-    *lo_3 = _S149;
-    *hi_3 = _S149;
-    float2  _S150 = driftAt_0(g_5, disp_1, d1_0);
-    *lo_3 = min_1(*lo_3, _S150);
-    *hi_3 = max_1(*hi_3, _S150);
-    int _S151 = clamp_1(int((F32_ceil((clamp_0(d1_0 / g_5->streakLength_0, 0.0f, 1.0f) * 32.0f)))), int(0), int(32));
-    int k_2 = clamp_1(int((F32_floor((clamp_0(d0_0 / g_5->streakLength_0, 0.0f, 1.0f) * 32.0f)))), int(0), int(32));
+    float slope_0 = 0.0f;
+    int k_3 = int(-1);
     for(;;)
     {
-        if(k_2 <= _S151)
+        if(k_3 < int(5))
         {
         }
         else
         {
             break;
         }
-        float2  _S152 = *lo_3;
-        float2  _S153 = __ldg((&(disp_1)[k_2]));
-        *lo_3 = min_1(_S152, _S153);
-        float2  _S154 = *hi_3;
-        float2  _S155 = __ldg((&(disp_1)[k_2]));
-        *hi_3 = max_1(_S154, _S155);
-        k_2 = k_2 + int(1);
+        if(k_3 >= (c_20->cvTurretCount_0))
+        {
+            break;
+        }
+        float4  t_4;
+        if(k_3 < int(0))
+        {
+            t_4 = make_float4 (c_20->cvHeroAt_0.x, c_20->cvHeroAt_0.y, c_20->cvHeroRadius_0, c_20->cvHeroTop_0);
+        }
+        else
+        {
+            float4  _S141 = convTurret_0(c_20, k_3);
+            t_4 = _S141;
+        }
+        float4  _S142 = t_4;
+        float2  _S143 = float2 {_S142.x, _S142.y};
+        float2  gap_0 = max_0(max_0(lo_3 - _S143, _S143 - hi_3), make_float2 (0.0f, 0.0f));
+        float _S144 = t_4.z;
+        float outer_0 = 1.29999995231628418f * _S144;
+        float band_1 = outer_0 - 0.75f * _S144;
+        if((dot_0(gap_0, gap_0)) < (outer_0 * outer_0))
+        {
+            slope_0 = (F32_max((slope_0), (1.5f / band_1)));
+        }
+        k_3 = k_3 + int(1);
+    }
+    return slope_0 * c_20->cvMoat_0;
+}
+
+static __device__ float convDistanceFloor_0(float vMin_0, float hMin_0)
+{
+    bool _S145;
+    if(vMin_0 <= 0.0f)
+    {
+        _S145 = true;
+    }
+    else
+    {
+        _S145 = hMin_0 <= 0.0f;
+    }
+    if(_S145)
+    {
+        return 0.0f;
+    }
+    return 1.0f / (F32_sqrt((1.0f / (vMin_0 * vMin_0) + 1.0f / (hMin_0 * hMin_0))));
+}
+
+static __device__ float convHeroReach_0(ConvectionInput_0 * c_21)
+{
+    return c_21->cvHeroRadius_0 + 1.5f * c_21->cvBillow_0 * c_21->cvHeroBillow_0 + 24.0f;
+}
+
+static __device__ float convShapeReach_0(ConvectionInput_0 * c_22)
+{
+    float lift_0 = 1.5f * c_22->cvBillow_0 * c_22->cvHeroBillow_0 + 24.0f;
+    return length_0(make_float2 (c_22->cvShapeHalfWidth_0 + lift_0, c_22->cvShapeRound_0 + lift_0));
+}
+
+static __device__ float convHeroReachAll_0(ConvectionInput_0 * c_23)
+{
+    float _S146 = convHeroReach_0(c_23);
+    float _S147;
+    if((c_23->cvShapeOn_0) != int(0))
+    {
+        float _S148 = convShapeReach_0(c_23);
+        _S147 = (F32_max((_S146), (_S148)));
+    }
+    else
+    {
+        _S147 = _S146;
+    }
+    return _S147;
+}
+
+static __device__ float convDomeRadiusAt_0(float top_3, float radius_1, float shape_1, float above_2)
+{
+    bool _S149;
+    if(top_3 <= 0.0f)
+    {
+        _S149 = true;
+    }
+    else
+    {
+        _S149 = above_2 >= top_3;
+    }
+    if(_S149)
+    {
+        return -1.0f;
+    }
+    return radius_1 * (F32_sqrt(((F32_max((1.0f - (F32_pow(((F32_max((above_2), (0.0f))) / top_3), (1.0f / (F32_max((shape_1), (0.00100000004749745f))))))), (0.0f))))));
+}
+
+static __device__ float convHeroRadiusAt_0(ConvectionInput_0 * c_24, float above_3)
+{
+    return convDomeRadiusAt_0(c_24->cvHeroTop_0, c_24->cvHeroRadius_0, c_24->cvShape_0, above_3);
+}
+
+static __device__ float3  convShapeTexel_0(ConvectionInput_0 * c_25, int i_12, int j_8)
+{
+    int k_4 = (j_8 * c_25->cvShapeDim_0.x + i_12) * int(4);
+    StructuredBuffer<float> _S150 = c_25->cvShapeMap_0;
+    float _S151 = __ldg((&(c_25->cvShapeMap_0)[k_4]));
+    float _S152 = __ldg((&(_S150)[k_4 + int(1)]));
+    float _S153 = __ldg((&(_S150)[k_4 + int(2)]));
+    return make_float3 (_S151, _S152, _S153);
+}
+
+static __device__ float convShapeDistance_0(ConvectionInput_0 * c_26, float u_3, float y_8, float2  * slopeUY_0)
+{
+    float _S154 = c_26->cvShapeTexel_0;
+    float2  st_0 = make_float2 (u_3, y_8) / make_float2 (c_26->cvShapeTexel_0) + c_26->cvShapeOffset_0 - make_float2 (0.5f);
+    int2  _S155 = make_int2 (int(1), int(1));
+    int2  last_0 = c_26->cvShapeDim_0 - _S155;
+    float2  _S156 = make_float2 ((float)last_0.x, (float)last_0.y);
+    float2  q_6 = clamp_2(st_0, make_float2 (0.0f, 0.0f), _S156);
+    float past_0 = length_0(st_0 - q_6);
+    float2  f0_0 = floor_1(q_6);
+    int2  _S157 = make_int2 ((int)f0_0.x, (int)f0_0.y);
+    int2  i0_1 = min_0(_S157, last_0);
+    int2  i1_0 = min_0(i0_1 + _S155, last_0);
+    float2  fr_0 = q_6 - f0_0;
+    int _S158 = i0_1.x;
+    int _S159 = i0_1.y;
+    float3  _S160 = convShapeTexel_0(c_26, _S158, _S159);
+    int _S161 = i1_0.x;
+    float3  _S162 = convShapeTexel_0(c_26, _S161, _S159);
+    int _S163 = i1_0.y;
+    float3  _S164 = convShapeTexel_0(c_26, _S158, _S163);
+    float3  _S165 = convShapeTexel_0(c_26, _S161, _S163);
+    float3  _S166 = make_float3 (fr_0.x);
+    float3  blend_0 = lerp_2(lerp_2(_S160, _S162, _S166), lerp_2(_S164, _S165, _S166), make_float3 (fr_0.y));
+    *slopeUY_0 = float2 {blend_0.y, blend_0.z};
+    return (blend_0.x - past_0) * _S154;
+}
+
+static __device__ float convShapeProfile_0(float dIn_0, float m_1, float rimR_0, float2  * stepDM_0)
+{
+    if(dIn_0 >= rimR_0)
+    {
+        *stepDM_0 = make_float2 (0.0f, rimR_0 - m_1);
+        return m_1 - rimR_0;
+    }
+    float2  w_2 = make_float2 (dIn_0 - rimR_0, m_1);
+    float len_0 = length_0(w_2);
+    float gap_1 = len_0 - rimR_0;
+    float2  _S167;
+    if(len_0 > 9.99999997475242708e-07f)
+    {
+        _S167 = w_2 * make_float2 (- gap_1 / len_0);
+    }
+    else
+    {
+        _S167 = make_float2 (0.0f, rimR_0);
+    }
+    *stepDM_0 = _S167;
+    return gap_1;
+}
+
+static __device__ float convShapeBound_0(ConvectionInput_0 * c_27, float3  lo_4, float3  hi_4, float low_1, float high_1)
+{
+    float2  ea_0 = float2 {lo_4.x, lo_4.z} - c_27->cvHeroAt_0;
+    float2  eb_0 = float2 {hi_4.x, hi_4.z} - c_27->cvHeroAt_0;
+    float _S168 = c_27->cvShapeAxisU_0.y;
+    float _S169 = - _S168;
+    float _S170 = c_27->cvShapeAxisU_0.x;
+    float _S171 = ea_0.x;
+    float _S172 = _S171 * _S170;
+    float _S173 = eb_0.x;
+    float _S174 = _S173 * _S170;
+    float _S175 = ea_0.y;
+    float _S176 = _S175 * _S168;
+    float _S177 = eb_0.y;
+    float _S178 = _S177 * _S168;
+    float uLo_0 = (F32_min((_S172), (_S174))) + (F32_min((_S176), (_S178)));
+    float uHi_0 = (F32_max((_S172), (_S174))) + (F32_max((_S176), (_S178)));
+    float _S179 = _S171 * _S169;
+    float _S180 = _S173 * _S169;
+    float _S181 = _S175 * _S170;
+    float _S182 = _S177 * _S170;
+    float nLo_0 = (F32_min((_S179), (_S180))) + (F32_min((_S181), (_S182)));
+    float nHi_0 = (F32_max((_S179), (_S180))) + (F32_max((_S181), (_S182)));
+    bool _S183;
+    if(nLo_0 <= 0.0f)
+    {
+        _S183 = nHi_0 >= 0.0f;
+    }
+    else
+    {
+        _S183 = false;
+    }
+    float mMin_0;
+    if(_S183)
+    {
+        mMin_0 = 0.0f;
+    }
+    else
+    {
+        mMin_0 = (F32_min(((F32_abs((nLo_0)))), ((F32_abs((nHi_0))))));
+    }
+    float2  halfSpan_0 = make_float2 (0.5f * (uHi_0 - uLo_0), 0.5f * (high_1 - low_1));
+    float2  slopeUnused_0;
+    float _S184 = convShapeDistance_0(c_27, 0.5f * (uLo_0 + uHi_0), 0.5f * (low_1 + high_1), &slopeUnused_0);
+    float2  stepUnused_0;
+    return - convShapeProfile_0(_S184 + 2.5f * length_0(halfSpan_0), mMin_0, c_27->cvShapeRound_0, &stepUnused_0);
+}
+
+static __device__ float convTurretReach_0(ConvectionInput_0 * c_28, float4  t_5)
+{
+    return t_5.z + 1.5f * c_28->cvBillow_0 * c_28->cvHeroBillow_0 + 24.0f;
+}
+
+static __device__ float convTurretBillow_0(ConvectionInput_0 * c_29, float radius_2)
+{
+    return lerp_0((F32_min((1.0f), (c_29->cvHeroBillow_0))), c_29->cvHeroBillow_0, saturate_0(radius_2 / (F32_max((c_29->cvHeroRadius_0), (1.0f)))));
+}
+
+static __device__ bool convTurretBound_0(ConvectionInput_0 * c_30, float4  t_6, float3  lo_5, float3  hi_5, float low_2, float high_2, float * dPart_0, float * lift_1)
+{
+    *dPart_0 = -1.00000001504746622e+30f;
+    *lift_1 = 0.0f;
+    float2  _S185 = float2 {t_6.x, t_6.y};
+    float2  nearGap_2 = max_0(max_0(float2 {lo_5.x, lo_5.z} - _S185, _S185 - float2 {hi_5.x, hi_5.z}), make_float2 (0.0f, 0.0f));
+    float gap2_1 = dot_0(nearGap_2, nearGap_2);
+    float _S186 = convTurretReach_0(c_30, t_6);
+    if(gap2_1 >= (_S186 * _S186))
+    {
+        return false;
+    }
+    float rMin_0 = (F32_sqrt((gap2_1)));
+    float _S187 = t_6.w;
+    float _S188 = t_6.z;
+    float tower_0 = convDomeHeight_0(_S187, _S188, c_30->cvShape_0, rMin_0);
+    float ra_0 = convDomeRadiusAt_0(_S187, _S188, c_30->cvShape_0, low_2);
+    float _S189 = convTurretBillow_0(c_30, _S188);
+    float _S190 = convLift_0(c_30, high_2, _S189);
+    *lift_1 = _S190;
+    bool _S191 = ra_0 < 0.0f;
+    bool _S192;
+    if(_S191)
+    {
+        _S192 = true;
+    }
+    else
+    {
+        _S192 = rMin_0 >= ra_0;
+    }
+    if(_S192)
+    {
+        float hMin_1;
+        if(_S191)
+        {
+            hMin_1 = 1.00000001504746622e+30f;
+        }
+        else
+        {
+            hMin_1 = rMin_0 - ra_0;
+        }
+        *dPart_0 = - convDistanceFloor_0(low_2 - tower_0, hMin_1);
+    }
+    else
+    {
+        *dPart_0 = (F32_max((tower_0 - low_2), (0.0f)));
+    }
+    return true;
+}
+
+static __device__ float convectionBound_0(ConvectionInput_0 * c_31, float3  lo_6, float3  hi_6)
+{
+    float low_3 = lo_6.y - c_31->cvBase_0;
+    float high_3 = hi_6.y - c_31->cvBase_0;
+    float _S193 = convCeiling_0(c_31);
+    float _S194 = c_31->cvMammaDepth_0;
+    bool pouches_0;
+    if(high_3 < (- c_31->cvMammaDepth_0))
+    {
+        pouches_0 = true;
+    }
+    else
+    {
+        pouches_0 = low_3 > _S193;
+    }
+    if(pouches_0)
+    {
+        return 0.0f;
+    }
+    if(_S194 > 0.0f)
+    {
+        pouches_0 = low_3 < 40.0f;
+    }
+    else
+    {
+        pouches_0 = false;
+    }
+    float _S195 = (F32_max((low_3), (0.0f)));
+    float _S196 = (F32_min(((F32_max((high_3), (0.0f)))), (_S193)));
+    bool _S197 = (c_31->cvHeroTop_0) > 0.0f;
+    bool _S198;
+    if(_S197)
+    {
+        if((c_31->cvPileusThick_0) > 0.0f)
+        {
+            _S198 = true;
+        }
+        else
+        {
+            _S198 = (c_31->cvVelumThick_0) > 0.0f;
+        }
+    }
+    else
+    {
+        _S198 = false;
+    }
+    float capBound_0;
+    if(_S198)
+    {
+        float _S199 = convCapBound_0(c_31, lo_6, hi_6, _S195, _S196);
+        capBound_0 = _S199;
+    }
+    else
+    {
+        capBound_0 = 0.0f;
+    }
+    float _S200 = convLift_0(c_31, _S196, 1.0f);
+    float inside_0;
+    if((c_31->cvHeroAlone_0) == int(0))
+    {
+        float2  _S201 = float2 {lo_6.x, lo_6.z};
+        float2  _S202 = float2 {hi_6.x, hi_6.z};
+        float _S203 = convUpdraftBound_0(c_31, _S201 - c_31->cvDrift_0, _S202 - c_31->cvDrift_0);
+        float _S204 = convTowerHeight_0(c_31, _S203);
+        float _S205 = convNeededUpdraft_0(c_31, _S195);
+        if(_S203 < _S205)
+        {
+            float _S206 = convSlopeCap_0(c_31);
+            if((c_31->cvMoat_0) > 0.0f)
+            {
+                float _S207 = convMoatSlopeOver_0(c_31, _S201, _S202);
+                inside_0 = _S206 + _S207;
+            }
+            else
+            {
+                inside_0 = _S206;
+            }
+            inside_0 = _S200 - convDistanceFloor_0(_S195 - _S204, (_S205 - _S203) / inside_0);
+        }
+        else
+        {
+            inside_0 = (F32_max((_S204 - _S195), (0.0f))) + _S200;
+        }
+    }
+    else
+    {
+        inside_0 = -1.00000001504746622e+30f;
+    }
+    float edge_0;
+    if(_S197)
+    {
+        float rMin_1 = length_0(max_0(max_0(float2 {lo_6.x, lo_6.z} - c_31->cvHeroAt_0, c_31->cvHeroAt_0 - float2 {hi_6.x, hi_6.z}), make_float2 (0.0f, 0.0f)));
+        float _S208 = convHeroReachAll_0(c_31);
+        float groupD_0;
+        float groupLift_0;
+        if(rMin_1 < _S208)
+        {
+            float _S209 = convHeroHeight_0(c_31, rMin_1);
+            float _S210 = convHeroRadiusAt_0(c_31, _S195);
+            float _S211 = c_31->cvHeroBillow_0;
+            float _S212 = convLift_0(c_31, _S196, c_31->cvHeroBillow_0);
+            bool _S213 = _S210 < 0.0f;
+            if(_S213)
+            {
+                _S198 = true;
+            }
+            else
+            {
+                _S198 = rMin_1 >= _S210;
+            }
+            if(_S198)
+            {
+                if(_S213)
+                {
+                    edge_0 = 1.00000001504746622e+30f;
+                }
+                else
+                {
+                    edge_0 = rMin_1 - _S210;
+                }
+                edge_0 = - convDistanceFloor_0(_S195 - _S209, edge_0);
+            }
+            else
+            {
+                edge_0 = (F32_max((_S209 - _S195), (0.0f)));
+            }
+            if((c_31->cvShapeOn_0) != int(0))
+            {
+                _S198 = (c_31->cvShapeDecay_0) < 1.0f;
+            }
+            else
+            {
+                _S198 = false;
+            }
+            if(_S198)
+            {
+                float _S214 = convShapeBound_0(c_31, lo_6, hi_6, _S195, _S196);
+                float _S215 = lerp_0(_S214, edge_0, c_31->cvShapeDecay_0);
+                float _S216 = convLift_0(c_31, _S196, _S211 * lerp_0(c_31->cvShapeBillow_0, 1.0f, c_31->cvShapeDecay_0));
+                groupD_0 = _S215;
+                groupLift_0 = _S216;
+            }
+            else
+            {
+                groupD_0 = edge_0;
+                groupLift_0 = _S212;
+            }
+        }
+        else
+        {
+            groupD_0 = -1.00000001504746622e+30f;
+            groupLift_0 = 0.0f;
+        }
+        int k_5 = int(0);
+        for(;;)
+        {
+            if(k_5 < int(5))
+            {
+            }
+            else
+            {
+                break;
+            }
+            if(k_5 >= (c_31->cvTurretCount_0))
+            {
+                break;
+            }
+            float4  _S217 = convTurret_0(c_31, k_5);
+            float turretD_0;
+            float turretLift_0;
+            bool _S218 = convTurretBound_0(c_31, _S217, lo_6, hi_6, _S195, _S196, &turretD_0, &turretLift_0);
+            if(_S218)
+            {
+                float _S219 = (F32_max((groupLift_0), (turretLift_0)));
+                groupD_0 = (F32_max((groupD_0), (turretD_0)));
+                groupLift_0 = _S219;
+            }
+            k_5 = k_5 + int(1);
+        }
+        if(groupD_0 > -1.00000001504746622e+29f)
+        {
+            inside_0 = (F32_max((inside_0), (groupD_0 + groupLift_0)));
+        }
+    }
+    float inside_1 = inside_0 + 0.00100000004749745f;
+    if(inside_1 <= 0.0f)
+    {
+        return capBound_0;
+    }
+    if(pouches_0)
+    {
+        edge_0 = 1.0f;
+    }
+    else
+    {
+        edge_0 = smoothstep_0(0.0f, 12.0f, inside_1);
+    }
+    if(pouches_0)
+    {
+        inside_0 = _S196 + _S194;
+    }
+    else
+    {
+        inside_0 = _S196;
+    }
+    return (F32_max((c_31->cvSigma_0 * (F32_sqrt((saturate_0(inside_0 / 40.0f)))) * edge_0 * 1.00001001358032227f), (capBound_0)));
+}
+
+static __device__ float2  driftAt_0(GeneratorInput_0 * g_4, StructuredBuffer<float2 > disp_0, float depth_0)
+{
+    float x_19 = clamp_0(depth_0 / g_4->streakLength_0, 0.0f, 1.0f) * 32.0f;
+    int i_13 = clamp_1(int((F32_floor((x_19)))), int(0), int(31));
+    float2  _S220 = __ldg((&(disp_0)[i_13]));
+    float2  _S221 = __ldg((&(disp_0)[i_13 + int(1)]));
+    return lerp_1(_S220, _S221, make_float2 (x_19 - float(i_13)));
+}
+
+static __device__ void driftRange_0(GeneratorInput_0 * g_5, StructuredBuffer<float2 > disp_1, float d0_0, float d1_0, float2  * lo_7, float2  * hi_7)
+{
+    float2  _S222 = driftAt_0(g_5, disp_1, d0_0);
+    *lo_7 = _S222;
+    *hi_7 = _S222;
+    float2  _S223 = driftAt_0(g_5, disp_1, d1_0);
+    *lo_7 = min_1(*lo_7, _S223);
+    *hi_7 = max_0(*hi_7, _S223);
+    int _S224 = clamp_1(int((F32_ceil((clamp_0(d1_0 / g_5->streakLength_0, 0.0f, 1.0f) * 32.0f)))), int(0), int(32));
+    int k_6 = clamp_1(int((F32_floor((clamp_0(d0_0 / g_5->streakLength_0, 0.0f, 1.0f) * 32.0f)))), int(0), int(32));
+    for(;;)
+    {
+        if(k_6 <= _S224)
+        {
+        }
+        else
+        {
+            break;
+        }
+        float2  _S225 = *lo_7;
+        float2  _S226 = __ldg((&(disp_1)[k_6]));
+        *lo_7 = min_1(_S225, _S226);
+        float2  _S227 = *hi_7;
+        float2  _S228 = __ldg((&(disp_1)[k_6]));
+        *hi_7 = max_0(_S227, _S228);
+        k_6 = k_6 + int(1);
     }
     return;
 }
@@ -1723,91 +2266,91 @@ static __device__ float cellFieldBound_0(GeneratorInput_0 * g_6, float2  q0_2, f
     float2  a_4;
     float2  b_3;
     orgPatternBox_0(&g_6->gnOrg_0, q0_2 - g_6->cellDrift_0, q1_2 - g_6->cellDrift_0, g_6->cellSize_0 * 2.20000004768371582f, &a_4, &b_3);
-    float2  _S156 = orgJitter_0(&g_6->gnOrg_0, 0.80000001192092896f);
-    float2  _S157 = floor_1(a_4);
-    int2  _S158 = make_int2 ((int)_S157.x, (int)_S157.y);
-    int2  _S159 = make_int2 (int(1), int(1));
-    int2  i0_1 = _S158 - _S159;
-    float2  _S160 = floor_1(b_3);
-    int2  _S161 = make_int2 ((int)_S160.x, (int)_S160.y);
-    int2  _S162 = _S161 + _S159;
-    int _S163 = i0_1.y;
-    int j_8 = _S163;
+    float2  _S229 = orgJitter_0(&g_6->gnOrg_0, 0.80000001192092896f);
+    float2  _S230 = floor_1(a_4);
+    int2  _S231 = make_int2 ((int)_S230.x, (int)_S230.y);
+    int2  _S232 = make_int2 (int(1), int(1));
+    int2  i0_2 = _S231 - _S232;
+    float2  _S233 = floor_1(b_3);
+    int2  _S234 = make_int2 ((int)_S233.x, (int)_S233.y);
+    int2  _S235 = _S234 + _S232;
+    int _S236 = i0_2.y;
+    int j_9 = _S236;
     float acc_0 = 0.0f;
     for(;;)
     {
-        bool _S164;
-        if(j_8 <= (_S162.y))
+        bool _S237;
+        if(j_9 <= (_S235.y))
         {
-            _S164 = j_8 <= (_S163 + int(32));
+            _S237 = j_9 <= (_S236 + int(32));
         }
         else
         {
-            _S164 = false;
+            _S237 = false;
         }
-        if(_S164)
+        if(_S237)
         {
         }
         else
         {
             break;
         }
-        int _S165 = i0_1.x;
-        int i_12 = _S165;
+        int _S238 = i0_2.x;
+        int i_14 = _S238;
         float acc_1 = acc_0;
         for(;;)
         {
-            bool _S166;
-            if(i_12 <= (_S162.x))
+            bool _S239;
+            if(i_14 <= (_S235.x))
             {
-                _S166 = i_12 <= (_S165 + int(32));
+                _S239 = i_14 <= (_S238 + int(32));
             }
             else
             {
-                _S166 = false;
+                _S239 = false;
             }
-            if(_S166)
+            if(_S239)
             {
             }
             else
             {
                 break;
             }
-            int2  o_7 = make_int2 (i_12, j_8);
+            int2  o_7 = make_int2 (i_14, j_9);
             if((hash22_0(o_7, 2654435769U).x) > (g_6->cellDensity_0))
             {
-                i_12 = i_12 + int(1);
+                i_14 = i_14 + int(1);
                 continue;
             }
-            float2  _S167 = make_float2 ((float)o_7.x, (float)o_7.y);
-            float2  c_20 = _S167 + make_float2 (0.5f) + (hash22_0(o_7, 0U) - make_float2 (0.5f)) * _S156;
-            acc_1 = acc_1 + smoothstep_0(1.0f, 0.05000000074505806f, length_0(max_1(max_1(a_4 - c_20, c_20 - b_3), make_float2 (0.0f, 0.0f))) * 2.20000004768371582f);
-            i_12 = i_12 + int(1);
+            float2  _S240 = make_float2 ((float)o_7.x, (float)o_7.y);
+            float2  c_32 = _S240 + make_float2 (0.5f) + (hash22_0(o_7, 0U) - make_float2 (0.5f)) * _S229;
+            acc_1 = acc_1 + smoothstep_0(1.0f, 0.05000000074505806f, length_0(max_0(max_0(a_4 - c_32, c_32 - b_3), make_float2 (0.0f, 0.0f))) * 2.20000004768371582f);
+            i_14 = i_14 + int(1);
         }
-        j_8 = j_8 + int(1);
+        j_9 = j_9 + int(1);
         acc_0 = acc_1;
     }
     return acc_0 * g_6->cellStrength_0;
 }
 
-static __device__ float iceDensityBound_0(GeneratorInput_0 * g_7, StructuredBuffer<float2 > disp_2, float3  lo_4, float3  hi_4)
+static __device__ float iceDensityBound_0(GeneratorInput_0 * g_7, StructuredBuffer<float2 > disp_2, float3  lo_8, float3  hi_8)
 {
-    float d0_1 = g_7->cellAltitude_0 - hi_4.y;
-    float d1_1 = g_7->cellAltitude_0 - lo_4.y;
-    bool _S168;
+    float d0_1 = g_7->cellAltitude_0 - hi_8.y;
+    float d1_1 = g_7->cellAltitude_0 - lo_8.y;
+    bool _S241;
     if(d1_1 < 0.0f)
     {
-        _S168 = true;
+        _S241 = true;
     }
     else
     {
-        _S168 = d0_1 > (g_7->streakLength_0);
+        _S241 = d0_1 > (g_7->streakLength_0);
     }
-    if(_S168)
+    if(_S241)
     {
         return 0.0f;
     }
-    float _S169 = g_7->streakLength_0;
+    float _S242 = g_7->streakLength_0;
     float d0_2 = clamp_0(d0_1, 0.0f, g_7->streakLength_0);
     float d1_2 = clamp_0(d1_1, 0.0f, g_7->streakLength_0);
     float subl_0 = (F32_exp((- g_7->sublimation_0 * d0_2 / 1000.0f)));
@@ -1817,88 +2360,88 @@ static __device__ float iceDensityBound_0(GeneratorInput_0 * g_7, StructuredBuff
     float2  driftLo_0;
     float2  driftHi_0;
     driftRange_0(g_7, disp_2, d0_2, d1_2, &driftLo_0, &driftHi_0);
-    float _S170 = cellFieldBound_0(g_7, make_float2 (lo_4.x, lo_4.z) - driftHi_0, make_float2 (hi_4.x, hi_4.z) - driftLo_0);
-    return (F32_max((_S170 * subl_0 * head_0 * tail_0 * (F32_max((detail_0), (0.0f)))), (0.0f))) * g_7->opticalDepth_0 / (F32_max((_S169), (1.0f)));
+    float _S243 = cellFieldBound_0(g_7, make_float2 (lo_8.x, lo_8.z) - driftHi_0, make_float2 (hi_8.x, hi_8.z) - driftLo_0);
+    return (F32_max((_S243 * subl_0 * head_0 * tail_0 * (F32_max((detail_0), (0.0f)))), (0.0f))) * g_7->opticalDepth_0 / (F32_max((_S242), (1.0f)));
 }
 
-static __device__ float mediumBound_0(Medium_0 * m_1, StructuredBuffer<float2 > disp_3, float3  lo_5, float3  hi_5)
+static __device__ float mediumBound_0(Medium_0 * m_2, StructuredBuffer<float2 > disp_3, float3  lo_9, float3  hi_9)
 {
-    int _S171 = m_1->mode_0;
-    if((m_1->mode_0) == int(3))
+    int _S244 = m_2->mode_0;
+    if((m_2->mode_0) == int(3))
     {
-        float _S172 = convectionBound_0(&m_1->conv_0, lo_5, hi_5);
-        return _S172;
+        float _S245 = convectionBound_0(&m_2->conv_0, lo_9, hi_9);
+        return _S245;
     }
-    if(_S171 == int(2))
+    if(_S244 == int(2))
     {
-        float _S173 = iceDensityBound_0(&m_1->gen_0, disp_3, lo_5, hi_5);
-        return _S173;
+        float _S246 = iceDensityBound_0(&m_2->gen_0, disp_3, lo_9, hi_9);
+        return _S246;
     }
-    return m_1->majorant_0;
+    return m_2->majorant_0;
 }
 
-static __device__ float gridBound_0(Medium_0 * m_2, MajorantGrid_0 * g_8, StructuredBuffer<float> bounds_0, StructuredBuffer<float2 > disp_4, int3  c_21, float fallback_0)
+static __device__ float gridBound_0(Medium_0 * m_3, MajorantGrid_0 * g_8, StructuredBuffer<float> bounds_0, StructuredBuffer<float2 > disp_4, int3  c_33, float fallback_0)
 {
-    int _S174 = g_8->enabled_0;
+    int _S247 = g_8->enabled_0;
     if((g_8->enabled_0) == int(0))
     {
         return fallback_0;
     }
-    if(_S174 == int(2))
+    if(_S247 == int(2))
     {
-        float3  _S175 = make_float3 ((float)c_21.x, (float)c_21.y, (float)c_21.z);
-        float3  lo_6 = g_8->origin_0 + _S175 * g_8->cellExtent_0;
-        float _S176 = mediumBound_0(m_2, disp_4, lo_6, lo_6 + g_8->cellExtent_0);
-        return _S176;
+        float3  _S248 = make_float3 ((float)c_33.x, (float)c_33.y, (float)c_33.z);
+        float3  lo_10 = g_8->origin_0 + _S248 * g_8->cellExtent_0;
+        float _S249 = mediumBound_0(m_3, disp_4, lo_10, lo_10 + g_8->cellExtent_0);
+        return _S249;
     }
-    int _S177 = c_21.x;
-    bool _S178;
-    if(_S177 < int(0))
+    int _S250 = c_33.x;
+    bool _S251;
+    if(_S250 < int(0))
     {
-        _S178 = true;
-    }
-    else
-    {
-        _S178 = (c_21.y) < int(0);
-    }
-    if(_S178)
-    {
-        _S178 = true;
+        _S251 = true;
     }
     else
     {
-        _S178 = (c_21.z) < int(0);
+        _S251 = (c_33.y) < int(0);
     }
-    if(_S178)
+    if(_S251)
     {
-        _S178 = true;
+        _S251 = true;
     }
     else
     {
-        _S178 = _S177 >= (g_8->dims_0.x);
+        _S251 = (c_33.z) < int(0);
     }
-    if(_S178)
+    if(_S251)
     {
-        _S178 = true;
+        _S251 = true;
     }
     else
     {
-        _S178 = (c_21.y) >= (g_8->dims_0.y);
+        _S251 = _S250 >= (g_8->dims_0.x);
     }
-    if(_S178)
+    if(_S251)
     {
-        _S178 = true;
+        _S251 = true;
     }
     else
     {
-        _S178 = (c_21.z) >= (g_8->dims_0.z);
+        _S251 = (c_33.y) >= (g_8->dims_0.y);
     }
-    if(_S178)
+    if(_S251)
+    {
+        _S251 = true;
+    }
+    else
+    {
+        _S251 = (c_33.z) >= (g_8->dims_0.z);
+    }
+    if(_S251)
     {
         return fallback_0;
     }
-    float _S179 = __ldg((&(bounds_0)[(c_21.z * g_8->dims_0.y + c_21.y) * g_8->dims_0.x + _S177]));
-    return _S179;
+    float _S252 = __ldg((&(bounds_0)[(c_33.z * g_8->dims_0.y + c_33.y) * g_8->dims_0.x + _S250]));
+    return _S252;
 }
 
 static __device__ float ddaExit_0(Dda_0 * d_6)
@@ -1908,16 +2451,16 @@ static __device__ float ddaExit_0(Dda_0 * d_6)
 
 static __device__ void ddaAdvance_0(Dda_0 * d_7)
 {
-    bool _S180;
+    bool _S253;
     if((d_7->tMax_0.x) <= (d_7->tMax_0.y))
     {
-        _S180 = (d_7->tMax_0.x) <= (d_7->tMax_0.z);
+        _S253 = (d_7->tMax_0.x) <= (d_7->tMax_0.z);
     }
     else
     {
-        _S180 = false;
+        _S253 = false;
     }
-    if(_S180)
+    if(_S253)
     {
         *&((&d_7->cell_0)->x) = *&((&d_7->cell_0)->x) + d_7->stepDir_0.x;
         *&((&d_7->tMax_0)->x) = *&((&d_7->tMax_0)->x) + d_7->tDelta_0.x;
@@ -1938,95 +2481,95 @@ static __device__ void ddaAdvance_0(Dda_0 * d_7)
     return;
 }
 
-static __device__ float randFloat_0(Rng_0 * r_3)
+static __device__ float randFloat_0(Rng_0 * r_4)
 {
-    uint _S181 = r_3->state_0 * 747796405U + 2891336453U;
-    r_3->state_0 = _S181;
-    uint word_0 = ((_S181 >> ((_S181 >> 28U) + 4U)) ^ _S181) * 277803737U;
+    uint _S254 = r_4->state_0 * 747796405U + 2891336453U;
+    r_4->state_0 = _S254;
+    uint word_0 = ((_S254 >> ((_S254 >> 28U) + 4U)) ^ _S254) * 277803737U;
     return float((word_0 >> 22U) ^ word_0) * 2.32830643653869629e-10f;
 }
 
-static __device__ float orgWaveFactor_0(Organization_0 * o_8, float2  q_6)
+static __device__ float orgWaveFactor_0(Organization_0 * o_8, float2  q_7)
 {
     float2  unused_0;
-    float _S182 = orgWave_0(o_8, q_6, &unused_0);
-    return _S182;
+    float _S255 = orgWave_0(o_8, q_7, &unused_0);
+    return _S255;
 }
 
-static __device__ float cellField_0(GeneratorInput_0 * g_9, float2  q_7)
+static __device__ float cellField_0(GeneratorInput_0 * g_9, float2  q_8)
 {
-    float2  _S183 = q_7 - g_9->cellDrift_0;
-    float2  _S184 = orgPattern_0(&g_9->gnOrg_0, _S183, g_9->cellSize_0 * 2.20000004768371582f);
-    float2  gf_0 = floor_1(_S184);
-    int2  _S185 = make_int2 ((int)gf_0.x, (int)gf_0.y);
-    float2  _S186 = orgJitter_0(&g_9->gnOrg_0, 0.80000001192092896f);
-    int j_9 = int(-1);
+    float2  _S256 = q_8 - g_9->cellDrift_0;
+    float2  _S257 = orgPattern_0(&g_9->gnOrg_0, _S256, g_9->cellSize_0 * 2.20000004768371582f);
+    float2  gf_0 = floor_1(_S257);
+    int2  _S258 = make_int2 ((int)gf_0.x, (int)gf_0.y);
+    float2  _S259 = orgJitter_0(&g_9->gnOrg_0, 0.80000001192092896f);
+    int j_10 = int(-1);
     float acc_2 = 0.0f;
     for(;;)
     {
-        if(j_9 <= int(1))
+        if(j_10 <= int(1))
         {
         }
         else
         {
             break;
         }
-        int i_13 = int(-1);
+        int i_15 = int(-1);
         float acc_3 = acc_2;
         for(;;)
         {
-            if(i_13 <= int(1))
+            if(i_15 <= int(1))
             {
             }
             else
             {
                 break;
             }
-            int2  o_9 = _S185 + make_int2 (i_13, j_9);
+            int2  o_9 = _S258 + make_int2 (i_15, j_10);
             if((hash22_0(o_9, 2654435769U).x) > (g_9->cellDensity_0))
             {
-                i_13 = i_13 + int(1);
+                i_15 = i_15 + int(1);
                 continue;
             }
-            float2  _S187 = make_float2 ((float)o_9.x, (float)o_9.y);
-            acc_3 = acc_3 + smoothstep_0(1.0f, 0.05000000074505806f, length_0(_S184 - (_S187 + make_float2 (0.5f) + (hash22_0(o_9, 0U) - make_float2 (0.5f)) * _S186)) * 2.20000004768371582f);
-            i_13 = i_13 + int(1);
+            float2  _S260 = make_float2 ((float)o_9.x, (float)o_9.y);
+            acc_3 = acc_3 + smoothstep_0(1.0f, 0.05000000074505806f, length_0(_S257 - (_S260 + make_float2 (0.5f) + (hash22_0(o_9, 0U) - make_float2 (0.5f)) * _S259)) * 2.20000004768371582f);
+            i_15 = i_15 + int(1);
         }
-        j_9 = j_9 + int(1);
+        j_10 = j_10 + int(1);
         acc_2 = acc_3;
     }
-    float _S188 = acc_2 * g_9->cellStrength_0;
-    float _S189 = orgWaveFactor_0(&g_9->gnOrg_0, _S183);
-    return _S188 * _S189;
+    float _S261 = acc_2 * g_9->cellStrength_0;
+    float _S262 = orgWaveFactor_0(&g_9->gnOrg_0, _S256);
+    return _S261 * _S262;
 }
 
 static __device__ float fbm_0(float3  p_2, int octaves_1)
 {
-    int i_14 = int(0);
+    int i_16 = int(0);
     float amp_0 = 0.5f;
-    float3  _S190 = p_2;
+    float3  _S263 = p_2;
     float sum_0 = 0.0f;
     float norm_0 = 0.0f;
     for(;;)
     {
-        if(i_14 < int(6))
+        if(i_16 < int(6))
         {
         }
         else
         {
             break;
         }
-        if(i_14 >= octaves_1)
+        if(i_16 >= octaves_1)
         {
             break;
         }
-        float sum_1 = sum_0 + amp_0 * gradientNoise_0(_S190);
+        float sum_1 = sum_0 + amp_0 * gradientNoise_0(_S263);
         float norm_1 = norm_0 + amp_0;
-        float3  _S191 = _S190 * make_float3 (2.01999998092651367f);
+        float3  _S264 = _S263 * make_float3 (2.01999998092651367f);
         float amp_1 = amp_0 * 0.5f;
-        i_14 = i_14 + int(1);
+        i_16 = i_16 + int(1);
         amp_0 = amp_1;
-        _S190 = _S191;
+        _S263 = _S264;
         sum_0 = sum_1;
         norm_0 = norm_1;
     }
@@ -2044,82 +2587,510 @@ static __device__ float fbm_0(float3  p_2, int octaves_1)
 static __device__ float iceDensity_0(GeneratorInput_0 * g_10, StructuredBuffer<float2 > disp_5, float3  p_3)
 {
     float depth_1 = g_10->cellAltitude_0 - p_3.y;
-    bool _S192;
+    bool _S265;
     if(depth_1 < 0.0f)
     {
-        _S192 = true;
+        _S265 = true;
     }
     else
     {
-        _S192 = depth_1 > (g_10->streakLength_0);
+        _S265 = depth_1 > (g_10->streakLength_0);
     }
-    if(_S192)
+    if(_S265)
     {
         return 0.0f;
     }
-    float2  _S193 = float2 {p_3.x, p_3.z};
-    float2  _S194 = driftAt_0(g_10, disp_5, depth_1);
-    float2  source_0 = _S193 - _S194;
-    float _S195 = cellField_0(g_10, source_0);
-    if(_S195 <= 0.00100000004749745f)
+    float2  _S266 = float2 {p_3.x, p_3.z};
+    float2  _S267 = driftAt_0(g_10, disp_5, depth_1);
+    float2  source_0 = _S266 - _S267;
+    float _S268 = cellField_0(g_10, source_0);
+    if(_S268 <= 0.00100000004749745f)
     {
         return 0.0f;
     }
-    return (F32_max((_S195 * (F32_exp((- g_10->sublimation_0 * depth_1 / 1000.0f))) * smoothstep_0(0.0f, 0.07999999821186066f * g_10->streakLength_0, depth_1) * (1.0f - smoothstep_0(0.75f * g_10->streakLength_0, g_10->streakLength_0, depth_1)) * (F32_max((1.0f + g_10->detailAmount_0 * fbm_0(make_float3 ((source_0 / make_float2 (g_10->detailScale_0)).x, (source_0 / make_float2 (g_10->detailScale_0)).y, depth_1 / (F32_max((g_10->fallSpeed_0), (0.00999999977648258f))) * 0.01999999955296516f + g_10->timeSeconds_0 * 0.00999999977648258f), g_10->octaves_0) * 1.79999995231628418f), (0.0f)))), (0.0f))) * g_10->opticalDepth_0 / (F32_max((g_10->streakLength_0), (1.0f)));
+    return (F32_max((_S268 * (F32_exp((- g_10->sublimation_0 * depth_1 / 1000.0f))) * smoothstep_0(0.0f, 0.07999999821186066f * g_10->streakLength_0, depth_1) * (1.0f - smoothstep_0(0.75f * g_10->streakLength_0, g_10->streakLength_0, depth_1)) * (F32_max((1.0f + g_10->detailAmount_0 * fbm_0(make_float3 ((source_0 / make_float2 (g_10->detailScale_0)).x, (source_0 / make_float2 (g_10->detailScale_0)).y, depth_1 / (F32_max((g_10->fallSpeed_0), (0.00999999977648258f))) * 0.01999999955296516f + g_10->timeSeconds_0 * 0.00999999977648258f), g_10->octaves_0) * 1.79999995231628418f), (0.0f)))), (0.0f))) * g_10->opticalDepth_0 / (F32_max((g_10->streakLength_0), (1.0f)));
 }
 
-static __device__ float convUpdraftGrad_0(ConvectionInput_0 * c_22, float2  q_8, float2  * grad_5)
+static __device__ float convPouches_0(ConvectionInput_0 * c_34, float2  q_9)
 {
-    if(((&c_22->cvOrg_0)->ogOn_0) == int(0))
+    float2  g_11 = q_9 / make_float2 (c_34->cvPouchSize_0);
+    float2  _S269 = floor_1(g_11);
+    int2  _S270 = make_int2 ((int)_S269.x, (int)_S269.y);
+    float deepest_0 = 0.0f;
+    int j_11 = int(-1);
+    for(;;)
     {
-        float _S196 = convUpdraftGradT_2(c_22, q_8, grad_5);
-        return _S196;
+        if(j_11 <= int(1))
+        {
+        }
+        else
+        {
+            break;
+        }
+        float deepest_1 = deepest_0;
+        int i_17 = int(-1);
+        for(;;)
+        {
+            if(i_17 <= int(1))
+            {
+            }
+            else
+            {
+                break;
+            }
+            int2  slot_7 = _S270 + make_int2 (i_17, j_11);
+            float2  _S271 = make_float2 ((float)slot_7.x, (float)slot_7.y);
+            float2  d_8 = g_11 - (_S271 + make_float2 (0.5f) + (hash22_0(slot_7, 739982445U) - make_float2 (0.5f)) * make_float2 (0.60000002384185791f));
+            float t2_0 = dot_0(d_8, d_8) / 0.46240001916885376f;
+            if(t2_0 >= 1.0f)
+            {
+                i_17 = i_17 + int(1);
+                continue;
+            }
+            float2  h_3 = hash22_0(slot_7, 2135587861U);
+            deepest_1 = (F32_max((deepest_1), (lerp_0(0.30000001192092896f, 1.0f, convLife_0((F32_frac((2.0f * c_34->cvAge_0 + h_3.x))))) * lerp_0(0.60000002384185791f, 1.0f, h_3.y) * (F32_sqrt((1.0f - t2_0))))));
+            i_17 = i_17 + int(1);
+        }
+        int j_12 = j_11 + int(1);
+        deepest_0 = deepest_1;
+        j_11 = j_12;
     }
-    if((c_22->cvLacunarity_0) <= 0.0f)
-    {
-        float _S197 = convUpdraftGradT_1(c_22, q_8, grad_5);
-        return _S197;
-    }
-    float _S198 = convUpdraftGradT_0(c_22, q_8, grad_5);
-    return _S198;
+    return deepest_0;
 }
 
-static __device__ float convSurfaceDistance_0(float v_2, float delta_0, float slope_0)
+static __device__ void convMoatRing_0(float2  xz_0, float2  at_0, float radius_3, float * s_7, float2  * gs_0, float * slope_1)
+{
+    float2  d_9 = xz_0 - at_0;
+    float r2_1 = dot_0(d_9, d_9);
+    float outer_1 = 1.29999995231628418f * radius_3;
+    if(!(r2_1 < (outer_1 * outer_1)))
+    {
+        return;
+    }
+    float band_2 = outer_1 - 0.75f * radius_3;
+    float inner_1 = outer_1 - band_2;
+    *slope_1 = (F32_max((*slope_1), (1.5f / band_2)));
+    float r_5 = (F32_sqrt((r2_1)));
+    float t_7 = saturate_0((r_5 - inner_1) / band_2);
+    float f_1 = t_7 * t_7 * (3.0f - 2.0f * t_7);
+    if(f_1 < (*s_7))
+    {
+        *s_7 = f_1;
+        float2  _S272;
+        if(r_5 > 0.00100000004749745f)
+        {
+            _S272 = d_9 * make_float2 (6.0f * t_7 * (1.0f - t_7) / (band_2 * r_5));
+        }
+        else
+        {
+            _S272 = make_float2 (0.0f, 0.0f);
+        }
+        *gs_0 = _S272;
+    }
+    return;
+}
+
+static __device__ float convMoat_0(ConvectionInput_0 * c_35, float2  xz_1, float2  * grad_5, float * slopeAdd_0)
+{
+    float s_8 = 1.0f;
+    float2  gs_1 = make_float2 (0.0f, 0.0f);
+    float slope_2 = 0.0f;
+    convMoatRing_0(xz_1, c_35->cvHeroAt_0, c_35->cvHeroRadius_0, &s_8, &gs_1, &slope_2);
+    int k_7 = int(0);
+    for(;;)
+    {
+        if(k_7 < int(5))
+        {
+        }
+        else
+        {
+            break;
+        }
+        if(k_7 >= (c_35->cvTurretCount_0))
+        {
+            break;
+        }
+        float4  _S273 = convTurret_0(c_35, k_7);
+        convMoatRing_0(xz_1, float2 {_S273.x, _S273.y}, _S273.z, &s_8, &gs_1, &slope_2);
+        k_7 = k_7 + int(1);
+    }
+    float _S274 = c_35->cvMoat_0;
+    *grad_5 = gs_1 * make_float2 (c_35->cvMoat_0);
+    *slopeAdd_0 = slope_2 * _S274;
+    return 1.0f - _S274 * (1.0f - s_8);
+}
+
+static __device__ float convUpdraftGrad_0(ConvectionInput_0 * c_36, float2  q_10, float2  * grad_6)
+{
+    if(((&c_36->cvOrg_0)->ogOn_0) == int(0))
+    {
+        float _S275 = convUpdraftGradT_2(c_36, q_10, grad_6);
+        return _S275;
+    }
+    if((c_36->cvLacunarity_0) <= 0.0f)
+    {
+        float _S276 = convUpdraftGradT_1(c_36, q_10, grad_6);
+        return _S276;
+    }
+    float _S277 = convUpdraftGradT_0(c_36, q_10, grad_6);
+    return _S277;
+}
+
+static __device__ float convSurfaceDistance_0(float v_2, float delta_0, float slope_3)
 {
     float num_0 = (F32_abs((v_2 * delta_0)));
-    float den_0 = (F32_sqrt((v_2 * v_2 * slope_0 * slope_0 + delta_0 * delta_0)));
+    float den_0 = (F32_sqrt((v_2 * v_2 * slope_3 * slope_3 + delta_0 * delta_0)));
     if(den_0 <= 9.99999968265522539e-21f)
     {
         return 0.0f;
     }
-    float d_8 = num_0 / den_0;
-    float _S199;
+    float d_10 = num_0 / den_0;
+    float _S278;
     if(v_2 >= 0.0f)
     {
-        _S199 = d_8;
+        _S278 = d_10;
     }
     else
     {
-        _S199 = - d_8;
+        _S278 = - d_10;
     }
-    return _S199;
+    return _S278;
 }
 
-static __device__ float3  convTwist_0(float3  x_17)
+static __device__ float convFieldBaseInside_0(ConvectionInput_0 * c_37, float w_3, float2  slope_4, float cap_3)
 {
-    float _S200 = x_17.x;
-    float _S201 = x_17.y;
-    float _S202 = x_17.z;
-    return make_float3 (0.0f * _S200 + 0.80000001192092896f * _S201 + 0.60000002384185791f * _S202, -0.80000001192092896f * _S200 + 0.36000001430511475f * _S201 - 0.47999998927116394f * _S202, -0.60000002384185791f * _S200 - 0.47999998927116394f * _S201 + 0.63999998569488525f * _S202);
+    float _S279 = convTowerHeight_0(c_37, w_3);
+    float v_3 = _S279 - 1.0f;
+    float _S280 = convNeededUpdraft_0(c_37, 1.0f);
+    return convSurfaceDistance_0(v_3, w_3 - _S280, (F32_min((length_0(slope_4)), (cap_3))));
 }
 
-static __device__ float convPuffs_0(float3  x_18)
+static __device__ float convDomeSurface_0(float top_4, float radius_4, float shape_2, float2  rel_0, float r_6, float py_0, float above_4, float3  * x_20)
 {
-    float3  fl_0 = floor_0(x_18);
-    int3  _S203 = make_int3 ((int)fl_0.x, (int)fl_0.y, (int)fl_0.z);
-    float3  f_1 = x_18 - fl_0;
+    float v_4 = convDomeHeight_0(top_4, radius_4, shape_2, r_6) - above_4;
+    float ra_1 = convDomeRadiusAt_0(top_4, radius_4, shape_2, above_4);
+    float shiftOut_0;
+    float shiftUp_0;
+    float d_11;
+    if(ra_1 < 0.0f)
+    {
+        shiftOut_0 = 0.0f;
+        shiftUp_0 = v_4;
+        d_11 = v_4;
+    }
+    else
+    {
+        float h_4 = ra_1 - r_6;
+        float d_12 = convSurfaceDistance_0(v_4, h_4, 1.0f);
+        if((F32_abs((v_4))) > 9.99999997475242708e-07f)
+        {
+            shiftOut_0 = d_12 * (d_12 / v_4);
+        }
+        else
+        {
+            shiftOut_0 = 0.0f;
+        }
+        if((F32_abs((h_4))) > 9.99999997475242708e-07f)
+        {
+            shiftUp_0 = d_12 * (d_12 / h_4);
+        }
+        else
+        {
+            shiftUp_0 = 0.0f;
+        }
+        float _S281 = shiftOut_0;
+        shiftOut_0 = shiftUp_0;
+        shiftUp_0 = _S281;
+        d_11 = d_12;
+    }
+    float2  radial_0;
+    if(r_6 > 0.00100000004749745f)
+    {
+        radial_0 = rel_0 / make_float2 (r_6);
+    }
+    else
+    {
+        radial_0 = make_float2 (0.0f, 0.0f);
+    }
+    float2  at_1 = rel_0 + radial_0 * make_float2 (shiftOut_0);
+    *x_20 = make_float3 (at_1.x, py_0 + shiftUp_0, at_1.y);
+    return d_11;
+}
+
+static __device__ float convTowerSurface_0(ConvectionInput_0 * c_38, float2  rel_1, float r_7, float py_1, float above_5, float3  * x_21)
+{
+    float _S282 = convDomeSurface_0(c_38->cvHeroTop_0, c_38->cvHeroRadius_0, c_38->cvShape_0, rel_1, r_7, py_1, above_5, x_21);
+    return _S282;
+}
+
+static __device__ float convShapeSurface_0(ConvectionInput_0 * c_39, float2  plane_0, float py_2, float above_6, float3  * x_22)
+{
+    float _S283 = plane_0.x;
+    float2  slopeUY_1;
+    float _S284 = convShapeDistance_0(c_39, _S283, above_6, &slopeUY_1);
+    float _S285 = plane_0.y;
+    float2  stepDM_1;
+    float gap_2 = convShapeProfile_0(_S284, (F32_abs((_S285))), c_39->cvShapeRound_0, &stepDM_1);
+    float side_0;
+    if(_S285 >= 0.0f)
+    {
+        side_0 = 1.0f;
+    }
+    else
+    {
+        side_0 = -1.0f;
+    }
+    *x_22 = make_float3 (_S283 + stepDM_1.x * slopeUY_1.x, py_2 + stepDM_1.x * slopeUY_1.y, _S285 + side_0 * stepDM_1.y);
+    return - gap_2;
+}
+
+static __device__ bool convHeroSmooth_0(ConvectionInput_0 * c_40, float3  p_4, float above_7, float * d_13, float3  * x_23, float * amount_0, float * lobe_0)
+{
+    *d_13 = -1.00000001504746622e+30f;
+    *x_23 = make_float3 (0.0f, 0.0f, 0.0f);
+    float _S286 = c_40->cvHeroBillow_0;
+    *amount_0 = c_40->cvHeroBillow_0;
+    *lobe_0 = _S286;
+    float2  rel_2 = float2 {p_4.x, p_4.z} - c_40->cvHeroAt_0;
+    float r_8 = length_0(rel_2);
+    float _S287 = convHeroReachAll_0(c_40);
+    if(r_8 >= _S287)
+    {
+        return false;
+    }
+    if((c_40->cvShapeOn_0) == int(0))
+    {
+        float _S288 = convTowerSurface_0(c_40, rel_2, r_8, p_4.y, above_7, x_23);
+        *d_13 = _S288;
+    }
+    else
+    {
+        float2  plane_1 = make_float2 (dot_0(rel_2, c_40->cvShapeAxisU_0), dot_0(rel_2, make_float2 (- c_40->cvShapeAxisU_0.y, c_40->cvShapeAxisU_0.x)));
+        float _S289 = c_40->cvShapeDecay_0;
+        if((c_40->cvShapeDecay_0) >= 1.0f)
+        {
+            float _S290 = convTowerSurface_0(c_40, plane_1, r_8, p_4.y, above_7, x_23);
+            *d_13 = _S290;
+        }
+        else
+        {
+            float _S291 = p_4.y;
+            float3  xs_0;
+            float _S292 = convShapeSurface_0(c_40, plane_1, _S291, above_7, &xs_0);
+            if(_S289 > 0.0f)
+            {
+                float3  xt_0;
+                float _S293 = convTowerSurface_0(c_40, plane_1, r_8, _S291, above_7, &xt_0);
+                *d_13 = lerp_0(_S292, _S293, _S289);
+                *x_23 = lerp_2(xs_0, xt_0, make_float3 (_S289));
+            }
+            else
+            {
+                *d_13 = _S292;
+                *x_23 = xs_0;
+            }
+            float _S294 = c_40->cvShapeBillow_0;
+            *amount_0 = _S286 * lerp_0(c_40->cvShapeBillow_0, 1.0f, _S289);
+            *lobe_0 = _S286 * lerp_0((F32_max((_S294), (0.30000001192092896f))), 1.0f, _S289);
+        }
+    }
+    return true;
+}
+
+static __device__ bool convTurretSmooth_0(ConvectionInput_0 * c_41, float4  t_8, float3  p_5, float above_8, float * d_14, float3  * x_24, float * k_8)
+{
+    *d_14 = -1.00000001504746622e+30f;
+    *x_24 = make_float3 (0.0f, 0.0f, 0.0f);
+    *k_8 = 1.0f;
+    float2  rel_3 = float2 {p_5.x, p_5.z} - float2 {t_8.x, t_8.y};
+    float r2_2 = dot_0(rel_3, rel_3);
+    float _S295 = convTurretReach_0(c_41, t_8);
+    if(r2_2 >= (_S295 * _S295))
+    {
+        return false;
+    }
+    float _S296 = t_8.w;
+    if(above_8 >= (_S296 + c_41->cvBillow_0 * c_41->cvHeroBillow_0))
+    {
+        return false;
+    }
+    float r_9 = (F32_sqrt((r2_2)));
+    float _S297 = t_8.z;
+    float _S298 = convTurretBillow_0(c_41, _S297);
+    *k_8 = _S298;
+    float3  own_0;
+    float _S299 = convDomeSurface_0(_S296, _S297, c_41->cvShape_0, rel_3, r_9, p_5.y, above_8, &own_0);
+    *d_14 = _S299;
+    float3  w_4 = own_0 + make_float3 (t_8.x - c_41->cvHeroAt_0.x, 0.0f, t_8.y - c_41->cvHeroAt_0.y);
+    float3  w_5;
+    if((c_41->cvShapeOn_0) != int(0))
+    {
+        float2  _S300 = float2 {w_4.x, w_4.z};
+        w_5 = make_float3 (dot_0(_S300, c_41->cvShapeAxisU_0), w_4.y, dot_0(_S300, make_float2 (- c_41->cvShapeAxisU_0.y, c_41->cvShapeAxisU_0.x)));
+    }
+    else
+    {
+        w_5 = w_4;
+    }
+    *x_24 = w_5;
+    return true;
+}
+
+static __device__ float convGroupBaseInside_0(ConvectionInput_0 * c_42, float2  xz_2, bool nearGroup_0)
+{
+    float best_1;
+    if((c_42->cvHeroTop_0) > 0.0f)
+    {
+        float3  p_6 = make_float3 (xz_2.x, c_42->cvBase_0 + 1.0f, xz_2.y);
+        float d_15;
+        float amount_1;
+        float lobe_1;
+        float3  x_25;
+        bool _S301 = convHeroSmooth_0(c_42, p_6, 1.0f, &d_15, &x_25, &amount_1, &lobe_1);
+        if(_S301)
+        {
+            best_1 = (F32_max((-1.00000001504746622e+30f), (d_15)));
+        }
+        else
+        {
+            best_1 = -1.00000001504746622e+30f;
+        }
+        int k_9 = int(0);
+        for(;;)
+        {
+            if(k_9 < int(5))
+            {
+            }
+            else
+            {
+                break;
+            }
+            bool _S302;
+            if(!nearGroup_0)
+            {
+                _S302 = true;
+            }
+            else
+            {
+                _S302 = k_9 >= (c_42->cvTurretCount_0);
+            }
+            if(_S302)
+            {
+                break;
+            }
+            float4  _S303 = convTurret_0(c_42, k_9);
+            float kt_0;
+            bool _S304 = convTurretSmooth_0(c_42, _S303, p_6, 1.0f, &d_15, &x_25, &kt_0);
+            if(_S304)
+            {
+                best_1 = (F32_max((best_1), (d_15)));
+            }
+            k_9 = k_9 + int(1);
+        }
+    }
+    else
+    {
+        best_1 = -1.00000001504746622e+30f;
+    }
+    return best_1;
+}
+
+static __device__ float convBaseInside_0(ConvectionInput_0 * c_43, float2  xz_3, bool nearGroup_1)
+{
+    float best_2;
+    if((c_43->cvHeroAlone_0) == int(0))
+    {
+        float capMoat_0 = 0.0f;
+        float2  gMoat_0 = make_float2 (0.0f, 0.0f);
+        bool moated_0;
+        if((c_43->cvMoat_0) > 0.0f)
+        {
+            moated_0 = nearGroup_1;
+        }
+        else
+        {
+            moated_0 = false;
+        }
+        float m_4;
+        if(moated_0)
+        {
+            float _S305 = convMoat_0(c_43, xz_3, &gMoat_0, &capMoat_0);
+            m_4 = _S305;
+        }
+        else
+        {
+            m_4 = 1.0f;
+        }
+        if(m_4 > 0.0f)
+        {
+            float2  slope_5;
+            float _S306 = convUpdraftGrad_0(c_43, xz_3 - c_43->cvDrift_0, &slope_5);
+            float _S307 = convSlopeCap_0(c_43);
+            float cap_4;
+            if(moated_0)
+            {
+                slope_5 = slope_5 * make_float2 (m_4) + gMoat_0 * make_float2 (_S306);
+                float cap_5 = _S307 + capMoat_0;
+                best_2 = _S306 * m_4;
+                cap_4 = cap_5;
+            }
+            else
+            {
+                best_2 = _S306;
+                cap_4 = _S307;
+            }
+            float _S308 = convFieldBaseInside_0(c_43, best_2, slope_5, cap_4);
+            best_2 = _S308;
+        }
+        else
+        {
+            best_2 = -1.00000001504746622e+30f;
+        }
+    }
+    else
+    {
+        best_2 = -1.00000001504746622e+30f;
+    }
+    float _S309 = convGroupBaseInside_0(c_43, xz_3, nearGroup_1);
+    return (F32_max((best_2), (_S309)));
+}
+
+static __device__ float convMammaSagOf_0(ConvectionInput_0 * c_44, float pouch_0, float inside_2)
+{
+    if(inside_2 <= 0.0f)
+    {
+        return 0.0f;
+    }
+    return c_44->cvMammaDepth_0 * pouch_0 * smoothstep_0(0.0f, 0.60000002384185791f * c_44->cvPouchSize_0, inside_2);
+}
+
+static __device__ float convMammaSag_0(ConvectionInput_0 * c_45, float2  xz_4, bool nearGroup_2, float below_0)
+{
+    float _S310 = convPouches_0(c_45, xz_4 - c_45->cvDrift_0);
+    if((c_45->cvMammaDepth_0 * _S310) <= below_0)
+    {
+        return 0.0f;
+    }
+    float _S311 = convBaseInside_0(c_45, xz_4, nearGroup_2);
+    float _S312 = convMammaSagOf_0(c_45, _S310, _S311);
+    return _S312;
+}
+
+static __device__ float3  convTwist_0(float3  x_26)
+{
+    float _S313 = x_26.x;
+    float _S314 = x_26.y;
+    float _S315 = x_26.z;
+    return make_float3 (0.0f * _S313 + 0.80000001192092896f * _S314 + 0.60000002384185791f * _S315, -0.80000001192092896f * _S313 + 0.36000001430511475f * _S314 - 0.47999998927116394f * _S315, -0.60000002384185791f * _S313 - 0.47999998927116394f * _S314 + 0.63999998569488525f * _S315);
+}
+
+static __device__ float convPuffs_0(float3  x_27)
+{
+    float3  fl_0 = floor_0(x_27);
+    int3  _S316 = make_int3 ((int)fl_0.x, (int)fl_0.y, (int)fl_0.z);
+    float3  f_2 = x_27 - fl_0;
     int dz_0;
-    if((f_1.x) < 0.5f)
+    if((f_2.x) < 0.5f)
     {
         dz_0 = int(-1);
     }
@@ -2128,7 +3099,7 @@ static __device__ float convPuffs_0(float3  x_18)
         dz_0 = int(0);
     }
     int dy_0;
-    if((f_1.y) < 0.5f)
+    if((f_2.y) < 0.5f)
     {
         dy_0 = int(-1);
     }
@@ -2137,7 +3108,7 @@ static __device__ float convPuffs_0(float3  x_18)
         dy_0 = int(0);
     }
     int dx_0;
-    if((f_1.z) < 0.5f)
+    if((f_2.z) < 0.5f)
     {
         dx_0 = int(-1);
     }
@@ -2145,7 +3116,7 @@ static __device__ float convPuffs_0(float3  x_18)
     {
         dx_0 = int(0);
     }
-    int3  _S204 = make_int3 (dz_0, dy_0, dx_0);
+    int3  _S317 = make_int3 (dz_0, dy_0, dx_0);
     float nearest_0 = 1.0e+09f;
     dz_0 = int(0);
     for(;;)
@@ -2178,12 +3149,12 @@ static __device__ float convPuffs_0(float3  x_18)
                 {
                     break;
                 }
-                int3  off_0 = _S204 + make_int3 (dx_0, dy_0, dz_0);
-                float3  _S205 = make_float3 ((float)off_0.x, (float)off_0.y, (float)off_0.z);
-                float3  d_9 = _S205 + make_float3 (0.5f) + make_float3 (0.25f) * hash33_0(_S203 + off_0) - f_1;
-                float _S206 = (F32_min((nearest_1), (dot_1(d_9, d_9))));
+                int3  off_0 = _S317 + make_int3 (dx_0, dy_0, dz_0);
+                float3  _S318 = make_float3 ((float)off_0.x, (float)off_0.y, (float)off_0.z);
+                float3  d_16 = _S318 + make_float3 (0.5f) + make_float3 (0.25f) * hash33_0(_S316 + off_0) - f_2;
+                float _S319 = (F32_min((nearest_1), (dot_1(d_16, d_16))));
                 int dx_1 = dx_0 + int(1);
-                nearest_1 = _S206;
+                nearest_1 = _S319;
                 dx_0 = dx_1;
             }
             int dy_1 = dy_0 + int(1);
@@ -2195,34 +3166,34 @@ static __device__ float convPuffs_0(float3  x_18)
     return saturate_0(1.0f - nearest_0 / 0.5625f);
 }
 
-static __device__ float convBillow_0(ConvectionInput_0 * c_23, float3  p_4, float scale_0)
+static __device__ float convBillow_0(ConvectionInput_0 * c_46, float3  p_7, float scale_0)
 {
-    float3  _S207 = make_float3 (p_4.x, p_4.y - c_23->cvRise_0, p_4.z) / make_float3 (scale_0);
-    int i_15 = int(0);
-    float3  x_19 = _S207;
+    float3  _S320 = make_float3 (p_7.x, p_7.y - c_46->cvRise_0, p_7.z) / make_float3 (scale_0);
+    int i_18 = int(0);
+    float3  x_28 = _S320;
     float amp_2 = 0.60000002384185791f;
     float sum_2 = 0.0f;
     float norm_2 = 0.0f;
     for(;;)
     {
-        if(i_15 < int(4))
+        if(i_18 < int(4))
         {
         }
         else
         {
             break;
         }
-        if(i_15 >= (c_23->cvOctaves_0))
+        if(i_18 >= (c_46->cvOctaves_0))
         {
             break;
         }
-        float3  x_20 = convTwist_0(x_19);
-        float sum_3 = sum_2 + amp_2 * convPuffs_0(x_20);
+        float3  x_29 = convTwist_0(x_28);
+        float sum_3 = sum_2 + amp_2 * convPuffs_0(x_29);
         float norm_3 = norm_2 + amp_2;
-        float3  x_21 = x_20 * make_float3 (2.17000007629394531f);
+        float3  x_30 = x_29 * make_float3 (2.17000007629394531f);
         float amp_3 = amp_2 * 0.55000001192092896f;
-        i_15 = i_15 + int(1);
-        x_19 = x_21;
+        i_18 = i_18 + int(1);
+        x_28 = x_30;
         amp_2 = amp_3;
         sum_2 = sum_3;
         norm_2 = norm_3;
@@ -2239,208 +3210,495 @@ static __device__ float convBillow_0(ConvectionInput_0 * c_23, float3  p_4, floa
     return clamp_0(raw_0 * 2.20000004768371582f - 1.15999996662139893f, -1.0f, 1.0f);
 }
 
-static __device__ float convInside_0(ConvectionInput_0 * c_24, float d_10, float lift_0, float3  x_22, float scale_1)
+static __device__ float convInside_0(ConvectionInput_0 * c_47, float d_17, float lift_2, float3  x_31, float scale_1)
 {
-    float _S208 = d_10 + lift_0;
-    if(_S208 <= 0.0f)
+    float _S321 = d_17 + lift_2;
+    if(_S321 <= 0.0f)
     {
-        return _S208;
+        return _S321;
     }
-    if((d_10 - lift_0) >= 12.0f)
+    if((d_17 - lift_2) >= 12.0f)
     {
         return 12.0f;
     }
-    float _S209 = convBillow_0(c_24, x_22, scale_1);
-    return d_10 + lift_0 * _S209;
+    float _S322 = convBillow_0(c_47, x_31, scale_1);
+    return d_17 + lift_2 * _S322;
 }
 
-static __device__ float convHeroInside_0(ConvectionInput_0 * c_25, float3  p_5, float above_3)
+static __device__ float convCapGrain_0(ConvectionInput_0 * c_48, float2  rel_4, float scale_2)
 {
-    float2  rel_0 = float2 {p_5.x, p_5.z} - c_25->cvHeroAt_0;
-    float r_4 = length_0(rel_0);
-    float _S210 = convHeroReach_0(c_25);
-    if(r_4 >= _S210)
+    return saturate_0(0.80000001192092896f + 0.13330000638961792f * gradientNoise_0(make_float3 (rel_4.x / scale_2 + c_48->cvHeroSeed_0.x * 0.00100000004749745f, 0.37000000476837158f, rel_4.y / scale_2 + c_48->cvHeroSeed_0.z * 0.00100000004749745f)));
+}
+
+static __device__ float convCapDensity_0(ConvectionInput_0 * c_49, float3  p_8, float above_9)
+{
+    float2  rel_5 = float2 {p_8.x, p_8.z} - c_49->cvHeroAt_0;
+    float r2_3 = dot_0(rel_5, rel_5);
+    float _S323 = c_49->cvHeroRadius_0;
+    float _S324 = c_49->cvPileusThick_0;
+    float best_3;
+    if((c_49->cvPileusThick_0) > 0.0f)
+    {
+        float rp_1 = 0.60000002384185791f * _S323;
+        float _S325 = rp_1 * rp_1;
+        if(r2_3 < _S325)
+        {
+            float lens_0 = 1.0f - r2_3 / _S325;
+            float _S326 = c_49->cvPileusGap_0;
+            float _S327 = convHeroHeight_0(c_49, (F32_sqrt((r2_3))) * 0.60000002384185791f);
+            float most_0 = 0.5f * _S324 * lens_0;
+            float _S328 = (F32_abs((above_9 - (_S326 + _S327))));
+            if(_S328 < most_0)
+            {
+                float _S329 = convCapGrain_0(c_49, rel_5, 900.0f);
+                float s_9 = most_0 * _S329 - _S328;
+                if(s_9 > 0.0f)
+                {
+                    best_3 = (F32_max((0.0f), (0.44999998807907104f * smoothstep_0(0.0f, 15.0f, s_9))));
+                }
+                else
+                {
+                    best_3 = 0.0f;
+                }
+            }
+            else
+            {
+                best_3 = 0.0f;
+            }
+        }
+        else
+        {
+            best_3 = 0.0f;
+        }
+    }
+    else
+    {
+        best_3 = 0.0f;
+    }
+    float _S330 = c_49->cvVelumThick_0;
+    if((c_49->cvVelumThick_0) > 0.0f)
+    {
+        float ext_1 = 1.89999997615814209f * _S323;
+        if(r2_3 < (ext_1 * ext_1))
+        {
+            float r_10 = (F32_sqrt((r2_3)));
+            float2  dir_0;
+            if(r_10 > 0.00100000004749745f)
+            {
+                dir_0 = rel_5 / make_float2 (r_10);
+            }
+            else
+            {
+                dir_0 = make_float2 (1.0f, 0.0f);
+            }
+            float edge_1 = _S323 + (ext_1 - _S323) * saturate_0(0.875f + 0.08330000191926956f * gradientNoise_0(make_float3 (1.70000004768371582f * dir_0.x + c_49->cvHeroSeed_0.x * 0.00100000004749745f, 2.29999995231628418f, 1.70000004768371582f * dir_0.y + c_49->cvHeroSeed_0.z * 0.00100000004749745f)));
+            float _S331 = 0.5f * _S330;
+            float most_1 = _S331 * (1.0f - smoothstep_0(_S323 + 0.40000000596046448f * (edge_1 - _S323), edge_1, r_10));
+            float _S332 = (F32_abs((above_9 - (c_49->cvVelumHeight_0 + _S331 * (1.0f - smoothstep_0(_S323, 2.0f * _S323, r_10))))));
+            if(_S332 < most_1)
+            {
+                float _S333 = convCapGrain_0(c_49, rel_5, 2500.0f);
+                float s_10 = most_1 * _S333 - _S332;
+                if(s_10 > 0.0f)
+                {
+                    best_3 = (F32_max((best_3), (0.2199999988079071f * smoothstep_0(0.0f, 15.0f, s_10))));
+                }
+            }
+        }
+    }
+    return c_49->cvSigma_0 * best_3;
+}
+
+static __device__ void convGroupFold_0(float d_18, float3  x_32, float lift_3, float lobe_2, float * gMax_0, float * gSum_0, float3  * gX_0, float * gLift_0, float * gLobe_0)
+{
+    if(d_18 > (*gMax_0))
+    {
+        float scale_3 = (F32_exp(((*gMax_0 - d_18) / 50.0f)));
+        *gSum_0 = *gSum_0 * scale_3;
+        *gX_0 = *gX_0 * make_float3 (scale_3);
+        *gLift_0 = *gLift_0 * scale_3;
+        *gLobe_0 = *gLobe_0 * scale_3;
+        *gMax_0 = d_18;
+    }
+    float wt_0 = (F32_exp(((d_18 - *gMax_0) / 50.0f)));
+    *gSum_0 = *gSum_0 + wt_0;
+    *gX_0 = *gX_0 + make_float3 (wt_0) * x_32;
+    *gLift_0 = *gLift_0 + wt_0 * lift_3;
+    *gLobe_0 = *gLobe_0 + wt_0 * lobe_2;
+    return;
+}
+
+static __device__ float convGroupInside_0(ConvectionInput_0 * c_50, float3  p_9, float above_10, bool nearGroup_3)
+{
+    bool _S334;
+    float gMax_1 = -1.00000001504746622e+30f;
+    float gSum_1 = 0.0f;
+    float gLift_1 = 0.0f;
+    float gLobe_1 = 0.0f;
+    float3  gX_1 = make_float3 (0.0f, 0.0f, 0.0f);
+    float d_19;
+    float amount_2;
+    float lobe_3;
+    float3  x_33;
+    bool anyTurret_0 = false;
+    int k_10 = int(0);
+    for(;;)
+    {
+        if(k_10 < int(5))
+        {
+        }
+        else
+        {
+            break;
+        }
+        if(!nearGroup_3)
+        {
+            _S334 = true;
+        }
+        else
+        {
+            _S334 = k_10 >= (c_50->cvTurretCount_0);
+        }
+        if(_S334)
+        {
+            break;
+        }
+        float4  _S335 = convTurret_0(c_50, k_10);
+        float kt_1;
+        bool _S336 = convTurretSmooth_0(c_50, _S335, p_9, above_10, &d_19, &x_33, &kt_1);
+        if(_S336)
+        {
+            float _S337 = convLift_0(c_50, above_10, kt_1);
+            convGroupFold_0(d_19, x_33, _S337, kt_1, &gMax_1, &gSum_1, &gX_1, &gLift_1, &gLobe_1);
+            anyTurret_0 = true;
+        }
+        k_10 = k_10 + int(1);
+    }
+    bool _S338 = convHeroSmooth_0(c_50, p_9, above_10, &d_19, &x_33, &amount_2, &lobe_3);
+    float heroLift_0;
+    if(_S338)
+    {
+        float _S339 = convLift_0(c_50, above_10, amount_2);
+        heroLift_0 = _S339;
+    }
+    else
+    {
+        heroLift_0 = 0.0f;
+    }
+    if(!_S338)
+    {
+        _S334 = !anyTurret_0;
+    }
+    else
+    {
+        _S334 = false;
+    }
+    if(_S334)
     {
         return -1.00000001504746622e+30f;
     }
-    float _S211 = convHeroHeight_0(c_25, r_4);
-    float v_3 = _S211 - above_3;
-    float _S212 = convHeroRadiusAt_0(c_25, above_3);
-    float shiftOut_0;
-    float shiftUp_0;
-    float d_11;
-    if(_S212 < 0.0f)
+    float lift_4;
+    float lobeAt_0;
+    float3  at_2;
+    if(!anyTurret_0)
     {
-        shiftOut_0 = 0.0f;
-        shiftUp_0 = v_3;
-        d_11 = v_3;
+        gMax_1 = d_19;
+        lift_4 = heroLift_0;
+        at_2 = x_33;
+        lobeAt_0 = lobe_3;
     }
     else
     {
-        float h_3 = _S212 - r_4;
-        float d_12 = convSurfaceDistance_0(v_3, h_3, 1.0f);
-        if((F32_abs((v_3))) > 9.99999997475242708e-07f)
+        if(_S338)
         {
-            shiftOut_0 = d_12 * (d_12 / v_3);
+            convGroupFold_0(d_19, x_33, heroLift_0, lobe_3, &gMax_1, &gSum_1, &gX_1, &gLift_1, &gLobe_1);
         }
-        else
-        {
-            shiftOut_0 = 0.0f;
-        }
-        if((F32_abs((h_3))) > 9.99999997475242708e-07f)
-        {
-            shiftUp_0 = d_12 * (d_12 / h_3);
-        }
-        else
-        {
-            shiftUp_0 = 0.0f;
-        }
-        float _S213 = shiftOut_0;
-        shiftOut_0 = shiftUp_0;
-        shiftUp_0 = _S213;
-        d_11 = d_12;
+        float3  _S340 = gX_1 / make_float3 (gSum_1);
+        float _S341 = gLobe_1 / gSum_1;
+        lift_4 = gLift_1 / gSum_1;
+        at_2 = _S340;
+        lobeAt_0 = _S341;
     }
-    float2  radial_0;
-    if(r_4 > 0.00100000004749745f)
-    {
-        radial_0 = rel_0 / make_float2 (r_4);
-    }
-    else
-    {
-        radial_0 = make_float2 (0.0f, 0.0f);
-    }
-    float2  at_0 = rel_0 + radial_0 * make_float2 (shiftOut_0);
-    float3  x_23 = make_float3 (at_0.x, p_5.y + shiftUp_0, at_0.y) + c_25->cvHeroSeed_0;
-    float _S214 = c_25->cvHeroBillow_0;
-    float _S215 = convLift_0(c_25, above_3, c_25->cvHeroBillow_0);
-    float _S216 = convInside_0(c_25, d_11, _S215, x_23, c_25->cvBillowScale_0 * _S214);
-    return _S216;
+    float _S342 = convInside_0(c_50, gMax_1, lift_4, at_2 + c_50->cvHeroSeed_0, c_50->cvBillowScale_0 * lobeAt_0);
+    return _S342;
 }
 
-static __device__ float convectionDensity_0(ConvectionInput_0 * c_26, float3  p_6)
+static __device__ float convHeroInside_0(ConvectionInput_0 * c_51, float3  p_10, float above_11)
 {
-    float _S217 = p_6.y;
-    float above_4 = _S217 - c_26->cvBase_0;
-    bool _S218;
-    if(above_4 < 0.0f)
+    float d_20;
+    float amount_3;
+    float lobe_4;
+    float3  x_34;
+    bool _S343 = convHeroSmooth_0(c_51, p_10, above_11, &d_20, &x_34, &amount_3, &lobe_4);
+    if(!_S343)
     {
-        _S218 = true;
+        return -1.00000001504746622e+30f;
+    }
+    float _S344 = convLift_0(c_51, above_11, amount_3);
+    float _S345 = convInside_0(c_51, d_20, _S344, x_34 + c_51->cvHeroSeed_0, c_51->cvBillowScale_0 * lobe_4);
+    return _S345;
+}
+
+static __device__ float convectionDensity_0(ConvectionInput_0 * c_52, float3  p_11)
+{
+    float _S346 = p_11.y;
+    float above_12 = _S346 - c_52->cvBase_0;
+    float _S347 = c_52->cvMammaDepth_0;
+    bool rampBand_0;
+    if(above_12 < (- c_52->cvMammaDepth_0))
+    {
+        rampBand_0 = true;
     }
     else
     {
-        float _S219 = convCeiling_0(c_26);
-        _S218 = above_4 > _S219;
+        float _S348 = convCeiling_0(c_52);
+        rampBand_0 = above_12 > _S348;
     }
-    if(_S218)
+    if(rampBand_0)
     {
         return 0.0f;
     }
-    float _S220 = convLift_0(c_26, above_4, 1.0f - 0.60000002384185791f * c_26->cvLacunarity_0);
-    float inside_2;
-    if((c_26->cvHeroAlone_0) == int(0))
+    float2  _S349 = float2 {p_11.x, p_11.z};
+    float2  fromHero_0 = _S349 - c_52->cvHeroAt_0;
+    bool nearGroup_4 = (dot_0(fromHero_0, fromHero_0)) < (c_52->cvGroupReach_0 * c_52->cvGroupReach_0);
+    bool _S350 = _S347 > 0.0f;
+    if(_S350)
     {
-        float2  q_9 = float2 {p_6.x, p_6.z} - c_26->cvDrift_0;
-        float2  slope_1;
-        float _S221 = convUpdraftGrad_0(c_26, q_9, &slope_1);
-        float _S222 = convTowerHeight_0(c_26, _S221);
-        float v_4 = _S222 - above_4;
-        float _S223 = convNeededUpdraft_0(c_26, above_4);
-        float delta_1 = _S221 - _S223;
-        float _S224 = length_0(slope_1);
-        float _S225 = convSlopeCap_0(c_26);
-        float d_13 = convSurfaceDistance_0(v_4, delta_1, (F32_min((_S224), (_S225))));
-        if((d_13 + _S220) > 0.0f)
+        rampBand_0 = above_12 < 0.0f;
+    }
+    else
+    {
+        rampBand_0 = false;
+    }
+    if(rampBand_0)
+    {
+        float _S351 = convMammaSag_0(c_52, _S349, nearGroup_4, - above_12);
+        float hang_0 = _S351 + above_12;
+        if(hang_0 <= 0.0f)
         {
-            if((F32_abs((v_4))) > 9.99999997475242708e-07f)
+            return 0.0f;
+        }
+        return c_52->cvSigma_0 * (F32_sqrt((saturate_0(hang_0 / 40.0f)))) * smoothstep_0(0.0f, 12.0f, hang_0);
+    }
+    float _S352 = convLift_0(c_52, above_12, 1.0f - 0.60000002384185791f * c_52->cvLacunarity_0);
+    if(_S350)
+    {
+        rampBand_0 = above_12 < 40.0f;
+    }
+    else
+    {
+        rampBand_0 = false;
+    }
+    bool moated_1;
+    float capDensity_0;
+    float sag_0;
+    float baseField_0;
+    float inside_3;
+    if((c_52->cvHeroAlone_0) == int(0))
+    {
+        float capMoat_1 = 0.0f;
+        float2  _S353 = make_float2 (0.0f, 0.0f);
+        float2  gMoat_1 = _S353;
+        if((c_52->cvMoat_0) > 0.0f)
+        {
+            moated_1 = nearGroup_4;
+        }
+        else
+        {
+            moated_1 = false;
+        }
+        if(moated_1)
+        {
+            float _S354 = convMoat_0(c_52, _S349, &gMoat_1, &capMoat_1);
+            capDensity_0 = _S354;
+        }
+        else
+        {
+            capDensity_0 = 1.0f;
+        }
+        if(capDensity_0 > 0.0f)
+        {
+            float2  q_11 = _S349 - c_52->cvDrift_0;
+            float2  slope_6;
+            float _S355 = convUpdraftGrad_0(c_52, q_11, &slope_6);
+            float _S356 = convSlopeCap_0(c_52);
+            float cap_6;
+            if(moated_1)
             {
-                inside_2 = d_13 * (d_13 / v_4);
+                slope_6 = slope_6 * make_float2 (capDensity_0) + gMoat_1 * make_float2 (_S355);
+                float cap_7 = _S356 + capMoat_1;
+                sag_0 = _S355 * capDensity_0;
+                cap_6 = cap_7;
             }
             else
             {
-                inside_2 = 0.0f;
+                sag_0 = _S355;
+                cap_6 = _S356;
             }
-            float2  shiftAcross_0;
-            if((F32_abs((delta_1))) > 9.999999960041972e-13f)
+            if(rampBand_0)
             {
-                shiftAcross_0 = slope_1 * make_float2 (- d_13 * (d_13 / delta_1));
+                float _S357 = convFieldBaseInside_0(c_52, sag_0, slope_6, cap_6);
+                baseField_0 = _S357;
             }
             else
             {
-                shiftAcross_0 = make_float2 (0.0f, 0.0f);
+                baseField_0 = -1.00000001504746622e+30f;
             }
-            float _S226 = convInside_0(c_26, d_13, _S220, make_float3 (q_9.x + shiftAcross_0.x, _S217 + inside_2, q_9.y + shiftAcross_0.y), c_26->cvBillowScale_0);
-            inside_2 = _S226;
+            float _S358 = convTowerHeight_0(c_52, sag_0);
+            float v_5 = _S358 - above_12;
+            float _S359 = convNeededUpdraft_0(c_52, above_12);
+            float delta_1 = sag_0 - _S359;
+            float d_21 = convSurfaceDistance_0(v_5, delta_1, (F32_min((length_0(slope_6)), (cap_6))));
+            if((d_21 + _S352) > 0.0f)
+            {
+                if((F32_abs((v_5))) > 9.99999997475242708e-07f)
+                {
+                    inside_3 = d_21 * (d_21 / v_5);
+                }
+                else
+                {
+                    inside_3 = 0.0f;
+                }
+                float2  shiftAcross_0;
+                if((F32_abs((delta_1))) > 9.999999960041972e-13f)
+                {
+                    shiftAcross_0 = slope_6 * make_float2 (- d_21 * (d_21 / delta_1));
+                }
+                else
+                {
+                    shiftAcross_0 = _S353;
+                }
+                float _S360 = convInside_0(c_52, d_21, _S352, make_float3 (q_11.x + shiftAcross_0.x, _S346 + inside_3, q_11.y + shiftAcross_0.y), c_52->cvBillowScale_0);
+                inside_3 = _S360;
+            }
+            else
+            {
+                inside_3 = -1.00000001504746622e+30f;
+            }
         }
         else
         {
-            inside_2 = -1.00000001504746622e+30f;
+            inside_3 = -1.00000001504746622e+30f;
+            baseField_0 = -1.00000001504746622e+30f;
         }
     }
     else
     {
-        inside_2 = -1.00000001504746622e+30f;
+        inside_3 = -1.00000001504746622e+30f;
+        baseField_0 = -1.00000001504746622e+30f;
     }
-    if((c_26->cvHeroTop_0) > 0.0f)
+    bool _S361 = (c_52->cvHeroTop_0) > 0.0f;
+    if(_S361)
     {
-        _S218 = inside_2 < 12.0f;
+        if((c_52->cvPileusThick_0) > 0.0f)
+        {
+            moated_1 = true;
+        }
+        else
+        {
+            moated_1 = (c_52->cvVelumThick_0) > 0.0f;
+        }
     }
     else
     {
-        _S218 = false;
+        moated_1 = false;
     }
-    if(_S218)
+    if(moated_1)
     {
-        float _S227 = convHeroInside_0(c_26, p_6, above_4);
-        inside_2 = (F32_max((inside_2), (_S227)));
+        float _S362 = convCapDensity_0(c_52, p_11, above_12);
+        capDensity_0 = _S362;
     }
-    if(inside_2 <= 0.0f)
+    else
     {
-        return 0.0f;
+        capDensity_0 = 0.0f;
     }
-    return c_26->cvSigma_0 * (F32_sqrt((saturate_0(above_4 / 40.0f)))) * smoothstep_0(0.0f, 12.0f, inside_2);
+    if(_S361)
+    {
+        moated_1 = inside_3 < 12.0f;
+    }
+    else
+    {
+        moated_1 = false;
+    }
+    if(moated_1)
+    {
+        if((c_52->cvTurretCount_0) > int(0))
+        {
+            float _S363 = convGroupInside_0(c_52, p_11, above_12, nearGroup_4);
+            inside_3 = (F32_max((inside_3), (_S363)));
+        }
+        else
+        {
+            float _S364 = convHeroInside_0(c_52, p_11, above_12);
+            inside_3 = (F32_max((inside_3), (_S364)));
+        }
+    }
+    if(inside_3 <= 0.0f)
+    {
+        return capDensity_0;
+    }
+    if(rampBand_0)
+    {
+        float _S365 = convPouches_0(c_52, _S349 - c_52->cvDrift_0);
+        if(_S365 > 0.0f)
+        {
+            float _S366 = convGroupBaseInside_0(c_52, _S349, nearGroup_4);
+            float _S367 = convMammaSagOf_0(c_52, _S365, (F32_max((baseField_0), (_S366))));
+            sag_0 = _S367;
+        }
+        else
+        {
+            sag_0 = 0.0f;
+        }
+    }
+    else
+    {
+        sag_0 = 0.0f;
+    }
+    return (F32_max((c_52->cvSigma_0 * (F32_sqrt((saturate_0((above_12 + sag_0) / 40.0f)))) * smoothstep_0(0.0f, 12.0f, inside_3)), (capDensity_0)));
 }
 
-static __device__ float densityAt_0(Medium_0 * m_3, StructuredBuffer<float2 > disp_6, float3  p_7)
+static __device__ float densityAt_0(Medium_0 * m_5, StructuredBuffer<float2 > disp_6, float3  p_12)
 {
-    float _S228 = p_7.y;
-    bool _S229;
-    if(_S228 < (m_3->slabBottom_0))
+    float _S368 = p_12.y;
+    bool _S369;
+    if(_S368 < (m_5->slabBottom_0))
     {
-        _S229 = true;
+        _S369 = true;
     }
     else
     {
-        _S229 = _S228 > (m_3->slabTop_0);
+        _S369 = _S368 > (m_5->slabTop_0);
     }
-    if(_S229)
+    if(_S369)
     {
         return 0.0f;
     }
-    if((m_3->clipOn_0) != int(0))
+    if((m_5->clipOn_0) != int(0))
     {
-        float2  _S230 = float2 {p_7.x, p_7.z};
-        if(any_0(_S230 < (m_3->clipLo_0)))
+        float2  _S370 = float2 {p_12.x, p_12.z};
+        if(any_0(_S370 < (m_5->clipLo_0)))
         {
-            _S229 = true;
+            _S369 = true;
         }
         else
         {
-            _S229 = any_0(_S230 > (m_3->clipHi_0));
+            _S369 = any_0(_S370 > (m_5->clipHi_0));
         }
     }
     else
     {
-        _S229 = false;
+        _S369 = false;
     }
-    if(_S229)
+    if(_S369)
     {
         return 0.0f;
     }
-    float _S231 = m_3->fadeRadius_0;
+    float _S371 = m_5->fadeRadius_0;
     float fade_0;
-    if((m_3->fadeRadius_0) > 0.0f)
+    if((m_5->fadeRadius_0) > 0.0f)
     {
-        float fade_1 = saturate_0((_S231 - length_0(float2 {p_7.x, p_7.z} - m_3->fadeAt_0)) / (F32_max((m_3->fadeWidth_0), (1.0f))));
+        float fade_1 = saturate_0((_S371 - length_0(float2 {p_12.x, p_12.z} - m_5->fadeAt_0)) / (F32_max((m_5->fadeWidth_0), (1.0f))));
         if(fade_1 <= 0.0f)
         {
             return 0.0f;
@@ -2451,47 +3709,47 @@ static __device__ float densityAt_0(Medium_0 * m_3, StructuredBuffer<float2 > di
     {
         fade_0 = 1.0f;
     }
-    int _S232 = m_3->mode_0;
-    if((m_3->mode_0) == int(0))
+    int _S372 = m_5->mode_0;
+    if((m_5->mode_0) == int(0))
     {
-        return m_3->density_0 * fade_0;
+        return m_5->density_0 * fade_0;
     }
-    if(_S232 == int(2))
+    if(_S372 == int(2))
     {
-        float _S233 = iceDensity_0(&m_3->gen_0, disp_6, p_7);
-        return _S233 * fade_0;
+        float _S373 = iceDensity_0(&m_5->gen_0, disp_6, p_12);
+        return _S373 * fade_0;
     }
-    if(_S232 == int(3))
+    if(_S372 == int(3))
     {
-        float _S234 = convectionDensity_0(&m_3->conv_0, p_7);
-        return _S234 * fade_0;
+        float _S374 = convectionDensity_0(&m_5->conv_0, p_12);
+        return _S374 * fade_0;
     }
-    float3  d_14 = (p_7 - m_3->coreCentre_0) / make_float3 ((F32_max((m_3->coreRadius_0), (9.99999997475242708e-07f))));
-    return (m_3->density_0 + m_3->coreDensity_0 * (F32_exp((- dot_1(d_14, d_14))))) * fade_0;
+    float3  d_22 = (p_12 - m_5->coreCentre_0) / make_float3 ((F32_max((m_5->coreRadius_0), (9.99999997475242708e-07f))));
+    return (m_5->density_0 + m_5->coreDensity_0 * (F32_exp((- dot_1(d_22, d_22))))) * fade_0;
 }
 
-static __device__ float transmittance_0(Medium_0 * m_4, MajorantGrid_0 * g_11, StructuredBuffer<float> bounds_1, StructuredBuffer<float2 > disp_7, Rng_0 * rng_0, float3  p_8, float3  dir_0, int * steps_0)
+static __device__ float transmittance_0(Medium_0 * m_6, MajorantGrid_0 * g_12, StructuredBuffer<float> bounds_1, StructuredBuffer<float2 > disp_7, Rng_0 * rng_0, float3  p_13, float3  dir_1, int * steps_0)
 {
     float t0_2;
     float t1_2;
-    bool _S235 = slabRange_0(m_4, p_8, dir_0, &t0_2, &t1_2);
-    if(!_S235)
+    bool _S375 = slabRange_0(m_6, p_13, dir_1, &t0_2, &t1_2);
+    if(!_S375)
     {
         return 1.0f;
     }
-    float _S236 = (F32_max((t0_2), (0.0f)));
-    t0_2 = _S236;
-    Dda_0 _S237 = ddaInit_0(g_11, p_8, dir_0, _S236);
-    Dda_0 dda_0 = _S237;
-    float _S238 = m_4->majorant_0;
-    float _S239 = gridBound_0(m_4, g_11, bounds_1, disp_7, (&dda_0)->cell_0, m_4->majorant_0);
-    float localMaj_0 = _S239;
-    int i_16 = int(0);
-    float t_4 = _S236;
+    float _S376 = (F32_max((t0_2), (0.0f)));
+    t0_2 = _S376;
+    Dda_0 _S377 = ddaInit_0(g_12, p_13, dir_1, _S376);
+    Dda_0 dda_0 = _S377;
+    float _S378 = m_6->majorant_0;
+    float _S379 = gridBound_0(m_6, g_12, bounds_1, disp_7, (&dda_0)->cell_0, m_6->majorant_0);
+    float localMaj_0 = _S379;
+    int i_19 = int(0);
+    float t_9 = _S376;
     float tr_0 = 1.0f;
     for(;;)
     {
-        if(i_16 < int(4096))
+        if(i_19 < int(4096))
         {
         }
         else
@@ -2499,44 +3757,44 @@ static __device__ float transmittance_0(Medium_0 * m_4, MajorantGrid_0 * g_11, S
             break;
         }
         *steps_0 = *steps_0 + int(1);
-        Dda_0 _S240 = dda_0;
-        float _S241 = ddaExit_0(&_S240);
-        float _S242 = (F32_min((_S241), (t1_2)));
+        Dda_0 _S380 = dda_0;
+        float _S381 = ddaExit_0(&_S380);
+        float _S382 = (F32_min((_S381), (t1_2)));
         if(localMaj_0 <= 0.0f)
         {
-            if(_S242 >= t1_2)
+            if(_S382 >= t1_2)
             {
                 break;
             }
             ddaAdvance_0(&dda_0);
-            float _S243 = gridBound_0(m_4, g_11, bounds_1, disp_7, (&dda_0)->cell_0, _S238);
-            localMaj_0 = _S243;
-            t_4 = _S242;
-            i_16 = i_16 + int(1);
+            float _S383 = gridBound_0(m_6, g_12, bounds_1, disp_7, (&dda_0)->cell_0, _S378);
+            localMaj_0 = _S383;
+            t_9 = _S382;
+            i_19 = i_19 + int(1);
             continue;
         }
-        float _S244 = randFloat_0(rng_0);
-        float t_5 = t_4 - (F32_log(((F32_max((1.0f - _S244), (1.00000001168609742e-07f)))))) / localMaj_0;
-        if(t_5 >= _S242)
+        float _S384 = randFloat_0(rng_0);
+        float t_10 = t_9 - (F32_log(((F32_max((1.0f - _S384), (1.00000001168609742e-07f)))))) / localMaj_0;
+        if(t_10 >= _S382)
         {
-            if(_S242 >= t1_2)
+            if(_S382 >= t1_2)
             {
                 break;
             }
             ddaAdvance_0(&dda_0);
-            float _S245 = gridBound_0(m_4, g_11, bounds_1, disp_7, (&dda_0)->cell_0, _S238);
-            localMaj_0 = _S245;
-            t_4 = _S242;
-            i_16 = i_16 + int(1);
+            float _S385 = gridBound_0(m_6, g_12, bounds_1, disp_7, (&dda_0)->cell_0, _S378);
+            localMaj_0 = _S385;
+            t_9 = _S382;
+            i_19 = i_19 + int(1);
             continue;
         }
-        float _S246 = densityAt_0(m_4, disp_7, p_8 + dir_0 * make_float3 (t_5));
-        float tr_1 = tr_0 * (F32_max((0.0f), (1.0f - _S246 / localMaj_0)));
+        float _S386 = densityAt_0(m_6, disp_7, p_13 + dir_1 * make_float3 (t_10));
+        float tr_1 = tr_0 * (F32_max((0.0f), (1.0f - _S386 / localMaj_0)));
         float tr_2;
         if(tr_1 < 0.00999999977648258f)
         {
-            float _S247 = randFloat_0(rng_0);
-            if(_S247 > 0.5f)
+            float _S387 = randFloat_0(rng_0);
+            if(_S387 > 0.5f)
             {
                 return 0.0f;
             }
@@ -2546,61 +3804,61 @@ static __device__ float transmittance_0(Medium_0 * m_4, MajorantGrid_0 * g_11, S
         {
             tr_2 = tr_1;
         }
-        t_4 = t_5;
+        t_9 = t_10;
         tr_0 = tr_2;
-        i_16 = i_16 + int(1);
+        i_19 = i_19 + int(1);
     }
     return tr_0;
 }
 
 extern "C" __global__ void transmittanceTrial(Medium_0 medium_0, MajorantGrid_0 grid_0, StructuredBuffer<float> bounds_2, StructuredBuffer<float2 > drift_0, float3  origin_1, float3  direction_0, RWStructuredBuffer<float> output_0, RWStructuredBuffer<int> outSteps_0, uint seed_1, int count_0)
 {
-    int i_17 = int((blockIdx * blockDim + threadIdx).x);
-    if(i_17 >= count_0)
+    int i_20 = int((blockIdx * blockDim + threadIdx).x);
+    if(i_20 >= count_0)
     {
         return;
     }
-    uint s_6 = uint(i_17) * 747796405U + 2891336453U;
-    uint s_7 = ((s_6 >> ((s_6 >> 28U) + 4U)) ^ s_6) * 277803737U;
-    Rng_0 rng_1 = makeRng_0(((s_7 >> 22U) ^ s_7) ^ seed_1);
+    uint s_11 = uint(i_20) * 747796405U + 2891336453U;
+    uint s_12 = ((s_11 >> ((s_11 >> 28U) + 4U)) ^ s_11) * 277803737U;
+    Rng_0 rng_1 = makeRng_0(((s_12 >> 22U) ^ s_12) ^ seed_1);
     int steps_1 = int(0);
-    float * _S248 = (&(output_0)[i_17]);
-    Medium_0 _S249 = medium_0;
-    MajorantGrid_0 _S250 = grid_0;
-    float _S251 = transmittance_0(&_S249, &_S250, bounds_2, drift_0, &rng_1, origin_1, direction_0, &steps_1);
-    *_S248 = _S251;
-    *(&(outSteps_0)[i_17]) = steps_1;
+    float * _S388 = (&(output_0)[i_20]);
+    Medium_0 _S389 = medium_0;
+    MajorantGrid_0 _S390 = grid_0;
+    float _S391 = transmittance_0(&_S389, &_S390, bounds_2, drift_0, &rng_1, origin_1, direction_0, &steps_1);
+    *_S388 = _S391;
+    *(&(outSteps_0)[i_20]) = steps_1;
     return;
 }
 
-static __device__ bool sampleFreeFlightUpTo_0(Medium_0 * m_5, MajorantGrid_0 * g_12, StructuredBuffer<float> bounds_3, StructuredBuffer<float2 > disp_8, Rng_0 * rng_2, float3  ro_2, float3  rd_2, float tLimit_0, float3  * scatterPoint_0, float * distance_0, int * steps_2)
+static __device__ bool sampleFreeFlightUpTo_0(Medium_0 * m_7, MajorantGrid_0 * g_13, StructuredBuffer<float> bounds_3, StructuredBuffer<float2 > disp_8, Rng_0 * rng_2, float3  ro_2, float3  rd_2, float tLimit_0, float3  * scatterPoint_0, float * distance_0, int * steps_2)
 {
     *scatterPoint_0 = make_float3 (0.0f, 0.0f, 0.0f);
     *distance_0 = 0.0f;
     float t0_3;
     float t1_3;
-    bool _S252 = slabRange_0(m_5, ro_2, rd_2, &t0_3, &t1_3);
-    if(!_S252)
+    bool _S392 = slabRange_0(m_7, ro_2, rd_2, &t0_3, &t1_3);
+    if(!_S392)
     {
         return false;
     }
-    float _S253 = (F32_min((t1_3), (tLimit_0)));
-    t1_3 = _S253;
-    if(!(_S253 > t0_3))
+    float _S393 = (F32_min((t1_3), (tLimit_0)));
+    t1_3 = _S393;
+    if(!(_S393 > t0_3))
     {
         return false;
     }
-    float _S254 = (F32_max((t0_3), (0.0f)));
-    Dda_0 _S255 = ddaInit_0(g_12, ro_2, rd_2, _S254);
-    Dda_0 dda_1 = _S255;
-    float _S256 = m_5->majorant_0;
-    float _S257 = gridBound_0(m_5, g_12, bounds_3, disp_8, (&dda_1)->cell_0, m_5->majorant_0);
-    float localMaj_1 = _S257;
-    int i_18 = int(0);
-    float t_6 = _S254;
+    float _S394 = (F32_max((t0_3), (0.0f)));
+    Dda_0 _S395 = ddaInit_0(g_13, ro_2, rd_2, _S394);
+    Dda_0 dda_1 = _S395;
+    float _S396 = m_7->majorant_0;
+    float _S397 = gridBound_0(m_7, g_13, bounds_3, disp_8, (&dda_1)->cell_0, m_7->majorant_0);
+    float localMaj_1 = _S397;
+    int i_21 = int(0);
+    float t_11 = _S394;
     for(;;)
     {
-        if(i_18 < int(4096))
+        if(i_21 < int(4096))
         {
         }
         else
@@ -2608,122 +3866,122 @@ static __device__ bool sampleFreeFlightUpTo_0(Medium_0 * m_5, MajorantGrid_0 * g
             break;
         }
         *steps_2 = *steps_2 + int(1);
-        Dda_0 _S258 = dda_1;
-        float _S259 = ddaExit_0(&_S258);
-        float _S260 = (F32_min((_S259), (t1_3)));
+        Dda_0 _S398 = dda_1;
+        float _S399 = ddaExit_0(&_S398);
+        float _S400 = (F32_min((_S399), (t1_3)));
         if(localMaj_1 <= 0.0f)
         {
-            if(_S260 >= t1_3)
+            if(_S400 >= t1_3)
             {
                 return false;
             }
             ddaAdvance_0(&dda_1);
-            float _S261 = gridBound_0(m_5, g_12, bounds_3, disp_8, (&dda_1)->cell_0, _S256);
-            localMaj_1 = _S261;
-            t_6 = _S260;
-            i_18 = i_18 + int(1);
+            float _S401 = gridBound_0(m_7, g_13, bounds_3, disp_8, (&dda_1)->cell_0, _S396);
+            localMaj_1 = _S401;
+            t_11 = _S400;
+            i_21 = i_21 + int(1);
             continue;
         }
-        float _S262 = randFloat_0(rng_2);
-        float t_7 = t_6 - (F32_log(((F32_max((1.0f - _S262), (1.00000001168609742e-07f)))))) / localMaj_1;
-        if(t_7 >= _S260)
+        float _S402 = randFloat_0(rng_2);
+        float t_12 = t_11 - (F32_log(((F32_max((1.0f - _S402), (1.00000001168609742e-07f)))))) / localMaj_1;
+        if(t_12 >= _S400)
         {
-            if(_S260 >= t1_3)
+            if(_S400 >= t1_3)
             {
                 return false;
             }
             ddaAdvance_0(&dda_1);
-            float _S263 = gridBound_0(m_5, g_12, bounds_3, disp_8, (&dda_1)->cell_0, _S256);
-            localMaj_1 = _S263;
-            t_6 = _S260;
-            i_18 = i_18 + int(1);
+            float _S403 = gridBound_0(m_7, g_13, bounds_3, disp_8, (&dda_1)->cell_0, _S396);
+            localMaj_1 = _S403;
+            t_11 = _S400;
+            i_21 = i_21 + int(1);
             continue;
         }
-        float3  p_9 = ro_2 + rd_2 * make_float3 (t_7);
-        float _S264 = randFloat_0(rng_2);
-        float _S265 = densityAt_0(m_5, disp_8, p_9);
-        if(_S264 < (_S265 / localMaj_1))
+        float3  p_14 = ro_2 + rd_2 * make_float3 (t_12);
+        float _S404 = randFloat_0(rng_2);
+        float _S405 = densityAt_0(m_7, disp_8, p_14);
+        if(_S404 < (_S405 / localMaj_1))
         {
-            *scatterPoint_0 = p_9;
-            *distance_0 = t_7;
+            *scatterPoint_0 = p_14;
+            *distance_0 = t_12;
             return true;
         }
-        t_6 = t_7;
-        i_18 = i_18 + int(1);
+        t_11 = t_12;
+        i_21 = i_21 + int(1);
     }
     return false;
 }
 
-static __device__ bool sampleFreeFlight_0(Medium_0 * m_6, MajorantGrid_0 * g_13, StructuredBuffer<float> bounds_4, StructuredBuffer<float2 > disp_9, Rng_0 * rng_3, float3  ro_3, float3  rd_3, float3  * scatterPoint_1, float * distance_1, int * steps_3)
+static __device__ bool sampleFreeFlight_0(Medium_0 * m_8, MajorantGrid_0 * g_14, StructuredBuffer<float> bounds_4, StructuredBuffer<float2 > disp_9, Rng_0 * rng_3, float3  ro_3, float3  rd_3, float3  * scatterPoint_1, float * distance_1, int * steps_3)
 {
-    bool _S266 = sampleFreeFlightUpTo_0(m_6, g_13, bounds_4, disp_9, rng_3, ro_3, rd_3, 1.00000001504746622e+30f, scatterPoint_1, distance_1, steps_3);
-    return _S266;
+    bool _S406 = sampleFreeFlightUpTo_0(m_8, g_14, bounds_4, disp_9, rng_3, ro_3, rd_3, 1.00000001504746622e+30f, scatterPoint_1, distance_1, steps_3);
+    return _S406;
 }
 
 extern "C" __global__ void freeFlightTrial(Medium_0 medium_1, MajorantGrid_0 grid_1, StructuredBuffer<float> bounds_5, StructuredBuffer<float2 > drift_1, float3  origin_2, float3  direction_1, RWStructuredBuffer<float> outDistance_0, RWStructuredBuffer<int> outSteps_1, uint seed_2, int count_1)
 {
-    int i_19 = int((blockIdx * blockDim + threadIdx).x);
-    if(i_19 >= count_1)
+    int i_22 = int((blockIdx * blockDim + threadIdx).x);
+    if(i_22 >= count_1)
     {
         return;
     }
-    uint s_8 = uint(i_19) * 747796405U + 2891336453U;
-    uint s_9 = ((s_8 >> ((s_8 >> 28U) + 4U)) ^ s_8) * 277803737U;
-    Rng_0 rng_4 = makeRng_0(((s_9 >> 22U) ^ s_9) ^ seed_2);
+    uint s_13 = uint(i_22) * 747796405U + 2891336453U;
+    uint s_14 = ((s_13 >> ((s_13 >> 28U) + 4U)) ^ s_13) * 277803737U;
+    Rng_0 rng_4 = makeRng_0(((s_14 >> 22U) ^ s_14) ^ seed_2);
     int steps_4 = int(0);
-    float * _S267 = (&(outDistance_0)[i_19]);
-    Medium_0 _S268 = medium_1;
-    MajorantGrid_0 _S269 = grid_1;
+    float * _S407 = (&(outDistance_0)[i_22]);
+    Medium_0 _S408 = medium_1;
+    MajorantGrid_0 _S409 = grid_1;
     float3  hit_0;
     float dist_1;
-    bool _S270 = sampleFreeFlight_0(&_S268, &_S269, bounds_5, drift_1, &rng_4, origin_2, direction_1, &hit_0, &dist_1, &steps_4);
-    float _S271;
-    if(_S270)
+    bool _S410 = sampleFreeFlight_0(&_S408, &_S409, bounds_5, drift_1, &rng_4, origin_2, direction_1, &hit_0, &dist_1, &steps_4);
+    float _S411;
+    if(_S410)
     {
-        _S271 = dist_1;
+        _S411 = dist_1;
     }
     else
     {
-        _S271 = -1.0f;
+        _S411 = -1.0f;
     }
-    *_S267 = _S271;
-    *(&(outSteps_1)[i_19]) = steps_4;
+    *_S407 = _S411;
+    *(&(outSteps_1)[i_22]) = steps_4;
     return;
 }
 
 extern "C" __global__ void rngTrial(RWStructuredBuffer<float> output_1, uint seed_3, int count_2)
 {
-    int i_20 = int((blockIdx * blockDim + threadIdx).x);
-    if(i_20 >= count_2)
+    int i_23 = int((blockIdx * blockDim + threadIdx).x);
+    if(i_23 >= count_2)
     {
         return;
     }
-    Rng_0 rng_5 = makeRng_0(seed_3 + uint(i_20));
-    float * _S272 = (&(output_1)[i_20]);
-    float _S273 = randFloat_0(&rng_5);
-    *_S272 = _S273;
+    Rng_0 rng_5 = makeRng_0(seed_3 + uint(i_23));
+    float * _S412 = (&(output_1)[i_23]);
+    float _S413 = randFloat_0(&rng_5);
+    *_S412 = _S413;
     return;
 }
 
 extern "C" __global__ void buildIceGrid(Medium_0 medium_2, StructuredBuffer<float2 > drift_2, MajorantGrid_0 grid_2, RWStructuredBuffer<float> outBounds_0, int cellCount_0)
 {
-    int i_21 = int((blockIdx * blockDim + threadIdx).x);
-    if(i_21 >= cellCount_0)
+    int i_24 = int((blockIdx * blockDim + threadIdx).x);
+    if(i_24 >= cellCount_0)
     {
         return;
     }
-    int _S274 = grid_2.dims_0.x;
-    int cx_0 = i_21 % _S274;
-    int _S275 = i_21 / _S274;
-    int _S276 = grid_2.dims_0.y;
-    int cy_0 = _S275 % _S276;
-    int cz_0 = i_21 / (_S274 * _S276);
-    float3  lo_7 = grid_2.origin_0 + make_float3 (float(cx_0), float(cy_0), float(cz_0)) * grid_2.cellExtent_0;
-    float * _S277 = (&(outBounds_0)[i_21]);
-    float3  _S278 = lo_7 + grid_2.cellExtent_0;
-    GeneratorInput_0 _S279 = medium_2.gen_0;
-    float _S280 = iceDensityBound_0(&_S279, drift_2, lo_7, _S278);
-    *_S277 = _S280;
+    int _S414 = grid_2.dims_0.x;
+    int cx_0 = i_24 % _S414;
+    int _S415 = i_24 / _S414;
+    int _S416 = grid_2.dims_0.y;
+    int cy_0 = _S415 % _S416;
+    int cz_0 = i_24 / (_S414 * _S416);
+    float3  lo_11 = grid_2.origin_0 + make_float3 (float(cx_0), float(cy_0), float(cz_0)) * grid_2.cellExtent_0;
+    float * _S417 = (&(outBounds_0)[i_24]);
+    float3  _S418 = lo_11 + grid_2.cellExtent_0;
+    GeneratorInput_0 _S419 = medium_2.gen_0;
+    float _S420 = iceDensityBound_0(&_S419, drift_2, lo_11, _S418);
+    *_S417 = _S420;
     return;
 }
 

@@ -4,6 +4,557 @@ Tracked against `PLAN.md`. Newest first.
 
 ---
 
+## 2026-10-01 — PILEUS AND VELUM, AND THE CLOUDS FINALLY MOVE IN PLAYBACK. Build 24, minor 14. The hero gets a smooth cap over its crown and a wide thin veil it rises through, both thinner than the tower. At 0 the frame is byte-identical to build 21. And the effect now tells AE its picture changes with time: since Phase 1, AE played back one frame of an effect with nothing keyframed. BUILT AND TESTED, NOT INSTALLED: After Effects was open.
+
+### Why nothing drifted (found from a user report)
+
+The user asked why the cumulus did not move with the wind while the ice did when its wind changed.
+Three things, one a bug:
+
+- **`PF_OutFlag_NON_PARAM_VARY` was never set.** The SDK: "If the effect produces changing
+  frames when applied to a still image and all parameters are constant, that's a sure sign
+  that this bit should be set." Mistytune sits on a solid, so with nothing keyframed AE
+  rendered one frame and reused it. Set in `EffectCommon.h` and `cmake/EffectFlags.cmake`.
+  NOT YET SEEN IN THE HOST.
+- **The default camera rides with the hero.** Orbit the Hero follows the hero's drifted
+  position, and the field drifts at the same velocity, so the frame does not change. Comp
+  Camera, or Hero Drifts With Wind off, shows the drift.
+- **Real time is slow.** 6 m/s is 60 m in ten seconds against a 3 km hero 4 km away, and a
+  cell lives 1200 s. Moving clouds on video are timelapses. Offered, not built: a Time Scale
+  control, so a timelapse needs no precomp and time remap.
+
+The ice looked different because its wind is the shear profile: changing it reshapes the fall
+streaks at any time, and no camera follows the ice.
+
+### How the cap and veil work
+
+A **Pileus and Velum** topic after Mamma: **Pileus** (0..1), **Pileus Gap** (m, default 150),
+**Velum** (0..1), **Velum Height** (0..1 of the hero, default 0.6), plus two spare rows. Both
+are the hero's, so Hero Cloud Off hides them (`ConvectionLib.slang`, `convCapDensity`).
+
+- **Pileus** is a lens 0.6 hero radii across, up to 260 m thick, at 0.45 of the layer's
+  extinction. Its middle follows the hero's dome at 0.6x the radius, so it drapes. **The gap is
+  from the crown's highest billows**: measured from the smooth crown, the cap sat inside the
+  cauliflower and only its rim showed. A negative gap lets the turrets push into it.
+- **Velum** is a veil up to 200 m thick at 0.22 of the extinction. It is humped up near the
+  tower and reaches past the wall by between 75% and all of 0.9 radii, by bearing. **Seen at 3
+  radii**, the default camera stood under it, an overcast sheet blazing in the backlight. **At
+  2.2** its near edge crossed the frame as a ruled diagonal.
+- Both thicknesses wander by up to 40% on a kilometre-scale noise. They carry no billows.
+- **The bound** takes each factor where the box can reach it (`convCapBound`). The slab top
+  and the Alone box grow to cover them.
+- **The classifier** writes them after mamma: "... pileus velum", or "pil vel" when long.
+
+### Measured
+
+- **Pileus and Velum 0 against build 21:** scene A, **byte-identical**.
+- **Frame times**, CLI, 640x360, 32 spp, denoised, Hero Connection 0.6, Pileus 0.8, Velum 0.6,
+  one run each: A 67.9 s, wide 37.2 s, close 105.3 s. Not compared against the same frames
+  without them, so the features' own cost is NOT MEASURED.
+- **Looked at**: `build/tmp/b22/caps3.png`, against the previous version in each row. In
+  `wide` the cap reads as a smooth lens over the crown, and the veil as a shelf off the
+  tower's side with a wandering edge. In the backlit default `A`, a bright diagonal at the
+  top left is in both versions; whether it is the veil or the ice layer was not checked.
+
+### Tests
+
+- **slang.convection**: two new bound-sweep cases, the cap and veil with the field and
+  alone with a 60 m gap, **0 violations**. The sweep's probe height now includes the cap's and
+  the veil's tops; before, it stopped short of the cap. New section 11: the crown is
+  unchanged, the gap is clear, and the cap and veil are there at 0.45 and 0.22 of the tower's
+  density. There is nothing above the cap, and nothing above or beyond the veil.
+- **TestClassifier**, **TestConvection**, **TestFingerprint**: the new features and fields.
+- **All 27 ctest suites pass. The goldens did not move.**
+
+### What needs the host
+
+- **Close AE and run `.\build.ps1 -Install`.** Then apply the effect fresh, since a topic was
+  inserted after Mamma.
+- **Playback with nothing keyframed**: the field should drift and the cells evolve. With Comp
+  Camera, the hero should move across the frame.
+- **Pileus** 0 to 1 at the default orbit, and **Pileus Gap** from -300 to 600.
+- **Velum** at the default backlit orbit: is its edge still visible as a line?
+- Builds 22 and 23's items still apply.
+
+---
+
+## 2026-10-01 — MAMMA: POUCHES HANGING FROM THE UNDERSIDE. Build 23, minor 13. The first of the six supplementary features, and the one PLAN.md puts first. Smooth pouches on their own lattice hang wherever the cumulus layer has cloud overhead: under a deck, and under the hero and its group. They are creased between, and each sags and lifts over half a cell's life. At Mamma 0 the frame is byte-identical to build 21. On the way, the Slang rewrite step that failed the first build after nearly every kernel change was fixed. INSTALLED, NOT YET SEEN IN THE HOST.
+
+### How it works
+
+A new **Mamma** topic in the Cumulus layer, after Organization, has two controls: **Mamma**
+(0..1, default 0) and **Pouch Size** (m, default 450), plus two spare rows.
+
+**The sag** under a point is three things multiplied (`ConvectionLib.slang`, `convMammaSag`):
+
+- **The pouch there.** A jittered lattice of hanging hemispheres in the drifting pattern's
+  frame, radius 0.68 of the pitch, so they overlap and the underside is mostly lobes with
+  sharp creases between them. They are smooth, with no cauliflower, which is what makes mamma
+  read as mamma. Each one's depth runs through the cell life curve at twice the cells' rate,
+  between a third and all of its size. So in a timelapse they sag and lift without ever quite
+  leaving.
+- **The envelope**, how far inside the cloud the base above is. This is the smooth surfaces'
+  distance a metre over the condensation level: the field's with its moat, the hero's, the
+  group's turrets. No pouch hangs where there is no cloud overhead, and they shallow to nothing
+  over 0.6 of a pouch towards the edge of what there is.
+- **The depth**, Mamma times 0.8 of Pouch Size (`mammaDepth()` in `ConvectionField.h`). Mamma
+  photographed under anvils hang about as far as they are wide at most. Much past that a
+  pouch reads as a stalactite.
+
+Below the base a point is inside a pouch when it is less than the sag down, and the density
+ramps up from the pouch's surface as it does from the base. **Above the base, the 40 m base
+ramp starts at the pouch's bottom** rather than at the base. Otherwise every pouch would hang
+from a band of thinning cloud.
+
+**The slab** reaches down by the deepest pouch. **The bound** treats a box below the base as
+one at it. Every inside below is at least the inside at height zero, and a pouch's own density
+is at most the ramp from its deepest bottom.
+
+**The classifier** writes the atlas's supplementary feature after any varieties: "Sc
+stratiformis opacus mamma", or "Sc str op un mam" when it is long. The atlas lists mamma under
+Sc and Cb, not Cu. On the hero it names what the user sees; the hero stands in for the
+cumulonimbus this generator cannot make yet.
+
+### Measured
+
+**Mamma 0 against build 21:** scene A, **byte-identical**.
+
+**Frame times**, CLI, 640x360, denoised, 64 spp, one run each. `wide` is a closed deck with
+its base at 1.5 km, a 75 degree lens looking up 30 degrees, and the sun at 4 degrees across
+the view. `herow` is the hero from 3 km under the same sun.
+
+| | Mamma 0 | Mamma 1, 450 m pouches | Mamma 1, 20 m pouches |
+| --- | --- | --- | --- |
+| wide | 29.1 s | 49.3 s | 33.1 s |
+| herow | 80.1 s | 104.5 s | |
+
+- **The first version cost the deck view 85%.** Two cuts give the same pixels:
+  - Below the base, a pouch that could not reach the point even under the deepest cloud
+    skips the base's lattice. That measured within noise on its own.
+  - In the band above the base, the base test now reuses the lattice the density has
+    already run for the column, which depends on xz alone. With a second lattice, pouches
+    only 16 m deep cost 22%; now they cost 14%.
+- **What is left is the deeper medium.** Every ray now tracks through the band down to the
+  deepest pouch, with the pouches' nine hashes at each step there, and the pouches' own
+  scattering. That is the price of the feature, paid only when it is on.
+
+**Looked at** (`build/tmp/b23/`):
+
+- `mamma1.png`: framings too steep or too flat show almost nothing. Looking 55 degrees up at
+  a base 680 m overhead, a 40 degree lens sees about one pouch.
+- `mamma2.png`: a grazing sun from the side shows the underside as uniform murk.
+- `mamma4.png`: wider and higher, the hero's underside hangs in clear pouches, and a deck's
+  cells sag in lobes.
+
+### Tests
+
+- **TestConvection**, 2 new tests:
+  - No mamma is a flat base, a NaN or a negative amount included.
+  - The depth is 0.8 of the pouch's width at full amount, linear below that and clamped
+    above it, the width floored at 20 m, and nothing on an absent layer.
+- **TestClassifier**:
+  - Mamma are named after the varieties.
+  - They are named on the hero too, and not on a layer the air cannot make.
+  - The 20000-sky length sweep now includes them.
+- **TestFingerprint**: covers both new fields, through the size tripwire.
+- **slang.convection**:
+  - Three new bound-sweep cases with **0 violations**: a closed deck with mamma, the hero
+    alone with them, and the group with them. Its boxes and seeds now reach the deepest pouch.
+  - New section 10: above the base ramp, 0 of 100000 densities differ from no mamma.
+  - Under a 90% deck, 14688 of 20000 columns have a pouch, and none under a column with no
+    cloud in its first sixty metres.
+  - The deepest pouch found is 346 m, against an allowed 360.
+- **249 unit tests and 27 ctest suites pass. The goldens did not move.**
+
+### The build fix
+
+`cmake/SlangRewriteInclude.cmake` wrote each generated file with `file(WRITE)`. Two test
+projects generate Transport.cu, and MSBuild builds them in parallel, so one could be compiling
+the file while the other rewrote it. The write then failed with "Permission denied", leaving
+the absolute-prelude file behind (a quirk on record since build 18). On 2026-10-01 that
+happened on the first build after nearly every kernel change, five builds running. The script
+now writes a staging file and copies it with `copy_if_different`, which never rewrites an
+identical file. It touches the output so the rule does not rerun forever, and it retries for
+up to ten seconds against a lock. Since then every build has passed first time, and a no-op
+rebuild takes 3 s with nothing regenerated.
+
+### Known limits
+
+- **They need the right light and framing.** A wide lens, a base well overhead, and a low sun.
+  At the default orbit's backlight they are a scalloped bottom edge.
+- **Cumulus only.** The atlas's mamma are mostly under anvils and altostratus. There is no
+  anvil until Phase 4's mixed phase, and the cirrus layer has no mamma.
+- **The pouches do not know about the hero's turrets' shapes** beyond their footprints. A pouch
+  under a turret hangs from the turret's base like any other.
+
+### What needs the host
+
+- **Apply the effect fresh.** A topic was inserted after Organization.
+- **Mamma** keyframed 0 to 1 under the hero at a low sun with a wide focal length.
+- **Pouch Size** from 150 to 1500.
+- **A timelapse**, to see them sag and lift.
+- **The cost** at the user's own framing.
+- Build 22's items still apply.
+
+---
+
+## 2026-10-01 — HERO CONNECTION: THE HERO STOPS LOOKING SET DOWN ON THE FIELD. Build 22, minor 12. Turrets grow on its shoulders, and a flanking line of smaller towers steps down from it into the wind. The field's updraft sinks under the group, and the hero drifts with the wind. One slider, Hero Connection; at 0 the frame is byte-identical to build 21. It costs 23% on the default backlit frame and 45% on a close frame the group fills. INSTALLED, NOT YET SEEN IN THE HOST: the user is away from AE and asked for Phase 4 to go on meanwhile.
+
+### What was wrong, looked at rather than guessed
+
+Build 21 was reported good, and the next question was whether the hero could feel "connected
+to other clouds so it does not feel disassociated". The renders in `build/tmp/b22/before.png`
+and `before2.png` show why it did not. From above, the field's clouds have ragged footprints,
+because each is a cell's rim or centre. The hero was a perfect disc. Nothing in the frame sat
+between its 3 km and the field's few hundred metres. A field cell grew out through its wall.
+
+### How it works
+
+**Turrets.** A towering cumulus is a group of turrets, not one dome. Connection grows more
+domes of the hero's own family: the closed-form tower with the hero's exponent and flat base.
+They are laid out by `heroGroup()` in `src/engine/ConvectionField.cpp`, in hero radii:
+
+- **Two shoulders** stand inside the hero's footprint, off-centre, and higher than its wall
+  there. They turn the dome into a tower of turrets with a ragged footprint.
+- **A flanking line of three** steps down into the wind, at 72%, 52% and 36% of the hero's
+  height, each overlapping the last at its base. The last is about a field tower's height, so
+  the line ends where the field begins. Wind From swings it round.
+
+Each grows in over its own stretch of the slider, from 60% of its footprint and no height, to
+full. The layout is fixed, not random: Variation picks the cauliflower, and a layout that
+jumped with it would be a control that moved everything.
+
+**The moat.** The field's updraft is multiplied by a factor round each tower, the hero
+included: zero inside 0.75 of its radius, rising to one at 1.3. A field cell centred under the
+group is gone. One at its edge shrinks to a small cloud against the wall, which is where the
+field merges with the group. The factor is at most one, so the field's bound holds untouched.
+Its slope goes into the kernel's slope clamp only inside a ring, so the rest of the sky's bound
+is exactly what it was. The moat is full by Connection 0.5, ahead of the towers.
+
+**One cauliflower for the group.** Every tower's smooth surface is taken. The billow is then
+read once, at a read point, lift and lobe blended by a softmax over 50 m towards the nearest
+surface. On a crease both read points are near the point, so the blend barely moves. The
+result is continuous, with no seam, and a tower-level crease becomes one more crease in a
+single cauliflower. The turrets read the hero's billow frame and seed, so Variation changes
+them with the hero, and their lobes are sized between the field's and the hero's.
+
+**Drift.** `heroPositionNow()` puts the hero at Hero Position plus the steering wind's drift
+when Hero Drifts With Wind is on. The kernel, the orbit rig and the shape's facing all read
+it, so a drifting hero stays framed and still faces the lens.
+
+**With a pareidolia shape.** The shoulders shrink away while the shape holds and return as
+Decay melts it. The flanking line turns into the picture's plane, on the side nearer the wind,
+pushed out past the picture's edge. Left pointing into the wind, it would have stood between
+the lens and the face from every orbit that puts the camera upwind. It swings back into the
+wind as Decay runs. `build/tmp/b22/look2.png` shows the smiley framed by the line, and at
+orbit 0 the moat clears a field cloud that used to grow into the face's right side.
+
+### What changed from the agreed outline, and why
+
+- **No smooth join.** A smooth union adds cloud wherever two surfaces are both near. The base
+  plane counts as "near" for every tower's formula at every point just above it, so it would
+  grow a pancake of cloud under the whole group. The overlapping footprints already merge the
+  bases, and turrets meet in creases, as thermals do.
+- **The feeders are towers of the hero's family, not a vigour boost on the field's cells.** A
+  boosted lattice gives whichever cells happen to fall there, at whatever point in their life:
+  sometimes a line, sometimes a gap or an open-cell wall. Towers placed by the host are always
+  a line, and they step down because they are told to.
+- **One control plus a checkbox.** Hero Connection, and Hero Drifts With Wind.
+
+### Defaults
+
+| Control | Default | Why |
+| --- | --- | --- |
+| Hero Connection | 0.6 | Two shoulders, two-thirds of the line and the full moat. It costs the same as 1 (32.3 s against 32.4 s on scene A), and the third tower of the line stays small. |
+| Hero Drifts With Wind | on | The field sliding past a pinned hero was one of the three reasons it looked set down. |
+
+The engine's defaults are 0 and off, so every golden image and test means what it meant.
+
+### Measured
+
+**Connection 0 against build 21:** scene A, byte for byte, **identical**. Checked three
+times, after each kernel change.
+
+**Frame times.** CLI, 640x360, 32 spp, denoised, minimum of 3. The GPU ran warm late in the
+session: Connection 0 crept from 25.4 s to 26.3 s on the same binary.
+
+| | Connection 0 | 0.6 | 1 |
+| --- | --- | --- | --- |
+| A, the default backlit orbit at 4 km | 26.29 s | 32.31 s | 32.43 s |
+| Looking away from the hero | 14.05 s | | 15.04 s |
+| Close, 2.5 km, the group filling the frame | 33.9 s | 49.2 s | 49.2 s |
+| A at Connection 0.02, towers a few metres tall | 26.18 s | 29.10 s at 0.02 | |
+
+**Where the cost is,** from a throwaway benchmark (`build/tmp/b22/bench/`) that times the
+density over 4M points round the group:
+
+| | ns per density | cloud |
+| --- | --- | --- |
+| Connection 0 | 0.99 | 6.2% |
+| Moat only | 1.03 | 6.1% |
+| Turrets only | 1.66 | 7.9% |
+| Connection 1 | 1.95 | 7.6% |
+
+- **The first version cost 2.46 ns**, and 20% of the frame even looking away from the group.
+  The rings and reaches ran for every density in the sky. One circle round the group, tested
+  once, skips both exactly outside it. The away view went from +20% to +3% and later +7%,
+  since part of that view's near field lies inside the circle.
+- **Each turret had its own billow.** With the turrets' billows removed for the experiment,
+  the turrets cost 1.20 ns instead of 1.80, so the billows were two-thirds of their cost. The
+  one-cauliflower blend above replaced them with one billow per point: 2.28 ns down to 1.91.
+- **Returning the hero's own path where no turret is near made it 30% slower** (1.95 to 2.58
+  ns). A warp whose points split between the two returns ran both billows. It was replaced by
+  one call site fed the hero's own numbers, and the kernel says why.
+- **Under the group's middle, the field's lattice is no longer run.** Where the moat's factor
+  is exactly zero, the field provably adds nothing, so skipping it gives the identical result.
+- **A dome's two pows are skipped** at points over a turret's top by more than any billow
+  lifts. That measured within noise on scene A.
+- **What is left is mostly cloud.** The close frame is the group's underside wall to wall,
+  and every extra scattering event costs. The rest is the group's fixed overhead: 0.02 already
+  costs 11%. 0 costs nothing.
+
+**Looked at:** `build/tmp/b22/look1.png` (from above, the default orbit, the flank) and
+`look2.png` (close, the smiley from upwind and from orbit 0), each at Connection 0, 0.6 and 1.
+From the flank the line reads as distinct towers stepping down on one flat base. From above
+the group is no longer a disc.
+
+### Tests
+
+- **TestConvection**, 8 new tests:
+  - Connection 0, and a NaN, is the lone hero.
+  - No hero means no group.
+  - Every turret is under and inside the hero, at five connections and three widths.
+  - The group grows with the slider, never shrinks, and the moat is full by halfway.
+  - The flanking line steps down into the wind, at three winds, one keyframed round ten
+    turns, and a wind from the east puts it east.
+  - A picture takes the shoulders' place.
+  - The flanking line frames the picture: along the plane, windward and past its edge, from
+    five facings.
+  - A drifting hero keeps its place in the field.
+- **TestCamera**: the orbit follows a drifting hero.
+- **TestFingerprint**: covers both new fields, through the struct-size tripwire.
+- **slang.convection**:
+  - Four new bound-sweep cases, with **0 violations**: the group with the field, the group
+    alone, a half moat on organized cells with a hero smaller than a cell, and a shape with the
+    flanking line.
+  - New section 9: over a low hero's middle the moat clears 7021 of 7021 field-cloud points.
+  - All five turrets are cloud on their own axes.
+  - Away from the group, 0 of 100000 densities differ from the lone hero's.
+  - That last check would have caught a group circle drawn too small.
+- **246 unit tests and 27 ctest suites pass. The goldens did not move.**
+
+### Known limits
+
+- **The cost**, above. The fixed overhead is the price of the group's code running near the
+  hero at all.
+- **The layout is fixed.** Variation does not move it; Wind From swings it round. A flanking
+  line seen end-on, with the camera directly upwind or downwind, reads as one wide mass.
+- **The group ignores Organization.** A hero in cloud streets does not sit on a street.
+- **Mid-size neighbours come only from the line.** The field's own clouds are no bigger near
+  the hero than anywhere else.
+
+### What needs the host
+
+- **Apply the effect fresh.** Two rows were inserted after Hero Variation, so every control
+  after them shifts in a project saved by an earlier build.
+- **Hero Connection** from 0 to 1 at the default orbit: the flank on the left, the shoulders,
+  and the field clearing round the hero. Then Wind From swung round to bring the line into a
+  framing.
+- **Hero Drifts With Wind**: scrub an animation. The hero and the field move together and the
+  orbit rig follows. Unticked, the field slides past as before.
+- **With a Shape Source**: the line beside the picture, never in front of it, from any orbit.
+- **The cost** at the user's own framing.
+- Builds 20 and 21's items still apply.
+
+---
+
+## 2026-09-30 — Build 21 reported good in the host. REPORTED, not measured, like builds 7 and 13.
+
+The report was "It looks really good". No log and no frame times came back, so this entry
+weighs less than the ones with numbers in them.
+
+| | status |
+| --- | --- |
+| A picture from another layer reads as a cloud in AE | **Settled.** A person is the right judge of that |
+| The two-step checkout of the source layer works in the host | Consistent with the report, since a shape appeared. Not logged |
+| Editing or animating the source re-renders the cloud | Not reported either way |
+| Decay's squared easing melts evenly | Not reported either way |
+| Build 20's Organization group | Not reported separately. The report covers the build as seen |
+
+---
+
+## 2026-09-30 — PAREIDOLIA: ANOTHER LAYER'S ALPHA OR LUMINANCE BECOMES THE HERO. Build 21, minor 11. The first Phase 4 item. The effect takes a layer as its Shape Source, turns the chosen channel into a signed distance map on the host, and stands it up on the hero. It faces the camera, is inflated with rounded rims and wears scaled-down billows. Decay melts it back into the ordinary tower. A face, a word and a dog silhouette all read in the render. The shape costs nothing measurable, and a 1080p source becomes a map in 18 ms.
+
+### Where build 20 stands
+
+Build 20 is installed and has not been reported on. Build 21 carries it, so build 20's "What
+needs the host" list below still applies.
+
+### How it works
+
+**The picture.** A new **Pareidolia** group at the end of the Cumulus layer has these controls:
+Shape Source (a layer), Shape From (Alpha, Luminance, Inverted Alpha, Inverted Luminance),
+Threshold, Decay, Depth, Shape Billows, Facing (Turn to Camera or Fixed Bearing) and Facing
+Bearing. The layer arrives in its own space, with masks and effects applied and transforms not.
+Pixels at or above Threshold are the silhouette, cropped to their bounding box. Pixels outside
+the source's frame are off in every mode, so an inverted matte of a mark on white paper gives
+the mark, not the mark plus an endless sheet of paper.
+
+**The map** (`src/engine/Pareidolia.{h,cpp}`). The silhouette's longer side is always 224
+texels, with 16 clear texels round it, so a proxy at Third builds the same shape, only coarser.
+Each texel is inside when the matte averages to the threshold over it, using up to 4x4
+bilinear samples. Two passes of an exact Euclidean distance transform (Felzenszwalb and
+Huttenlocher) give the signed distance to the edge. Central differences give its slope, so the
+interpolated gradient is continuous. Each texel is four floats: distance, two slopes, zero.
+Row 0 is the bottom.
+
+**The fit.** The silhouette keeps its aspect and fits inside Hero Width by the hero's height
+(contain). Its bottom stands on the condensation level, so a face's chin is cut flat like any
+cumulus base. Hero Width and Hero Height stay the controls for size.
+
+**The shape in the kernel** (`ConvectionLib.slang`). A vertical plane through the hero's centre
+carries the map. A point is cloud when (its depth D inside the silhouette, its distance m from
+the plane) lies in a rounded-rim profile: a disc of radius R centred R inside the edge, and past
+it the strip m < R. So a disc becomes a sphere, a stroke a tube, and a wide region a cushion 2R
+deep. **The 3D distance is the 2D distance to that profile, in closed form**, inside and out.
+Billows are read at the nearest surface point, as on the tower.
+
+**The first design was rejected on paper.** It stored a thickness height field over the plane.
+Near the rim that field's slope runs to infinity, and the height-field distance then reads a
+point beside the rim as ten times nearer the surface than a point just past it. The billows
+would have shown that as a seam round every silhouette.
+
+**Facing.** Under Turn to Camera the plane turns to the eye's bearing before the fingerprint is
+taken, as the sun placement does. A camera move that turns the shape is therefore a field
+change, which the cache sees. Fixed Bearing uses the Orbit dial's convention, so 0 faces the
+default camera. With a shape, the whole hero's billows are read in the plane's frame. Decay
+blends the two surfaces' read points, and a blend across two frames would slide the
+cauliflower round the axis.
+
+**Decay** blends the shape's distance and read point with the tower's, and the billow amount
+from the shape's to the hero's. **It is squared on the host.** With a linear blend, the
+smiley's eyes and mouth were gone by 0.33. An eye is a hole about 130 m deep in a tower about
+500 m deep, so a fifth of the tower fills it. Squared, the features are still there at 0.2,
+faint at 0.4, and gone from 0.6. Decay 1 takes the tower's own path in the kernel, exactly.
+
+### What the defaults are, and why
+
+| Control | Default | Why |
+| --- | --- | --- |
+| Shape Billows | 0.2 | Swept at 0, 0.1, 0.2 and 0.35 (`build/tmp/b21/sweep1.png`). At the hero's own 0.35 the eyes closed over; at 0 it is a plastic balloon; at 0.2 the face reads and it is still cloud. |
+| Depth | 0.6 | Rims of 0.3 x the smaller side: a 1.7 km face is about 1 km deep. Face-on, 1.0 narrowed the eyes and 0.35 read as well as 0.6. 0.35 was not looked at edge-on; 0.6 was kept as the deeper, more cloud-like of the two that read. |
+| Threshold | 0.5 | The matte's middle. |
+| Facing | Turn to Camera | The shape exists to be read from the lens. |
+
+### Measured
+
+**Timings.** CLI, 640x360, 32 spp, best of 3, the scenes build 20 used:
+
+| | build 20 | build 21 |
+| --- | --- | --- |
+| A, default backlit hero | 24.95 s | 24.71 s |
+| A with the smiley | | 23.36 s |
+| A with "HI" from a 1080p luminance source | | 23.70 s |
+| B, cumulus field | 9.57 s | 9.35 s |
+
+The shape is a little cheaper than the tower because it holds less cloud. The hero code was
+refactored into `convTowerSurface`, and with no shape the timings did not move.
+
+**The map.** A 1920x1080 source becomes a 256x218 map in **18.3 ms** on the CPU. The effect
+pays this on every frame of an animated source.
+
+**CPU against GPU**, with a shape at facing 0 and at 57 degrees, 128x72 at 4 spp: **max
+difference 0**, byte for byte.
+
+**Looked at** (`build/tmp/b21/`): `sweep1.png` for billows and depth, `looks1.png` for the dog
+from inverted luminance on white paper and "HI" from luminance text, `decay2.png` for the melt,
+`orbit2.png` for edge-on at orbit 90 with Fixed, face-on with Turn to Camera, and the
+three-quarter view at 45, and `backlit.png`. **Front and side light read best.** Backlit, the
+default, the shape glows, because a 1 km cushion lets the forward-scattered sun through where
+build 20's 3 km tower was dark. The face and the dog still read.
+
+### Tests
+
+- **TestPareidolia**, 11 new tests:
+  - A disc's map is its distance within a texel everywhere.
+  - Neighbouring texels differ by at most one, which the kernel's slope bound relies on.
+  - Each channel reads the number it names.
+  - A blank picture is no shape.
+  - The box fills 224 texels at any source resolution.
+  - An F stays the right way round, which is the only test that would catch a mirror.
+  - The fit is contain.
+  - The shape turns to the camera.
+  - The bearing sets the axis, even when keyframed round ten turns.
+  - NaNs come out as numbers.
+  - The hash follows the picture, and with no picture the hero is what it was.
+- **TestFingerprint**: every PareidoliaParams field moves the hash.
+- **slang.convection**: four shape cases join the bound sweep (facing 0; 37 degrees with decay
+  0.4; 200 degrees with full billows; decay 1). There were **0 violations** in 3000 boxes each.
+  New section 8:
+  - Decay 1 at facing 0 against no shape: 0 of 100000 densities differ.
+  - With no billows, the plane's cross-section is the silhouette: 0 of about 53000 points
+    disagree, at facings 0, 90 and 211.
+  - The rim reaches 397.5 m against a profile of 400, and 345 against 346.4.
+  - The first version of that last check expected R at the disc's centre and failed. The eye
+    sits 23 texels from the centre, so D there is 234 m, and the kernel's 362.5 m was right: the
+    profile gives 364. The check now takes its expectation from the same distance function.
+- **237 unit tests and 27 ctest suites pass. The goldens did not move.**
+
+### Host plumbing, and what changed about the effect
+
+- **A LAYER kind in the parameter table.** Its setup is `PF_ADD_LAYER` with no default.
+  Checkout and the params-array read skip it, because the pixels come from pre-render.
+- **Two checkouts of the source at pre-render.** A probe with AE's own request reads back
+  `max_result_rect`, the layer's whole extent. A second checkout asks for exactly that, capped
+  at 8192 px a side. Only the second's pixels are read. **The source is not unioned into the
+  result rect**, because it shapes the cloud, not where our pixels lie.
+- **The map's hash is folded into the render key** at smart render. The picture is not a
+  parameter, so without the hash, editing the source layer would have let the accumulator cache
+  resolve the old shape. The device caches its upload on the same hash, and the shadow maps
+  add it to their key.
+- **A source withdraws the GPU offer.** `PF_Cmd_SMART_RENDER_GPU` would hand the source over as
+  a GPU world the builder cannot read. AE has never taken that offer on this effect, and the
+  host path still renders on the card.
+- **`PF_OutFlag_PIX_INDEPENDENT` is gone.** It stopped being true when the effect started
+  reading another layer. It never changed anything that was measured, so it was dropped
+  outright rather than withdrawn per frame through dynamic flags.
+- **Any failure reading the source is no shape, not a failed frame.** The log says which:
+  `pareidolia:` lines under `MISTYTUNE_DIAG=1`.
+
+### Known limits
+
+- **The legibility readout is not built.** PLAN.md's measured legibility from a shape-context
+  matcher, and Decay in its units, are still to come. Decay is input strength, eased.
+- **Close and looking up, the shape foreshortens.** The plane is vertical, so from under a 1.7
+  km face at 1.5 km, the frame is mostly its lower half. Tilting the plane to the lens would
+  lift its base off the condensation level. Not done; worth asking.
+- **Luminance is of the values as they arrive.** In a linear 32 bpc project a mid-grey is 0.18,
+  so Threshold means something different there than at 8 bpc.
+- **The field ignores the shape.** Field clouds near the hero overlap it with the field on, as
+  they overlap the tower. Alone is clean.
+- **Hero Cloud Off hides the shape** even with a source picked. The shape is the hero.
+
+### What needs the host
+
+- **Apply the effect fresh.** The Pareidolia group was inserted in the Cumulus layer before its
+  spares, so every control after it (Physics, Quality, Output) shifts in a project saved by an
+  earlier build. The minor bump is what makes the group appear.
+- **Pareidolia:** put a text layer, a shape layer or footage in the comp. Hide it with its eye,
+  or leave it visible under the effect's layer. Then pick it as Shape Source. White text on
+  transparent works with Alpha. A black mark on white works with Inverted Luminance.
+  - Does the shape appear on the hero, the right way round?
+  - Does editing the text update the cloud? That is the hash in the render key.
+  - Does an animated source animate the cloud?
+  - Try Decay keyframed from 0 to 1, Shape Billows, Depth, Facing Fixed with Orbit, and Sun
+    Placement Front Lit.
+- **Build 20's items**, below, because they are still unreported.
+- **In the log**, with `MISTYTUNE_DIAG=1`, the lines to look for:
+  - `pareidolia: source [x,y wxh]` at pre-render.
+  - `pareidolia: WxH source -> map in N s` at render.
+  - `pareidolia source present -- not offering GPU_RENDER_POSSIBLE`.
+
+---
+
 ## 2026-09-30 — THE ORGANIZATION GROUP: ROWS, WAVES, GAPS AND HOLES. Build 20, minor 10. The spec's last Phase 3 group. Each layer gets its own Mode (Cellular, Rolls, Waves, Chaotic), Aspect Ratio, Rows Along, Row Coherence and a wave field. The cumulus deck also gets Gap Fraction and Lacunarity. The classifier names what they make: undulatus, radiatus, perlucidus, lacunosus. At the defaults the kernel runs the code it ran before, bit for bit, and nothing about the default frame's time changed. Phase 3 is done.
 
 ### Where builds 18 and 19 stand

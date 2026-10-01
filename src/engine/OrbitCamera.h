@@ -134,8 +134,11 @@ inline void orbitView(const FieldParams& field, const OrbitControls& c, ViewPara
     const double orbit = static_cast<double>(c.orbitDegrees) * kDeg;
     const double eye   = c.eyeAltitude >= Real(1) ? static_cast<double>(c.eyeAltitude) : 1.0;
 
-    view.observerX        = static_cast<Real>(static_cast<double>(field.convection.heroX) + dist * std::sin(orbit));
-    view.observerZ        = static_cast<Real>(static_cast<double>(field.convection.heroZ) + dist * std::cos(orbit));
+    // WHERE THE HERO IS NOW, drift included, so a hero riding the wind stays framed.
+    Real heroX = 0, heroZ = 0;
+    heroPositionNow(field, heroX, heroZ);
+    view.observerX        = static_cast<Real>(static_cast<double>(heroX) + dist * std::sin(orbit));
+    view.observerZ        = static_cast<Real>(static_cast<double>(heroZ) + dist * std::cos(orbit));
     view.observerAltitude = static_cast<Real>(eye);
 
     // YAW = ORBIT because Ry(yaw) sends the camera's forward (0,0,-1) to

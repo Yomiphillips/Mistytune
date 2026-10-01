@@ -83,7 +83,7 @@ bool inRows(const OrganizationParams& p, const OrganizationResolved& o) {
            o.coherence >= kRadiatusCoherence;
 }
 
-LayerClass classifyLow(const FieldParams& field, bool& tooDry) {
+LayerClass classifyLowBody(const FieldParams& field, bool& tooDry) {
     const ConvectionParams& c = field.convection;
     tooDry = false;
     if (!c.enabled) return {};
@@ -135,6 +135,23 @@ LayerClass classifyLow(const FieldParams& field, bool& tooDry) {
     LayerClass cu{ CloudGenus::Cumulus, cumulusSpecies(cd.depth, cell) };
     if (inRows(c.organization, org)) cu.variety[0] = "radiatus";
     return cu;
+}
+
+// MAMMA ARE NAMED ON WHATEVER THE LOW LAYER IS, when they hang at all: the kernel hangs
+// them wherever the layer has cloud overhead, so a named layer is one that has.
+LayerClass classifyLow(const FieldParams& field, bool& tooDry) {
+    LayerClass l = classifyLowBody(field, tooDry);
+    if (l.genus == CloudGenus::None) return l;
+
+    int n = 0;
+    if (mammaDepth(field.convection.mamma, field.convection.pouchSize) > Real(0)) l.feature[n++] = "mamma";
+
+    // THE CAP AND THE VEIL BELONG TO THE HERO, so they are named only when it is there.
+    ConvectionDerived cd;
+    deriveConvection(field, cd);
+    if (cd.pileusThick > Real(0)) l.feature[n++] = "pileus";
+    if (cd.velumThick > Real(0))  l.feature[n++] = "velum";
+    return l;
 }
 
 LayerClass classifyHigh(const FieldParams& field) {
@@ -191,7 +208,8 @@ const char* wordAbbrev(const char* word) {
         { "stratiformis", "str" }, { "castellanus", "cas" }, { "fibratus", "fib" },
         { "uncinus", "unc" },      { "spissatus", "spi" },   { "floccus", "flo" },
         { "opacus", "op" },        { "perlucidus", "pe" },   { "undulatus", "un" },
-        { "radiatus", "ra" },      { "lacunosus", "la" },
+        { "radiatus", "ra" },      { "lacunosus", "la" },     { "mamma", "mam" },
+        { "pileus", "pil" },       { "velum", "vel" },
     };
     for (const auto& row : table) {
         if (std::strcmp(row[0], word) == 0) return row[1];
@@ -209,6 +227,11 @@ void layerText(const LayerClass& l, int level, char* out, size_t cap) {
         if (!v || !*v) continue;
         const size_t n = std::strlen(out);
         std::snprintf(out + n, cap - n, " %s", level >= 2 ? wordAbbrev(v) : v);
+    }
+    for (const char* f : l.feature) {
+        if (!f || !*f) continue;
+        const size_t n = std::strlen(out);
+        std::snprintf(out + n, cap - n, " %s", level >= 2 ? wordAbbrev(f) : f);
     }
 }
 

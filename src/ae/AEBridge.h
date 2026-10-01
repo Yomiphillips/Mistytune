@@ -157,6 +157,25 @@ inline kernel::Surface toSurface(PF_EffectWorld* world, PF_PixelFormat format) {
 // ONLY THE INTEGER FORMATS REACH THIS. 32 bpc float is what the renderer already works
 // in, so the effect writes straight into AE's buffer through toSurface() above and
 // builds no staging buffer at all.
+// ANOTHER LAYER'S PIXELS, READ-ONLY, AT WHATEVER DEPTH THEY ARRIVE (build 21): pareidolia's
+// source. Unlike toImageView below, EVERY CPU FORMAT IS A REAL ANSWER HERE, and an
+// unrecognised one is a refusal rather than a guess -- this reads memory AE owns, and a
+// wrong stride reads past it.
+inline bool toSourceView(PF_EffectWorld* world, PF_PixelFormat format, ConstImageView& v) {
+    if (!world || !world->data || world->width <= 0 || world->height <= 0) return false;
+    switch (format) {
+        case PF_PixelFormat_ARGB128: v.format = PixelFormat::ARGB32F; break;
+        case PF_PixelFormat_ARGB64:  v.format = PixelFormat::ARGB16;  break;
+        case PF_PixelFormat_ARGB32:  v.format = PixelFormat::ARGB8;   break;
+        default:                     return false;
+    }
+    v.data     = world->data;
+    v.width    = world->width;
+    v.height   = world->height;
+    v.rowBytes = world->rowbytes;
+    return true;
+}
+
 inline ImageView toImageView(PF_EffectWorld* world, PF_PixelFormat format) {
     ImageView v;
     v.data     = world->data;

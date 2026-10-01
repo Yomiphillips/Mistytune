@@ -11,6 +11,7 @@
 // cuda_runtime.h to ask whether CUDA existed would defeat the point.
 
 #include "RenderRequest.h"
+#include "../engine/Pareidolia.h"
 
 #include <vector>
 
@@ -100,6 +101,16 @@ inline void deriveRenderInputs(RenderRequest& req) {
     req.iceOrganization = cloud::resolveOrganization(req.field.ice.organization, false);
 
     cloud::deriveConvection(req.field, req.convection);
+
+    // THE SHAPE, AFTER THE HERO IT IS FITTED INTO. The texels' HOST address; renderCuda
+    // swaps in a device copy. No map, or no hero to put it on, is no shape.
+    req.shape       = cloud::resolveShape(req.shapeMap, req.field.convection.pareidolia,
+                                          req.convection);
+    req.shapeBuffer = req.shape.on ? req.shapeMap->texels.data() : nullptr;
+    req.shapeHash   = req.shape.on ? req.shapeMap->hash : 0;
+
+    // THE HERO'S SHOULDERS GIVE WAY TO THE PICTURE, which stands where they would.
+    cloud::fitTurretsToShape(req.shape, req.field.convection.windBearing, req.convection);
 }
 
 // Was this binary built with a CUDA toolkit, and is a usable device present?

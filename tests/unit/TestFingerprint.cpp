@@ -123,6 +123,16 @@ std::vector<Mutation> allMutations() {
         { "ice.organization.gapFraction",   [](FieldParams& f) { f.ice.organization.gapFraction += 0.1f; } },
         { "ice.organization.lacunarity",    [](FieldParams& f) { f.ice.organization.lacunarity += 0.1f; } },
 
+        // PareidoliaParams (build 21). The picture itself is not a parameter; its hash is
+        // folded into the render key by the effect, and TestPareidolia checks it moves.
+        { "convection.pareidolia.channel",   [](FieldParams& f) { f.convection.pareidolia.channel = 1; } },
+        { "convection.pareidolia.threshold", [](FieldParams& f) { f.convection.pareidolia.threshold += 0.1f; } },
+        { "convection.pareidolia.decay",     [](FieldParams& f) { f.convection.pareidolia.decay += 0.1f; } },
+        { "convection.pareidolia.depth",     [](FieldParams& f) { f.convection.pareidolia.depth += 0.1f; } },
+        { "convection.pareidolia.billows",   [](FieldParams& f) { f.convection.pareidolia.billows += 0.1f; } },
+        { "convection.pareidolia.facing",    [](FieldParams& f) { f.convection.pareidolia.facing = 1; } },
+        { "convection.pareidolia.bearing",   [](FieldParams& f) { f.convection.pareidolia.bearing += 5.0f; } },
+
         // FieldParams itself
         { "timeSeconds", [](FieldParams& f) { f.timeSeconds += 1.0f; } },
         { "seed",        [](FieldParams& f) { f.seed += 1u; } },

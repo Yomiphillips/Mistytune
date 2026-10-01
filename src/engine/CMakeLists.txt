@@ -64,6 +64,10 @@ add_library(plugin_engine STATIC
     ConvectionField.cpp
     Organization.h
     Organization.cpp
+    # Pareidolia: another layer's matte turned into the hero's silhouette, as a signed
+    # distance map the kernel inflates. Pixels in, a map out, no host headers.
+    Pareidolia.h
+    Pareidolia.cpp
 
     # The classifier readout: the sky the parameters describe, named by genus and
     # species. Rule-based and host-free, per PLAN.md, so every rule has a test.

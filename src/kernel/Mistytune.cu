@@ -71,6 +71,10 @@ struct CudaVectors {
         return make_float3(x, y, z);
     }
     static __host__ __device__ int3 i3(int x, int y, int z) { return make_int3(x, y, z); }
+    static __host__ __device__ int2 i2(int x, int y) { return make_int2(x, y); }
+    static __host__ __device__ float4 v4(float x, float y, float z, float w) {
+        return make_float4(x, y, z, w);
+    }
 };
 
 // ONE ERROR SLOT, AND IT IS THREAD-LOCAL.
@@ -222,6 +226,13 @@ thread_local DeviceScratch g_transmittance;
 thread_local DeviceScratch              g_airMap;
 thread_local std::vector<unsigned char> g_airMapKey;
 thread_local void*                      g_airMapBuiltAt = nullptr;
+
+// THE PAREIDOLIA MAP, uploaded when its hash moves rather than per launch: a frame is
+// dozens of launches and the map is up to a megabyte. The hash is the map's own
+// (ShapeMap::hash), and the pointer is remembered for the reason the shadow maps' is.
+thread_local DeviceScratch g_shape;
+thread_local uint64_t      g_shapeHash     = 0;
+thread_local void*         g_shapeUploaded = nullptr;
 
 } // namespace
 
@@ -446,6 +457,28 @@ bool renderCuda(const RenderRequest& req) {
             return false;
         }
         work.transmittanceBuffer = lutDev;
+    }
+
+    // THE PAREIDOLIA MAP: HOST POINTER IN, DEVICE POINTER OUT, like the table above -- and
+    // BEFORE THE SHADOW MAPS, whose columns read the hero through it.
+    if (work.shape.on && work.shapeBuffer) {
+        const size_t shapeBytes = sizeof(float) * static_cast<size_t>(work.shape.width) *
+                                  static_cast<size_t>(work.shape.height) * 4u;
+        void* shapeDev = g_shape.reserve(shapeBytes);
+        if (!shapeDev) return false;   // reserve() has already set the error
+
+        if (shapeDev != g_shapeUploaded || work.shapeHash != g_shapeHash) {
+            g_shapeUploaded = nullptr;
+            const cudaError_t shapeErr = cudaMemcpy(shapeDev, work.shapeBuffer, shapeBytes,
+                                                    cudaMemcpyHostToDevice);
+            if (shapeErr != cudaSuccess) {
+                setError("pareidolia map upload", shapeErr);
+                return false;
+            }
+            g_shapeUploaded = shapeDev;
+            g_shapeHash     = work.shapeHash;
+        }
+        work.shapeBuffer = shapeDev;
     }
 
     // THE CLOUDS' SHADOW MAPS, built on this device at most once per change. See

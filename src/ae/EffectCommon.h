@@ -44,18 +44,23 @@ namespace ae {
 // outflags2 mismatch" on someone else's.
 // ---------------------------------------------------------------------------
 
-// PF_OutFlag_PIX_INDEPENDENT IS SET, AND THIS FILE USED TO ARGUE IT SHOULD NOT BE.
+// PF_OutFlag_PIX_INDEPENDENT IS NOT SET, AS OF BUILD 21 -- and it was, from the build that
+// read the SDK's wording properly until pareidolia.
 //
 // The SDK's wording: "Set this flag if the output at a given pixel is not dependent
-// on the values of THE PIXELS AROUND IT." It is a claim about the INPUT IMAGE.
-//
-// The old argument here was that "every pixel of a path trace depends on the whole
-// field", which conflates the SCENE with the input image. Mistytune is a generator
-// and does not read its input at all. See cmake/EffectFlags.cmake for the full
-// reasoning, including when Phase 4's pareidolia makes this false again and the
-// dynamic-flags mechanism for withdrawing it.
+// on the values of THE PIXELS AROUND IT." It is a claim about the pixels the effect
+// READS. Until build 21 Mistytune read none, so it was true. PAREIDOLIA READS A WHOLE
+// LAYER and every output pixel depends on all of it, so it is false now. Dropped outright
+// rather than withdrawn per frame through PF_Cmd_QUERY_DYNAMIC_FLAGS: it bought nothing
+// measurable when it was set (cmake/EffectFlags.cmake has the history), so the dynamic
+// mechanism would be machinery for no gain.
 constexpr PF_OutFlags kOutFlags =
-    PF_OutFlag_PIX_INDEPENDENT |
+    // Build 24: THE PICTURE CHANGES WITH TIME, NOT ONLY WITH THE PARAMETERS -- the cumulus
+    // cells' drift, life and billows, the ice's drift. Without this AE takes an effect on
+    // a solid with nothing keyframed to be one frame, and plays that frame back. The SDK:
+    // "If the effect produces changing frames when applied to a still image and all
+    // parameters are constant, that's a sure sign that this bit should be set."
+    PF_OutFlag_NON_PARAM_VARY |
     PF_OutFlag_DEEP_COLOR_AWARE |
     // Build 17: PF_Cmd_UPDATE_PARAMS_UI, so the classifier readout is named when the
     // Effect Controls open and when a project loads -- not only once a supervised

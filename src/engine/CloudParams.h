@@ -236,6 +236,49 @@ struct IceParams {
 };
 
 // ---------------------------------------------------------------------------
+// Pareidolia: a picture as the hero's silhouette
+// ---------------------------------------------------------------------------
+
+// WHAT THE PICTURE BECOMES, NOT THE PICTURE. The pixels come from another layer and are
+// not parameters -- the effect reads them at render time and folds their hash into the
+// render key (see ShapeMap::hash). These are the numbers that say how to read them and
+// what to build from them. src/engine/Pareidolia.h has the whole story.
+//
+// THE DEFAULTS DO NOTHING ON THEIR OWN: with no picture there is no shape, and the hero is
+// the tower it always was, bit for bit.
+struct PareidoliaParams {
+    // Which number in each pixel is the matte. ShapeChannel in Pareidolia.h: 0 alpha,
+    // 1 luminance, 2 inverted alpha, 3 inverted luminance.
+    int32_t channel = 0;
+
+    // The matte level that is the silhouette's edge, 0..1.
+    Real threshold = 0.5f;
+
+    // 0 THE SHAPE HOLDS, 1 THE CLOUD HAS FORGOTTEN IT and is the ordinary hero tower.
+    // Keyframed, it is the shape melting back into a cumulus.
+    Real decay = 0.0f;
+
+    // How deep the shape is front to back: the radius its rims are rounded to, as a
+    // fraction of half its smaller side. 1 makes the thickest part as deep as the shape
+    // is tall (or wide); lower is a flatter cushion.
+    Real depth = 0.6f;
+
+    // The shape's cauliflower over the hero's own, 0..1, amount and lobe size together.
+    // THE LEGIBILITY KNOB: the hero's billows are sized for a whole tower and swallow an
+    // eye or a finger, so the shape wears less of them.
+    Real billows = 0.2f;
+
+    // 0 TURNS TO THE CAMERA, 1 faces a fixed bearing.
+    int32_t facing = 0;
+
+    // Degrees, in the orbit rig's convention: the shape faces an eye standing at this
+    // Orbit angle round the hero. UNDER TURN TO CAMERA THE EFFECT OVERWRITES IT with the
+    // camera's own bearing before the fingerprint is taken, as the sun placement does
+    // with the sun, so a camera move that turns the shape is a field change.
+    Real bearing = 0.0f;
+};
+
+// ---------------------------------------------------------------------------
 // Cellular convection -- the workhorse, and the second generator
 // ---------------------------------------------------------------------------
 
@@ -322,8 +365,53 @@ struct ConvectionParams {
     Real heroHeight     = 1.0f;     // 0..1 of the base-to-inversion depth
     Real heroVariation  = 0.0f;     // picks which cauliflower it wears
 
+    // HOW MUCH THE HERO BELONGS TO THE FIELD (build 22), 0..1. 0 is the lone tower as
+    // it always was, bit for bit. Rising, turrets grow on its shoulders, a flanking line
+    // of smaller towers steps down from it into the wind, and the field's updraft sinks
+    // under the whole group, so no field cell grows through it. See heroGroup() in
+    // ConvectionField.h.
+    Real heroConnection = 0.0f;
+
+    // THE HERO RIDES THE STEERING WIND WITH THE FIELD when this is set, from Hero
+    // Position at time zero. Off, it is pinned there while the field drifts past it,
+    // which is how every build before 22 drew it. The orbit rig follows it either way.
+    bool heroDrift      = false;
+
+    // -----------------------------------------------------------------
+    // MAMMA (build 23): pouches hanging from the layer's underside.
+    //
+    // Cloudy air sinking into drier air below, cooled by its own evaporation, sags out of
+    // the base in round lobes. They hang wherever the layer has cloud overhead -- under a
+    // stratocumulus deck, under the hero and its group -- smooth, without cauliflower,
+    // with sharp creases between them, and they grow and fade over minutes.
+    //
+    // 0 IS NONE, and then the base is the flat condensation level it always was, bit for
+    // bit. The amount sets how far they hang, up to most of a pouch's width.
+    // -----------------------------------------------------------------
+    Real mamma     = 0.0f;     // 0..1
+    Real pouchSize = 450.0f;   // m, across one pouch
+
+    // -----------------------------------------------------------------
+    // PILEUS AND VELUM (build 24): the hero's cap and veil.
+    //
+    // A tower rising fast lifts a moist, stable layer above it to saturation: PILEUS is
+    // the smooth, thin lens that then sits just over its crown, and VELUM the wide thin
+    // veil it pushes up through on the way. Accessory clouds the atlas lists for towering
+    // cumulus, and smooth where the tower is cauliflower -- which is the contrast that
+    // makes them read. They belong to the hero and drift with it.
+    //
+    // 0 IS NONE for both amounts, and the hero is what it was.
+    // -----------------------------------------------------------------
+    Real pileus       = 0.0f;     // 0..1: how thick the cap is
+    Real pileusGap    = 150.0f;   // m, from the crown's highest billows to the cap's middle
+    Real velum        = 0.0f;     // 0..1: how thick the veil is
+    Real velumHeight  = 0.6f;     // 0..1 of the hero's height
+
     // How the convective cells are arranged. The hero is one placed cloud and ignores it.
     OrganizationParams organization;
+
+    // The hero's shape, when a picture gives it one (build 21). See Pareidolia.h.
+    PareidoliaParams pareidolia;
 };
 
 // ---------------------------------------------------------------------------

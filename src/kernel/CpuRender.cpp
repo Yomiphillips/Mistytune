@@ -71,6 +71,12 @@ struct CpuVectors {
     static mistytune_cpu_backend::Vector<int32_t, 3> i3(int x, int y, int z) {
         mistytune_cpu_backend::Vector<int32_t, 3> v; v.x = x; v.y = y; v.z = z; return v;
     }
+    static mistytune_cpu_backend::Vector<int32_t, 2> i2(int x, int y) {
+        mistytune_cpu_backend::Vector<int32_t, 2> v; v.x = x; v.y = y; return v;
+    }
+    static mistytune_cpu_backend::Vector<float, 4> v4(float x, float y, float z, float w) {
+        mistytune_cpu_backend::Vector<float, 4> v; v.x = x; v.y = y; v.z = z; v.w = w; return v;
+    }
 };
 
 } // namespace

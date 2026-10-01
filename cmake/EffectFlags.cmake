@@ -57,13 +57,26 @@
 #      effect does not set yet. That is the Phase 4 task, not a reason to keep
 #      declaring something false today.
 #
+#      BUILD 21: IT STOPPED BEING TRUE, AND THE FLAG IS GONE. Pareidolia reads a
+#      whole layer through a layer parameter, so every output pixel depends on all
+#      of it. Dropped outright rather than withdrawn per frame: while it was set it
+#      changed nothing that was measured -- not the GPU offer (see below), not a
+#      timing -- so the dynamic-flags machinery would buy nothing. The number below
+#      no longer carries 1024.
+#
 # PF_OutFlag_DEEP_COLOR_AWARE (1 << 25) = 33554432
 #
 # PF_OutFlag_SEND_UPDATE_PARAMS_UI (1 << 26) = 67108864
 #   -- build 17. PF_Cmd_UPDATE_PARAMS_UI is what names the classifier readout when
 #      the Effect Controls open and when a project loads. Without it the readout
 #      says "--" until a supervised control is touched.
-math(EXPR MT_EFFECT_OUT_FLAGS "1024 | 33554432 | 67108864")
+#
+# PF_OutFlag_NON_PARAM_VARY (1 << 2) = 4
+#   -- build 24, and missing since Phase 1. The output depends on the frame's time --
+#      the cumulus cells drift, live and billow by it, the ice drifts by it -- and
+#      without this AE treats an effect on a solid with nothing keyframed as one frame,
+#      rendered once and played back.
+math(EXPR MT_EFFECT_OUT_FLAGS "4 | 33554432 | 67108864")
 
 # PF_OutFlag2_I_USE_3D_CAMERA              (1 << 1)  = 2
 #   -- required before AEGP_GetEffectCameraMatrix will return anything, and the

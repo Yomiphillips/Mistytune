@@ -28,8 +28,10 @@
 #include "Denoiser.h"
 #include "Fingerprint.h"
 #include "OrbitCamera.h"
+#include "Pareidolia.h"
 #include "SunPlacement.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -117,6 +119,17 @@ void printUsage() {
         "  --billow <m>     billow displacement (default 160)\n"
         "  --billow-scale <m>  the largest billow (default 320)\n"
         "  --humidity <rh>  surface humidity 0..1, which sets the base (default 0.7)\n"
+        "  --hero <1|2>     a hero cloud with the field, or alone\n"
+        "  --hero-x <m>  --hero-z <m>  --hero-width <m>  --hero-height <0..1>  --hero-var <v>\n"
+        "  --hero-connection <0..1>  build 22: turrets, a flanking line into the wind,\n"
+        "                   and the field sinking under them (default 0, the lone tower)\n"
+        "  --hero-drift     the hero rides the steering wind with the field\n"
+        "  --mamma <0..1>   build 23: pouches hanging from the layer's underside (default 0)\n"
+        "  --pouch-size <m> one pouch's width (default 450)\n"
+        "  --pileus <0..1>  build 24: a smooth cap over the hero's crown (default 0)\n"
+        "  --pileus-gap <m> the crown's highest billows to the cap's middle (default 150)\n"
+        "  --velum <0..1>   a wide thin veil the hero rises through (default 0)\n"
+        "  --velum-height <0..1>  of the hero's height (default 0.6)\n"
         "\n"
         "  The Organization group, for the cumulus layer (turns it on) and, with an\n"
         "  --ice- prefix, the cirrus layer's generating cells. Bearings clockwise from +Z:\n"
@@ -153,6 +166,21 @@ void printUsage() {
         "                   decision promises an exposure change can do. Runs on\n"
         "                   both engines; with --gpu-band-rows it is also the only\n"
         "                   check on the accumulator's per-band offset.\n"
+        "\n"
+        "  Pareidolia (build 21): the hero's silhouette from a picture.\n"
+        "  --shape <file|smiley|letter-f>  a binary PGM (P5), PPM (P6) or PAM (P7) --\n"
+        "                   PAM carries alpha, the others are opaque -- or a built-in\n"
+        "                   test matte. Turns the cumulus layer and the hero on.\n"
+        "  --shape-channel <alpha|luma|inv-alpha|inv-luma>  which number is the matte\n"
+        "                   (default alpha; the built-ins draw in alpha)\n"
+        "  --shape-threshold <0..1>  the matte level that is the edge (default 0.5)\n"
+        "  --shape-decay <0..1>      0 the shape, 1 the ordinary hero (default 0)\n"
+        "  --shape-depth <x>         rim radius over half the smaller side (default 0.6)\n"
+        "  --shape-billows <0..1>    the shape's billows over the hero's (default 0.2)\n"
+        "  --shape-facing <camera|deg>  turn to the camera, or face a fixed orbit bearing\n"
+        "                   (default camera)\n"
+        "  --shape-dump <path>   also write the distance map as a PGM, to look at\n"
+        "\n"
         "  --device         print what the renderer would use, and exit\n"
         "  --fingerprint    print the field and view hashes, and exit\n"
         "\n"
@@ -202,6 +230,167 @@ bool writePpm(const char* path, const std::vector<float>& argb, int width, int h
 }
 
 bool argIs(const char* a, const char* want) { return std::strcmp(a, want) == 0; }
+
+// ---------------------------------------------------------------------------
+// Pareidolia's pictures
+// ---------------------------------------------------------------------------
+
+// A picture as the effect would hand it over: premultiplied ARGB float, 0..1.
+struct ShapeImage {
+    int width = 0;
+    int height = 0;
+    std::vector<float> argb;
+
+    ConstImageView view() const {
+        ConstImageView v;
+        v.data     = argb.data();
+        v.width    = width;
+        v.height   = height;
+        v.rowBytes = static_cast<std::ptrdiff_t>(width) * 4 * sizeof(float);
+        v.format   = PixelFormat::ARGB32F;
+        return v;
+    }
+};
+
+// ONE NETPBM TOKEN, skipping whitespace and comments.
+bool readToken(FILE* f, char* out, int cap) {
+    int c = std::fgetc(f);
+    for (;;) {
+        while (c == ' ' || c == '\t' || c == '\r' || c == '\n') c = std::fgetc(f);
+        if (c != '#') break;
+        while (c != '\n' && c != EOF) c = std::fgetc(f);
+    }
+    int n = 0;
+    while (c != EOF && c != ' ' && c != '\t' && c != '\r' && c != '\n' && n < cap - 1) {
+        out[n++] = static_cast<char>(c);
+        c = std::fgetc(f);
+    }
+    out[n] = 0;
+    return n > 0;
+}
+
+// Binary PGM, PPM and PAM, 8 or 16 bits. PAM's RGB_ALPHA and GRAYSCALE_ALPHA carry alpha,
+// which is STRAIGHT in the file and premultiplied here, as AE's buffers are.
+bool loadShapeImage(const char* path, ShapeImage& img) {
+    FILE* f = std::fopen(path, "rb");
+    if (!f) return false;
+    char tok[64];
+    if (!readToken(f, tok, sizeof tok)) { std::fclose(f); return false; }
+
+    int w = 0, h = 0, maxval = 0, depth = 0;
+    if (argIs(tok, "P5") || argIs(tok, "P6")) {
+        depth = argIs(tok, "P5") ? 1 : 3;
+        char a[32], b[32], c[32];
+        if (!readToken(f, a, 32) || !readToken(f, b, 32) || !readToken(f, c, 32)) { std::fclose(f); return false; }
+        w = std::atoi(a); h = std::atoi(b); maxval = std::atoi(c);
+    } else if (argIs(tok, "P7")) {
+        for (;;) {
+            if (!readToken(f, tok, sizeof tok)) { std::fclose(f); return false; }
+            if (argIs(tok, "ENDHDR")) break;
+            char v[64];
+            if (!readToken(f, v, sizeof v)) { std::fclose(f); return false; }
+            if (argIs(tok, "WIDTH"))  w = std::atoi(v);
+            if (argIs(tok, "HEIGHT")) h = std::atoi(v);
+            if (argIs(tok, "DEPTH"))  depth = std::atoi(v);
+            if (argIs(tok, "MAXVAL")) maxval = std::atoi(v);
+        }
+    } else {
+        std::fclose(f);
+        return false;
+    }
+    if (w <= 0 || h <= 0 || maxval <= 0 || maxval > 65535 || depth < 1 || depth > 4) {
+        std::fclose(f);
+        return false;
+    }
+
+    const int bytes = maxval > 255 ? 2 : 1;
+    std::vector<unsigned char> raw(static_cast<size_t>(w) * h * depth * bytes);
+    const size_t got = std::fread(raw.data(), 1, raw.size(), f);
+    std::fclose(f);
+    if (got != raw.size()) return false;
+
+    img.width = w;
+    img.height = h;
+    img.argb.assign(static_cast<size_t>(w) * h * 4, 0.0f);
+    for (size_t p = 0; p < static_cast<size_t>(w) * h; ++p) {
+        float ch[4] = { 0, 0, 0, 1 };
+        for (int k = 0; k < depth; ++k) {
+            const size_t at = (p * depth + k) * bytes;
+            const int v = bytes == 2 ? (raw[at] << 8) | raw[at + 1] : raw[at];
+            ch[k] = static_cast<float>(v) / static_cast<float>(maxval);
+        }
+        float r, g, b, a;
+        if (depth == 1)      { r = g = b = ch[0]; a = 1.0f; }
+        else if (depth == 2) { r = g = b = ch[0]; a = ch[1]; }
+        else                 { r = ch[0]; g = ch[1]; b = ch[2]; a = depth == 4 ? ch[3] : 1.0f; }
+        img.argb[p * 4 + 0] = a;
+        img.argb[p * 4 + 1] = r * a;
+        img.argb[p * 4 + 2] = g * a;
+        img.argb[p * 4 + 3] = b * a;
+    }
+    return true;
+}
+
+// THE BUILT-IN MATTES, drawn in alpha at 512 x 512 with 4 x 4 coverage per pixel, so the
+// tests and the look renders need no file. A SMILEY is pareidolia's own test card: a face
+// read from two holes and an arc. THE LETTER F is asymmetric both ways, so a mirrored or
+// upside-down shape cannot pass for right.
+bool builtinShape(const char* name, ShapeImage& img) {
+    const bool smiley = argIs(name, "smiley");
+    const bool letter = argIs(name, "letter-f");
+    if (!smiley && !letter) return false;
+
+    const int n = 512;
+    img.width = n;
+    img.height = n;
+    img.argb.assign(static_cast<size_t>(n) * n * 4, 0.0f);
+
+    auto insideAt = [&](double x, double y) -> bool {   // unit square, y DOWN
+        if (letter) {
+            const bool stem = x >= 0.25 && x <= 0.42 && y >= 0.08 && y <= 0.92;
+            const bool top  = x >= 0.25 && x <= 0.78 && y >= 0.08 && y <= 0.24;
+            const bool mid  = x >= 0.25 && x <= 0.64 && y >= 0.44 && y <= 0.58;
+            return stem || top || mid;
+        }
+        const double cx = x - 0.5, cy = y - 0.5;
+        if (cx * cx + cy * cy > 0.45 * 0.45) return false;                  // the head
+        const double ex = std::fabs(cx) - 0.16, ey = cy + 0.12;
+        if (ex * ex + ey * ey < 0.075 * 0.075) return false;                // the eyes
+        const double my = cy - 0.02, mr = std::sqrt(cx * cx + my * my);
+        if (my > 0.07 && mr > 0.20 && mr < 0.29) return false;              // the mouth
+        return true;
+    };
+
+    for (int y = 0; y < n; ++y) {
+        for (int x = 0; x < n; ++x) {
+            int hits = 0;
+            for (int j = 0; j < 4; ++j)
+                for (int i = 0; i < 4; ++i)
+                    hits += insideAt((x + (i + 0.5) / 4.0) / n, (y + (j + 0.5) / 4.0) / n) ? 1 : 0;
+            const float a = hits / 16.0f;
+            float* p = img.argb.data() + (static_cast<size_t>(y) * n + x) * 4;
+            p[0] = a; p[1] = a; p[2] = a; p[3] = a;
+        }
+    }
+    return true;
+}
+
+// The distance map as a picture: mid-grey at the edge, lighter inside, 4 texels a level.
+bool dumpShapeMap(const char* path, const cloud::ShapeMap& m) {
+    FILE* f = std::fopen(path, "wb");
+    if (!f) return false;
+    std::fprintf(f, "P5\n%d %d\n255\n", m.width, m.height);
+    for (int j = m.height - 1; j >= 0; --j) {       // row 0 of the map is the bottom
+        for (int i = 0; i < m.width; ++i) {
+            const float d = m.texels[(static_cast<size_t>(j) * m.width + i) * 4];
+            float v = 128.0f + d * 4.0f;
+            v = v < 0.0f ? 0.0f : (v > 255.0f ? 255.0f : v);
+            std::fputc(static_cast<int>(v), f);
+        }
+    }
+    std::fclose(f);
+    return true;
+}
 
 // An Organization mode by name or by number. Anything else is Cellular, which is what
 // resolveOrganization makes of an out-of-range number too.
@@ -390,6 +579,10 @@ int main(int argc, char** argv) {
     // meant a world azimuth to this program, and the goldens are written with it.
     cloud::SunPlacement sunPlacement = cloud::SunPlacement::Manual;
 
+    // PAREIDOLIA: the picture, and where to write its map for a look.
+    const char* shapePath = nullptr;
+    const char* shapeDump = nullptr;
+
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
         const bool hasNext = (i + 1) < argc;
@@ -473,7 +666,38 @@ int main(int argc, char** argv) {
         else if (argIs(a, "--hero-width") && hasNext)    req.field.convection.heroWidth     = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--hero-height") && hasNext)   req.field.convection.heroHeight    = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--hero-var") && hasNext)      req.field.convection.heroVariation = static_cast<float>(std::atof(argv[++i]));
+        // HERO CONNECTION (build 22): the group round the hero, and whether it rides the wind.
+        else if (argIs(a, "--hero-connection") && hasNext) req.field.convection.heroConnection = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--hero-drift"))               req.field.convection.heroDrift = true;
+        // MAMMA (build 23): pouches under the layer.
+        else if (argIs(a, "--mamma") && hasNext)         { req.field.convection.enabled = true; req.field.convection.mamma = static_cast<float>(std::atof(argv[++i])); }
+        else if (argIs(a, "--pouch-size") && hasNext)    req.field.convection.pouchSize = static_cast<float>(std::atof(argv[++i]));
+        // PILEUS AND VELUM (build 24): the hero's cap and veil.
+        else if (argIs(a, "--pileus") && hasNext)        req.field.convection.pileus      = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--pileus-gap") && hasNext)    req.field.convection.pileusGap   = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--velum") && hasNext)         req.field.convection.velum       = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--velum-height") && hasNext)  req.field.convection.velumHeight = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--render-distance") && hasNext) req.view.renderDistance = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--shape") && hasNext)           shapePath = argv[++i];
+        else if (argIs(a, "--shape-dump") && hasNext)      shapeDump = argv[++i];
+        else if (argIs(a, "--shape-channel") && hasNext) {
+            const char* v = argv[++i];
+            req.field.convection.pareidolia.channel = argIs(v, "luma") ? 1 : argIs(v, "inv-alpha") ? 2
+                                                    : argIs(v, "inv-luma") ? 3 : 0;
+        }
+        else if (argIs(a, "--shape-threshold") && hasNext) req.field.convection.pareidolia.threshold = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--shape-decay") && hasNext)     req.field.convection.pareidolia.decay     = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--shape-depth") && hasNext)     req.field.convection.pareidolia.depth     = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--shape-billows") && hasNext)   req.field.convection.pareidolia.billows   = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--shape-facing") && hasNext) {
+            const char* v = argv[++i];
+            if (argIs(v, "camera")) {
+                req.field.convection.pareidolia.facing = 0;
+            } else {
+                req.field.convection.pareidolia.facing  = 1;
+                req.field.convection.pareidolia.bearing = static_cast<float>(std::atof(v));
+            }
+        }
         else if (argIs(a, "--orbit") && hasNext)         { useOrbit = true; orbit.orbitDegrees  = static_cast<float>(std::atof(argv[++i])); }
         else if (argIs(a, "--distance") && hasNext)      { useOrbit = true; orbit.distance      = static_cast<float>(std::atof(argv[++i])); }
         else if (argIs(a, "--look-at") && hasNext)       { useOrbit = true; orbit.lookAt        = static_cast<float>(std::atof(argv[++i])); }
@@ -548,6 +772,12 @@ int main(int argc, char** argv) {
     // world's Y. Camera-to-world, row-major, as ViewParams documents -- Ry(theta) * Rx(pitch),
     // where theta = heading - 180 because the identity camera already faces azimuth 180.
     // Left untouched at the defaults, so the golden scenes keep the exact identity.
+    // A PICTURE MEANS A HERO TO PUT IT ON, before the orbit rig aims at the hero's height.
+    if (shapePath) {
+        req.field.convection.enabled = true;
+        if (req.field.convection.heroMode == 0) req.field.convection.heroMode = 1;
+    }
+
     if (useOrbit) {
         // THE SAME CALL THE EFFECT MAKES, after the frame size is known, since the
         // field of view depends on its aspect.
@@ -572,6 +802,48 @@ int main(int argc, char** argv) {
             0.0f,  0.0f,     0.0f,     1.0f
         };
         for (int i = 0; i < 16; ++i) req.view.cameraToWorld[i] = m[i];
+    }
+
+    // THE SHAPE'S FACING, AFTER THE CAMERA, as the effect places it -- and the picture's
+    // map, which the request points at for the rest of the run.
+    ShapeImage shapeImage;
+    cloud::ShapeMap shapeMap;
+    if (shapePath) {
+        if (!builtinShape(shapePath, shapeImage) && !loadShapeImage(shapePath, shapeImage)) {
+            std::fprintf(stderr, "could not read --shape %s (binary PGM, PPM or PAM, or a built-in)\n",
+                         shapePath);
+            return 2;
+        }
+        const cloud::ShapeChannel channel =
+            static_cast<cloud::ShapeChannel>(req.field.convection.pareidolia.channel & 3);
+        // TIMED, because the effect pays this on every frame of an animated source.
+        const auto buildStart = std::chrono::steady_clock::now();
+        const bool built = cloud::buildShapeMap(shapeImage.view(), channel,
+                                                req.field.convection.pareidolia.threshold, shapeMap);
+        const double buildMs = std::chrono::duration<double, std::milli>(
+                                   std::chrono::steady_clock::now() - buildStart).count();
+        std::printf("shape: %dx%d source -> map in %.1f ms\n", shapeImage.width, shapeImage.height,
+                    buildMs);
+        if (!built) {
+            std::printf("shape: nothing in %s reaches the threshold -- no shape\n", shapePath);
+        } else {
+            req.shapeMap = &shapeMap;
+            if (shapeDump) dumpShapeMap(shapeDump, shapeMap);
+        }
+        cloud::Real heroX = 0, heroZ = 0;
+        cloud::heroPositionNow(req.field, heroX, heroZ);
+        cloud::placeShape(req.field.convection.pareidolia, req.view, heroX, heroZ);
+
+        cloud::ConvectionDerived cd;
+        cloud::deriveConvection(req.field, cd);
+        const cloud::ShapeGeometry g = cloud::resolveShape(req.shapeMap,
+                                                           req.field.convection.pareidolia, cd);
+        std::printf("shape: %dx%d map, %.0f x %.0f m, rims %.0f m, facing %.1f deg%s\n",
+                    shapeMap.width, shapeMap.height,
+                    static_cast<double>(g.widthMetres), static_cast<double>(g.heightMetres),
+                    static_cast<double>(g.round),
+                    static_cast<double>(req.field.convection.pareidolia.bearing),
+                    g.on ? "" : " (OFF: no map or no hero)");
     }
 
     // THE SUN, PLACED AFTER THE CAMERA, as the effect places it.

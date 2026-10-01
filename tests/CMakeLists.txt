@@ -53,6 +53,9 @@ add_executable(plugin_tests
     # The Organization group's host half: each control lands where the kernel reads
     # it, each mode is its setting, and the defaults are off.
     unit/TestOrganization.cpp
+    # Pareidolia's host half: the picture's distance map, exact and the right way up,
+    # each channel, the fit into the hero, and nothing on without a picture.
+    unit/TestPareidolia.cpp
 
     # The output conversion: 8, 16 and 32 bpc, the sRGB curve and the alpha rule.
     # PLAN.md's Phase 1 exit asks for all three bit depths to be CORRECT, and until

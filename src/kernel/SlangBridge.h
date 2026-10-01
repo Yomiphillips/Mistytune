@@ -73,6 +73,10 @@ constexpr float kRenderDistanceFade = 0.25f;
 // definition; this is the host's copy with a margin.
 constexpr float kHeroBoxMargin = 50.0f;
 
+// kMoatOuter in ConvectionLib.slang: where the moat round each tower of the hero's group
+// ends, in that tower's radii. The host's circle round the group is sized from it.
+constexpr float kMoatOuterRadii = 1.3f;
+
 // How the convection layer's procedural majorant grid is cut, in metres.
 //
 // A QUARTER OF A CELL ACROSS, ALIGNED TO THE CELLS, AND FOUR SLICES DEEP.
@@ -152,6 +156,21 @@ MT_DEVICE void fillOrganization(const cloud::OrganizationResolved& o, OrgT& out)
 
 // HOST AND DEVICE, because the host fills a Scene of its own to plan and key the shadow
 // maps from -- see AirMapHost.h. Nothing in here reaches the generated code.
+// One turret of the hero's group (build 22), as the kernel reads it: (x, z, radius, top),
+// no wider and no taller than the hero -- see the note where it is called. A slot past
+// `count` is zero.
+template <class V, class F4>
+MT_DEVICE void fillTurret(const cloud::ConvectionDerived& cd, int k, int count, float heroR, F4& out) {
+    if (k >= count) {
+        out = V::v4(0.0f, 0.0f, 0.0f, 0.0f);
+        return;
+    }
+    const cloud::HeroTurret& t = cd.turret[k];
+    const float radius = t.radius < 1.0f ? 1.0f : (t.radius > heroR ? heroR : t.radius);
+    const float top    = t.top < 0.0f ? 0.0f : (t.top > cd.heroTop ? cd.heroTop : t.top);
+    out = V::v4(t.x, t.z, radius, top);
+}
+
 template <class V, class SceneT, class PhaseT>
 MT_DEVICE void fillSlangScene(const RenderRequest& req, SceneT& s, PhaseT& ph) {
     const cloud::FieldParams& f   = req.field;
@@ -387,24 +406,132 @@ MT_DEVICE void fillSlangScene(const RenderRequest& req, SceneT& s, PhaseT& ph) {
     s.medium2_0.conv_0.cvHeroSeed_0   = V::v3(cd.heroSeedX, cd.heroSeedY, cd.heroSeedZ);
     s.medium2_0.conv_0.cvHeroBillow_0 = cd.heroBillow;
 
+    // HERO CONNECTION (build 22): the group's turrets and the moat. EVERY SLOT WRITTEN, the
+    // unused ones as zero. CLAMPED TO THE HERO HERE, not trusted: a turret taller or wider
+    // than the hero would reach past convCeiling and the slab, and the density cuts there.
+    // No hero, no group -- and no moat, which is round the hero's own footprint too.
+    const bool group = cd.heroTop > 0.0f;
+    const int  turrets = group ? (cd.turretCount < 0 ? 0 : (cd.turretCount > cloud::kMaxHeroTurrets
+                                                                 ? cloud::kMaxHeroTurrets
+                                                                 : cd.turretCount))
+                               : 0;
+    s.medium2_0.conv_0.cvMoat_0 = group ? (cd.moat < 0.0f ? 0.0f : (cd.moat > 1.0f ? 1.0f : cd.moat)) : 0.0f;
+    s.medium2_0.conv_0.cvTurretCount_0 = turrets;
+    const float heroR = s.medium2_0.conv_0.cvHeroRadius_0;
+    fillTurret<V>(cd, 0, turrets, heroR, s.medium2_0.conv_0.cvTurret0_0);
+    fillTurret<V>(cd, 1, turrets, heroR, s.medium2_0.conv_0.cvTurret1_0);
+    fillTurret<V>(cd, 2, turrets, heroR, s.medium2_0.conv_0.cvTurret2_0);
+    fillTurret<V>(cd, 3, turrets, heroR, s.medium2_0.conv_0.cvTurret3_0);
+    fillTurret<V>(cd, 4, turrets, heroR, s.medium2_0.conv_0.cvTurret4_0);
+
+    // THE GROUP'S CIRCLE, which the density tests once before either loop: from the hero's
+    // centre past every turret's reach (convTurretReach) and every ring of the moat
+    // (kMoatOuter of each tower's radius, the hero's included). OVER, never under, by a
+    // margin: outside it the density skips the group as exactly zero change, so a circle
+    // a rounding short would cut a ring's last millimetres to a step.
+    float groupReach = 0.0f;
+    if (group && (turrets > 0 || s.medium2_0.conv_0.cvMoat_0 > 0.0f)) {
+        const float lift = 1.5f * billow * cd.heroBillow + 24.0f;
+        groupReach = kMoatOuterRadii * heroR;
+        for (int k = 0; k < turrets; ++k) {
+            const float dx = cd.turret[k].x - cd.heroX;
+            const float dz = cd.turret[k].z - cd.heroZ;
+            const float r  = cd.turret[k].radius < 1.0f ? 1.0f
+                           : (cd.turret[k].radius > heroR ? heroR : cd.turret[k].radius);
+            const float out = (r + lift > kMoatOuterRadii * r) ? r + lift : kMoatOuterRadii * r;
+            const float at  = sqrtf(dx * dx + dz * dz) + out;
+            if (at > groupReach) groupReach = at;
+        }
+        groupReach = groupReach * 1.01f + 10.0f;
+    }
+    s.medium2_0.conv_0.cvGroupReach_0 = groupReach;
+
+    // MAMMA (build 23): the deepest pouch and one pouch's width. Clamped here, not trusted:
+    // the depth lowers the slab below, and a pouch size is a divisor.
+    const float mamma = cd.mammaDepth > 0.0f ? cd.mammaDepth : 0.0f;
+    s.medium2_0.conv_0.cvMammaDepth_0 = mamma;
+    s.medium2_0.conv_0.cvPouchSize_0  = cd.pouchSize > 20.0f ? cd.pouchSize : 20.0f;
+
+    // PILEUS AND VELUM (build 24), the hero's cap and veil: nothing without a hero.
+    const bool  caps   = cd.heroTop > 0.0f;
+    const float pileus = caps && cd.pileusThick > 0.0f ? cd.pileusThick : 0.0f;
+    const float velum  = caps && cd.velumThick > 0.0f ? cd.velumThick : 0.0f;
+    s.medium2_0.conv_0.cvPileusThick_0 = pileus;
+    s.medium2_0.conv_0.cvPileusGap_0   = cd.pileusGap;
+    s.medium2_0.conv_0.cvVelumThick_0  = velum;
+    s.medium2_0.conv_0.cvVelumHeight_0 = cd.velumHeight;
+
     // HOW THE CELLS ARE ARRANGED (build 20). The widths only mean anything when the
     // organization is on, and the resolve leaves them zero when it is not.
     fillOrganization<V>(cd.organization, s.medium2_0.conv_0.cvOrg_0);
     s.medium2_0.conv_0.cvGapWidth_0  = cd.organization.gapWidth;
     s.medium2_0.conv_0.cvLacunarity_0 = cd.organization.lacunarity;
 
+    // PAREIDOLIA (build 21): the hero's silhouette, when deriveRenderInputs found a map and a
+    // hero to fit it to. EVERY FIELD WRITTEN, the off case included, for the reason the
+    // absent shadow map's are; off is an EMPTY buffer and cvShapeOn 0, and the kernel reads
+    // nothing else. The texels are whichever memory the request points at -- the host's,
+    // or the device copy renderCuda swapped in.
+    const cloud::ShapeGeometry& sg = req.shape;
+    const bool shapeOn = sg.on && req.shapeBuffer != nullptr && cd.heroTop > 0.0f;
+    s.medium2_0.conv_0.cvShapeOn_0 = shapeOn ? 1 : 0;
+    s.medium2_0.conv_0.cvShapeMap_0.data =
+        shapeOn ? const_cast<float*>(static_cast<const float*>(req.shapeBuffer)) : nullptr;
+    s.medium2_0.conv_0.cvShapeMap_0.count =
+        shapeOn ? static_cast<size_t>(sg.width) * static_cast<size_t>(sg.height) * 4u : 0;
+    s.medium2_0.conv_0.cvShapeDim_0       = V::i2(shapeOn ? sg.width : 1, shapeOn ? sg.height : 1);
+    s.medium2_0.conv_0.cvShapeOffset_0    = V::v2(sg.offsetU, sg.offsetY);
+    s.medium2_0.conv_0.cvShapeTexel_0     = sg.texelMetres > 1e-3f ? sg.texelMetres : 1.0f;
+    s.medium2_0.conv_0.cvShapeAxisU_0     = V::v2(sg.axisUX, sg.axisUZ);
+    s.medium2_0.conv_0.cvShapeRound_0     = sg.round > 1.0f ? sg.round : 1.0f;
+    s.medium2_0.conv_0.cvShapeHalfWidth_0 = 0.5f * sg.widthMetres;
+    s.medium2_0.conv_0.cvShapeDecay_0     = sg.decay;
+    s.medium2_0.conv_0.cvShapeBillow_0    = sg.billow;
+
     // THE SLAB IS THE TALLEST THE CLOUD CAN BE: the tallest tower or the hero, plus the
     // biggest outward billow. convectionDensity() returns zero outside exactly this range.
-    s.medium2_0.slabBottom_0 = cd.base;
+    // MAMMA HANG BELOW IT, by at most their deepest (build 23).
+    s.medium2_0.slabBottom_0 = cd.base - mamma;
     const float fieldTop = cd.depth + billow;
     const float heroTop  = cd.heroTop > 0.0f ? cd.heroTop + billow * cd.heroBillow : 0.0f;
-    s.medium2_0.slabTop_0    = cd.base + (fieldTop > heroTop ? fieldTop : heroTop);
+    // ...OR THE CAP AND THE VEIL, as convCapCeiling has them (build 24).
+    const float capTop   = pileus > 0.0f ? cd.heroTop + cd.pileusGap + pileus : 0.0f;
+    const float veilTop  = velum > 0.0f ? cd.velumHeight + 1.5f * velum : 0.0f;
+    float slabAbove = fieldTop > heroTop ? fieldTop : heroTop;
+    if (capTop > slabAbove)  slabAbove = capTop;
+    if (veilTop > slabAbove) slabAbove = veilTop;
+    s.medium2_0.slabTop_0    = cd.base + slabAbove;
 
     // A HERO ALONE IS A BOX, and the box is the whole speed-up: a ray that misses it
     // never enters the layer, where an unbounded slab would make it walk kilometres of
     // empty air at the cloud's majorant. Reach as convHeroReach has it, plus a margin.
     if (cd.heroAlone && cd.heroTop > 0.0f) {
-        const float reach = cd.heroRadius + 1.5f * billow * cd.heroBillow + 24.0f + kHeroBoxMargin;
+        float reach = cd.heroRadius + 1.5f * billow * cd.heroBillow + 24.0f + kHeroBoxMargin;
+
+        // THE SHAPE REACHES FURTHER THAN THE TOWER ON THE DIAGONAL: past its half width across
+        // the plane and past its rims along the normal. convShapeReach, plus the margin.
+        if (shapeOn) {
+            const float lift = 1.5f * billow * cd.heroBillow + 24.0f;
+            const float a = 0.5f * sg.widthMetres + lift;
+            const float b = s.medium2_0.conv_0.cvShapeRound_0 + lift;
+            const float shapeReach = sqrtf(a * a + b * b) + kHeroBoxMargin;
+            if (shapeReach > reach) reach = shapeReach;
+        }
+
+        // THE GROUP'S TURRETS STAND OUT PAST THE HERO, the flanking line by nearly three
+        // of its radii: each one's centre from the hero's, plus convTurretReach at the
+        // hero's own billow factor, which is the most a turret's can be.
+        for (int k = 0; k < turrets; ++k) {
+            const float dx = cd.turret[k].x - cd.heroX;
+            const float dz = cd.turret[k].z - cd.heroZ;
+            const float r  = cd.turret[k].radius > heroR ? heroR : cd.turret[k].radius;
+            const float turretReach = sqrtf(dx * dx + dz * dz) + r + 1.5f * billow * cd.heroBillow +
+                                      24.0f + kHeroBoxMargin;
+            if (turretReach > reach) reach = turretReach;
+        }
+
+        // THE VEIL REACHES kVelumExtent OF THE HERO'S RADIUS (build 24); the cap stays inside it.
+        if (velum > 0.0f && 1.9f * heroR + kHeroBoxMargin > reach) reach = 1.9f * heroR + kHeroBoxMargin;
         s.medium2_0.clipOn_0 = 1;
         s.medium2_0.clipLo_0 = V::v2(cd.heroX - reach, cd.heroZ - reach);
         s.medium2_0.clipHi_0 = V::v2(cd.heroX + reach, cd.heroZ + reach);

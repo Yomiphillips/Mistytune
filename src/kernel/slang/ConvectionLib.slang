@@ -75,6 +75,46 @@ public struct ConvectionInput
     Organization cvOrg;
     float  cvGapWidth;     // seams clear where a cell's centre-ness is under this
     float  cvLacunarity;   // 0..1: towards a sheet with round holes
+
+    // PAREIDOLIA (build 21): the hero's silhouette from a picture, as a signed distance
+    // map the host built (src/engine/Pareidolia.h). cvShapeOn 0 IS NONE, and then nothing
+    // reads the rest -- so a zeroed input is still the hero it always was.
+    int    cvShapeOn;
+    StructuredBuffer<float> cvShapeMap;   // x * y * 4, row 0 at the bottom: see convShapeTexel
+    int2   cvShapeDim;
+    float2 cvShapeOffset;    // texel-edge coordinates of the plane's u = 0, y = 0
+    float  cvShapeTexel;     // m per texel
+    float2 cvShapeAxisU;     // unit, world xz: the plane's u. Its normal is this turned 90
+    float  cvShapeRound;     // m: the rims' radius, and half the thickest depth
+    float  cvShapeHalfWidth; // m: the silhouette's half width once fitted
+    float  cvShapeDecay;     // 0 the shape .. 1 the hero's tower
+    float  cvShapeBillow;    // the shape's billows over the hero's, 0..1
+
+    // HERO CONNECTION (build 22): the towers that tie the hero into the field, and how
+    // hard the field's updraft sinks under them. ZERO IS NONE for both, so a zeroed input
+    // is still the lone hero. Each turret is (world x, world z, radius, top above the
+    // base); the host keeps every one no taller than the hero and no wider, which is what
+    // keeps convCeiling the hero's and the billows no bigger than its own.
+    float  cvMoat;           // 0..1: how far the field's updraft sinks under the group
+    float  cvGroupReach;     // m from cvHeroAt: every turret's reach and every moat ring
+    int    cvTurretCount;    // 0..kConvMaxTurrets
+    float4 cvTurret0;
+    float4 cvTurret1;
+    float4 cvTurret2;
+    float4 cvTurret3;
+    float4 cvTurret4;
+
+    // MAMMA (build 23): pouches hanging from the underside. cvMammaDepth 0 IS NONE, and the
+    // base is the flat condensation level it was -- so a zeroed input still has no pouches.
+    float  cvMammaDepth;     // m: the deepest a pouch hangs below the base
+    float  cvPouchSize;      // m: one pouch's width, the lattice pitch
+
+    // PILEUS AND VELUM (build 24): the hero's cap and veil. A thickness of 0 IS NONE, so a
+    // zeroed input has neither.
+    float  cvPileusThick;    // m, the cap at its thickest
+    float  cvPileusGap;      // m, from the smooth crown to the cap's middle (billows in)
+    float  cvVelumThick;     // m, the veil at its thickest
+    float  cvVelumHeight;    // m above the base, the veil's middle
 };
 
 // ---------------------------------------------------------------------------
@@ -184,6 +224,8 @@ public static const float kConvGradMax = 7.0f;
 // cells are unrelated even where their lattices happen to align.
 static const uint kConvSaltCentre = 0x68e31da4u;
 static const uint kConvSaltLife   = 0xb5297a4du;
+static const uint kConvSaltPouch  = 0x2c1b3c6du;
+static const uint kConvSaltSag    = 0x7f4a7c15u;
 
 // ---------------------------------------------------------------------------
 // One cell
@@ -588,19 +630,33 @@ public float convDistanceFloor(float vMin, float hMin)
 // towers at the same instability. Because the profile inverts in closed form, h is the
 // true horizontal distance to the wall, not an estimate.
 
+// ANY DOME OF THE FAMILY: the hero, and since build 22 the turrets of its group. The
+// hero's two functions below are these with its own numbers, the same arithmetic in the
+// same order, so the lone hero renders to the bit what it did.
+public float convDomeHeight(float top, float radius, float shape, float r)
+{
+    if (top <= 0.0f || r >= radius) return 0.0f;
+    float t = 1.0f - (r * r) / (radius * radius);
+    return top * pow(t, shape);
+}
+
+// A dome's radius at height `above`, or -1 above its top.
+public float convDomeRadiusAt(float top, float radius, float shape, float above)
+{
+    if (top <= 0.0f || above >= top) return -1.0f;
+    float f = pow(max(above, 0.0f) / top, 1.0f / max(shape, 1e-3f));
+    return radius * sqrt(max(1.0f - f, 0.0f));
+}
+
 public float convHeroHeight(ConvectionInput c, float r)
 {
-    if (c.cvHeroTop <= 0.0f || r >= c.cvHeroRadius) return 0.0f;
-    float t = 1.0f - (r * r) / (c.cvHeroRadius * c.cvHeroRadius);
-    return c.cvHeroTop * pow(t, c.cvShape);
+    return convDomeHeight(c.cvHeroTop, c.cvHeroRadius, c.cvShape, r);
 }
 
 // The hero's radius at height `above`, or -1 above its top.
 public float convHeroRadiusAt(ConvectionInput c, float above)
 {
-    if (c.cvHeroTop <= 0.0f || above >= c.cvHeroTop) return -1.0f;
-    float f = pow(max(above, 0.0f) / c.cvHeroTop, 1.0f / max(c.cvShape, 1e-3f));
-    return c.cvHeroRadius * sqrt(max(1.0f - f, 0.0f));
+    return convDomeRadiusAt(c.cvHeroTop, c.cvHeroRadius, c.cvShape, above);
 }
 
 // The highest anything in the layer reaches above the base, billows included: the
@@ -609,7 +665,17 @@ public float convCeiling(ConvectionInput c)
 {
     float field = c.cvDepth + c.cvBillow;
     float hero  = c.cvHeroTop > 0.0f ? c.cvHeroTop + c.cvBillow * c.cvHeroBillow : 0.0f;
-    return max(field, hero);
+    return max(max(field, hero), convCapCeiling(c));
+}
+
+// THE CAP AND THE VEIL'S TOPS (build 24), or zero without them: see convCapDensity. The
+// veil's hump near the tower is at most half its thickness, so a whole thickness covers it.
+public float convCapCeiling(ConvectionInput c)
+{
+    if (c.cvHeroTop <= 0.0f) return 0.0f;
+    float cap  = c.cvPileusThick > 0.0f ? c.cvHeroTop + c.cvPileusGap + c.cvPileusThick : 0.0f;
+    float veil = c.cvVelumThick > 0.0f ? c.cvVelumHeight + 1.5f * c.cvVelumThick : 0.0f;
+    return max(cap, veil);
 }
 
 // How far outside its footprint the hero can put cloud: the side billows' reach, which
@@ -619,6 +685,25 @@ public float convCeiling(ConvectionInput c)
 public float convHeroReach(ConvectionInput c)
 {
     return c.cvHeroRadius + 1.5f * c.cvBillow * c.cvHeroBillow + 2.0f * kConvEdgeSoft;
+}
+
+// THE SHAPE'S REACH, the same way. A point is outside the shape by at least how far it is
+// past the silhouette's box across the plane, and by at least how far it is past the rims
+// along the normal (see convShapeProfile) -- so once both are more than the billows can
+// lift, it is clear. The host's box uses the same arithmetic (SlangBridge.h).
+public float convShapeReach(ConvectionInput c)
+{
+    float lift = 1.5f * c.cvBillow * c.cvHeroBillow + 2.0f * kConvEdgeSoft;
+    float2 corner = float2(c.cvShapeHalfWidth + lift, c.cvShapeRound + lift);
+    return length(corner);
+}
+
+// The tower's reach or the shape's, whichever is further: Decay blends the two, and a
+// blend is never out past both.
+public float convHeroReachAll(ConvectionInput c)
+{
+    float reach = convHeroReach(c);
+    return c.cvShapeOn != 0 ? max(reach, convShapeReach(c)) : reach;
 }
 
 // One octave of puffs: the largest sphere any feature point puts over x, in [0, 1].
@@ -725,18 +810,121 @@ float convInside(ConvectionInput c, float d, float lift, float3 x, float scale)
 // Density
 // ---------------------------------------------------------------------------
 
-// The hero, in its own frame: it stands still while the field drifts, so its billows are
-// sampled about its own centre and do not slide across it. The same surface point as the
-// field's, from the closed form: up by v to the crown, out along the radius by h to the
-// wall. -1e30 beyond its reach.
-float convHeroInside(ConvectionInput c, float3 p, float above)
-{
-    float2 rel = p.xz - c.cvHeroAt;
-    float  r   = length(rel);
-    if (r >= convHeroReach(c)) return -1e30f;
+// ---------------------------------------------------------------------------
+// Pareidolia: the hero as a picture
+// ---------------------------------------------------------------------------
+//
+// ===========================================================================
+// THE SHAPE IS A VERTICAL PLANE THROUGH THE HERO'S CENTRE, INFLATED.
+//
+// The host's map holds, per texel, the signed distance D to the silhouette's edge in the
+// plane -- positive inside -- and its slope. The plane's frame is (u, y, n): u across it
+// (cvShapeAxisU), y height above the base, n along its normal. A point is in the cloud when
+// its (D, m = |n|) lies in the ROUNDED-RIM PROFILE: the disc of radius R centred R inside
+// the edge, and past it the strip m < R. So a disc of radius R becomes a sphere, a narrow
+// stroke a tube, and a wide region a cushion 2R deep with rounded rims.
+//
+// THE DISTANCE TO THE SHAPE IS THE 2D DISTANCE TO THE PROFILE, in closed form, with the
+// same sign inside and out and no slope that runs away at the rim -- which is what a
+// thickness height field does, and the billows would show it as a seam round the
+// silhouette.
+// ===========================================================================
 
-    float v  = convHeroHeight(c, r) - above;
-    float ra = convHeroRadiusAt(c, above);
+// kShapeLipschitz: how fast D can change per metre, map and extension together. Adjacent
+// texels of an exact distance map differ by at most one, so the bilinear slope is at most
+// one along each axis, sqrt(2) in all; the linear extension past the map adds at most one
+// more by the triangle inequality. The bound takes 2.5.
+public static const float kShapeLipschitz = 2.5f;
+
+// The shape's billow lobes never shrink below this fraction of the hero's, however low
+// Shape Billows goes: at zero there is no billow to size, and just above it a lobe of a
+// few metres would be grain on the surface rather than cauliflower.
+public static const float kShapeLobeFloor = 0.3f;
+
+// Texel (i, j) of the map: distance in texels and its slopes along u and y.
+float3 convShapeTexel(ConvectionInput c, int i, int j)
+{
+    int k = (j * c.cvShapeDim.x + i) * 4;
+    return float3(c.cvShapeMap[k], c.cvShapeMap[k + 1], c.cvShapeMap[k + 2]);
+}
+
+// THE SIGNED DISTANCE TO THE SILHOUETTE'S EDGE, in metres, at plane point (u, y), and its
+// slope. Bilinear inside the map. Past it, the value at the nearest map point less the
+// distance out: continuous, and never nearer the shape than the truth, since D changes by
+// at most a metre per metre -- the host's margin keeps the silhouette well inside.
+public float convShapeDistance(ConvectionInput c, float u, float y, out float2 slopeUY)
+{
+    float2 st   = float2(u, y) / c.cvShapeTexel + c.cvShapeOffset - 0.5f;
+    int2   last = c.cvShapeDim - int2(1, 1);
+    float2 q    = clamp(st, float2(0.0f, 0.0f), float2(last));
+    float  past = length(st - q);
+
+    float2 f0 = floor(q);
+    int2   i0 = min(int2(f0), last);
+    int2   i1 = min(i0 + int2(1, 1), last);
+    float2 fr = q - f0;
+
+    float3 s00 = convShapeTexel(c, i0.x, i0.y);
+    float3 s10 = convShapeTexel(c, i1.x, i0.y);
+    float3 s01 = convShapeTexel(c, i0.x, i1.y);
+    float3 s11 = convShapeTexel(c, i1.x, i1.y);
+    float3 blend = lerp(lerp(s00, s10, fr.x), lerp(s01, s11, fr.x), fr.y);
+
+    slopeUY = blend.yz;
+    return (blend.x - past) * c.cvShapeTexel;
+}
+
+// THE ROUNDED RIM IN ITS OWN TWO DIMENSIONS: a point `dIn` metres inside the silhouette and
+// `m` from the plane, against the profile. Returns its distance OUT of the profile --
+// negative inside -- and the step (along D, along m) to the profile's nearest point.
+//
+// MONOTONE, which the bound relies on: never increasing in dIn (deeper in the silhouette is
+// never further out of the cloud) and never decreasing in m.
+public float convShapeProfile(float dIn, float m, float rimR, out float2 stepDM)
+{
+    if (dIn >= rimR)
+    {
+        stepDM = float2(0.0f, rimR - m);   // under the cushion's face: straight to it
+        return m - rimR;
+    }
+    float2 w   = float2(dIn - rimR, m);
+    float  len = length(w);
+    float  gap = len - rimR;
+    stepDM = len > 1e-6f ? w * (-gap / len) : float2(0.0f, rimR);
+    return gap;
+}
+
+// The shape's distance to its surface, positive inside, and the billow read point at the
+// surface's nearest point -- in the PLANE'S frame (u, height, n) about the hero's centre,
+// height absolute, as the tower's is in its own. `plane` is the point's (u, n).
+float convShapeSurface(ConvectionInput c, float2 plane, float py, float above, out float3 x)
+{
+    float2 slopeUY;
+    float  dIn = convShapeDistance(c, plane.x, above, slopeUY);
+
+    float2 stepDM;
+    float  gap  = convShapeProfile(dIn, abs(plane.y), c.cvShapeRound, stepDM);
+    float  side = plane.y >= 0.0f ? 1.0f : -1.0f;
+
+    // Along the silhouette's own gradient for the in-plane part of the step. The slope is
+    // interpolated from central differences, so it is continuous, and it fades to nothing
+    // across a stroke's middle, where the two edges' gradients cancel -- which keeps the
+    // read point from jumping from one side of a thin stroke to the other.
+    x = float3(plane.x + stepDM.x * slopeUY.x,
+               py + stepDM.x * slopeUY.y,
+               plane.y + side * stepDM.y);
+    return -gap;
+}
+
+// A dome's distance to its surface, positive inside, and its billow read point relative
+// to the dome's centre, in whatever horizontal frame `rel` is given in. The same surface
+// point as the field's, from the closed form: up by v to the crown, out along the radius by
+// h to the wall.
+float convDomeSurface(float top, float radius, float shape, float2 rel, float r, float py,
+                      float above, out float3 x)
+{
+    float v  = convDomeHeight(top, radius, shape, r) - above;
+    float ra = convDomeRadiusAt(top, radius, shape, above);
     float d, shiftUp, shiftOut;
     if (ra < 0.0f)
     {
@@ -751,9 +939,610 @@ float convHeroInside(ConvectionInput c, float3 p, float above)
     }
     float2 radial = r > 1e-3f ? rel / r : float2(0.0f, 0.0f);
     float2 at = rel + radial * shiftOut;
-    float3 x = float3(at.x, p.y + shiftUp, at.y) + c.cvHeroSeed;
-    float heroLift = convLift(c, above, c.cvHeroBillow);
-    return convInside(c, d, heroLift, x, c.cvBillowScale * c.cvHeroBillow);
+    x = float3(at.x, py + shiftUp, at.y);
+    return d;
+}
+
+// The hero's tower: the dome with its own numbers.
+float convTowerSurface(ConvectionInput c, float2 rel, float r, float py, float above,
+                       out float3 x)
+{
+    return convDomeSurface(c.cvHeroTop, c.cvHeroRadius, c.cvShape, rel, r, py, above, x);
+}
+
+// ---------------------------------------------------------------------------
+// The hero's group (build 22)
+// ---------------------------------------------------------------------------
+//
+// ===========================================================================
+// TURRETS: MORE DOMES OF THE HERO'S FAMILY, placed by the host (heroGroup in
+// ConvectionField.h) on the hero's shoulders and in a flanking line into the wind. Each
+// is the closed-form dome, so it has the hero's exponent, flat base and exact wall
+// distance, and its union with the hero is a hard one -- turrets meet in creases, as
+// thermals do.
+//
+// ONE BILLOW FRAME FOR THE WHOLE GROUP: each turret reads the hero's cauliflower, about
+// the hero's centre and with its seed, at its own nearest surface point. So Hero
+// Variation changes every turret's lobes with the hero's, and a turret's billows are
+// those of the same cloud rather than a second one's.
+//
+// THEIR LOBES ARE SIZED BETWEEN THE FIELD'S AND THE HERO'S by radius, and never past the
+// hero's. That is the middle size the frame was missing -- and, with every top at most
+// the hero's, it is what keeps the group under convCeiling without a loop in it.
+// ===========================================================================
+public static const int kConvMaxTurrets = 5;
+
+public float4 convTurret(ConvectionInput c, int k)
+{
+    if (k == 0) return c.cvTurret0;
+    if (k == 1) return c.cvTurret1;
+    if (k == 2) return c.cvTurret2;
+    if (k == 3) return c.cvTurret3;
+    return c.cvTurret4;
+}
+
+// A turret's billows over the field's, amount and lobe size together.
+public float convTurretBillow(ConvectionInput c, float radius)
+{
+    float small = min(1.0f, c.cvHeroBillow);
+    return lerp(small, c.cvHeroBillow, saturate(radius / max(c.cvHeroRadius, 1.0f)));
+}
+
+// How far past its footprint a turret can put cloud: convHeroReach's arithmetic, AT THE
+// HERO'S BILLOW FACTOR rather than the turret's own. That is never nearer, and it leaves
+// the division out of a test every point near the group pays five times. Density and
+// bound compare SQUARES against it, the same squares, so they agree on it to the bit.
+public float convTurretReach(ConvectionInput c, float4 t)
+{
+    return t.z + 1.5f * c.cvBillow * c.cvHeroBillow + 2.0f * kConvEdgeSoft;
+}
+
+// A TURRET'S SMOOTH SURFACE: its distance, positive inside, and its billow read point in
+// the hero's billow frame -- about the hero's centre, and turned into the picture's plane
+// when a shape is on, which is the frame the hero reads its own in. `k` is its billows
+// over the field's. False beyond its reach, or over its top by more than any billow
+// lifts: d is at most top - above there, so it is outside, and the dome's two pows are
+// not paid. Most points near the hero's upper surface are there -- every turret is lower.
+bool convTurretSmooth(ConvectionInput c, float4 t, float3 p, float above, out float d,
+                      out float3 x, out float k)
+{
+    d = -1e30f;
+    x = float3(0.0f, 0.0f, 0.0f);
+    k = 1.0f;
+
+    float2 rel   = p.xz - t.xy;
+    float  r2    = dot(rel, rel);
+    float  reach = convTurretReach(c, t);
+    if (r2 >= reach * reach) return false;
+    if (above >= t.w + c.cvBillow * c.cvHeroBillow) return false;
+
+    float  r = sqrt(r2);
+    float3 own;
+    k = convTurretBillow(c, t.z);
+    d = convDomeSurface(t.w, t.z, c.cvShape, rel, r, p.y, above, own);
+
+    float3 w = own + float3(t.x - c.cvHeroAt.x, 0.0f, t.y - c.cvHeroAt.y);
+    if (c.cvShapeOn != 0)
+    {
+        float2 axisN = float2(-c.cvShapeAxisU.y, c.cvShapeAxisU.x);
+        w = float3(dot(w.xz, c.cvShapeAxisU), w.y, dot(w.xz, axisN));
+    }
+    x = w;
+    return true;
+}
+
+// ===========================================================================
+// THE GROUP IS ONE SURFACE WITH ONE CAULIFLOWER (build 22), and that is a measurement.
+//
+// The first version gave every turret its own billow and took the hard union of the
+// billowed towers. Near the group the density then cost 2.5x what it did without it:
+// the billow is the whole cost of a density evaluation, and a point in the shells of
+// three towers paid three. Taking the billows away from the turrets alone took two
+// thirds of that back.
+//
+// So the towers' SMOOTH surfaces are taken first, which is cheap, and the billow once:
+// D is the largest of their distances -- the union of the smooth towers -- and the read
+// point, lift and lobe are a softmax of theirs over kGroupBlend, weighted to the nearest
+// surface. On a crease both read points are near the point itself, so the blend barely
+// moves; away from one it is the other's alone. Continuous everywhere, so no seam, and
+// the tower-level crease becomes one more crease in a single cauliflower rather than
+// two cauliflowers cutting through each other.
+//
+// THE BOUND: convInside is at most D + lift, D is at most the largest of the towers'
+// distance bounds, and a weighted mean of lifts is at most the largest. So the group's
+// bound is the largest distance part plus the largest lift -- see convectionBound.
+//
+// ONLINE, as a softmax is: the weights are rescaled when a larger distance arrives, so
+// one pass over the towers keeps nothing per tower.
+// ===========================================================================
+public static const float kGroupBlend = 50.0f;   // m
+
+void convGroupFold(float d, float3 x, float lift, float lobe, inout float gMax,
+                   inout float gSum, inout float3 gX, inout float gLift, inout float gLobe)
+{
+    if (d > gMax)
+    {
+        float scale = exp((gMax - d) / kGroupBlend);
+        gSum  *= scale;
+        gX    *= scale;
+        gLift *= scale;
+        gLobe *= scale;
+        gMax   = d;
+    }
+    float wt = exp((d - gMax) / kGroupBlend);
+    gSum  += wt;
+    gX    += wt * x;
+    gLift += wt * lift;
+    gLobe += wt * lobe;
+}
+
+// ===========================================================================
+// THE MOAT: THE FIELD'S UPDRAFT SINKS UNDER THE GROUP.
+//
+// Round every tower of the group, the hero included, a factor on the field's updraft:
+// zero inside kMoatInner of its radius, rising smoothly to one at kMoatOuter. The least of
+// them, blended by cvMoat from none to all of it. A field cell centred under a tower is
+// gone; one at its edge is shrunk to a small cloud against its wall, which is where the
+// field's clouds merge with the group; one farther out is untouched. It is the
+// compensating subsidence round a vigorous updraft, and it is what stops a field tower
+// growing out through the hero's wall.
+//
+// THE BOUND IS UNTOUCHED: the factor is at most one and the updraft is not negative, so
+// the updraft's bound still bounds it. THE SLOPE IS NOT: the factor's own slope times an
+// updraft of at most one adds at most 1.5 / band per metre, only inside a ring. So the
+// density clamps to the cap plus that term where it is in a ring, and the bound divides by
+// the cap plus the largest term of any ring its box reaches -- the same argument as
+// convSlopeCap's, made per ring rather than for the whole sky, so the rest of the field's
+// bound is exactly what it was.
+// ===========================================================================
+public static const float kMoatInner = 0.75f;
+public static const float kMoatOuter = 1.3f;
+
+void convMoatRing(float2 xz, float2 at, float radius, inout float s, inout float2 gs,
+                  inout float slope)
+{
+    float2 d  = xz - at;
+    float  r2 = dot(d, d);
+    float  outer = kMoatOuter * radius;
+    if (!(r2 < outer * outer)) return;
+
+    float band  = outer - kMoatInner * radius;
+    float inner = outer - band;
+    slope = max(slope, 1.5f / band);
+
+    float r = sqrt(r2);
+    float t = saturate((r - inner) / band);
+    float f = t * t * (3.0f - 2.0f * t);
+    if (f < s)
+    {
+        s  = f;
+        gs = r > 1e-3f ? d * (6.0f * t * (1.0f - t) / (band * r)) : float2(0.0f, 0.0f);
+    }
+}
+
+// The factor on the field's updraft at world point xz, its gradient per metre, and what it
+// adds to the slope cap there.
+public float convMoat(ConvectionInput c, float2 xz, out float2 grad, out float slopeAdd)
+{
+    float  s     = 1.0f;
+    float2 gs    = float2(0.0f, 0.0f);
+    float  slope = 0.0f;
+    convMoatRing(xz, c.cvHeroAt, c.cvHeroRadius, s, gs, slope);
+    for (int k = 0; k < kConvMaxTurrets; ++k)
+    {
+        if (k >= c.cvTurretCount) break;
+        float4 t = convTurret(c, k);
+        convMoatRing(xz, t.xy, t.z, s, gs, slope);
+    }
+    grad     = gs * c.cvMoat;
+    slopeAdd = slope * c.cvMoat;
+    return 1.0f - c.cvMoat * (1.0f - s);
+}
+
+// The most the moat adds to the slope cap anywhere in the box whose footprint is [lo, hi].
+float convMoatSlopeOver(ConvectionInput c, float2 lo, float2 hi)
+{
+    float slope = 0.0f;
+    for (int k = -1; k < kConvMaxTurrets; ++k)
+    {
+        if (k >= c.cvTurretCount) break;
+        float4 t = k < 0 ? float4(c.cvHeroAt.x, c.cvHeroAt.y, c.cvHeroRadius, c.cvHeroTop)
+                         : convTurret(c, k);
+        // THE BAND AS convMoatRing FORMS IT, to the bit: a cap a rounding below the
+        // density's would be a bound a rounding short.
+        float2 gap   = max(max(lo - t.xy, t.xy - hi), float2(0.0f, 0.0f));
+        float  outer = kMoatOuter * t.z;
+        float  band  = outer - kMoatInner * t.z;
+        if (dot(gap, gap) < outer * outer)
+            slope = max(slope, 1.5f / band);
+    }
+    return slope * c.cvMoat;
+}
+
+// The hero, in its own frame: it stands still while the field drifts, so its billows are
+// sampled about its own centre and do not slide across it. -1e30 beyond its reach.
+//
+// WITH A SHAPE, THE FRAME IS THE PLANE'S, for the tower too: Decay blends the two surfaces
+// and their read points, and a blend of points in two frames would slide the cauliflower
+// round the axis as it ran. So under Turn to Camera the whole hero turns with the eye,
+// cauliflower and all, and a camera move does not make the billows swim across the shape.
+//
+// SPLIT IN TWO SINCE BUILD 22: the smooth surface here, the billow in convHeroInside, so
+// the hero's group can take its towers' smooth surfaces and billow once (convGroupInside).
+bool convHeroSmooth(ConvectionInput c, float3 p, float above, out float d, out float3 x,
+                    out float amount, out float lobe)
+{
+    d      = -1e30f;
+    x      = float3(0.0f, 0.0f, 0.0f);
+    amount = c.cvHeroBillow;
+    lobe   = c.cvHeroBillow;
+
+    float2 rel = p.xz - c.cvHeroAt;
+    float  r   = length(rel);
+    if (r >= convHeroReachAll(c)) return false;
+
+    if (c.cvShapeOn == 0)
+    {
+        d = convTowerSurface(c, rel, r, p.y, above, x);
+    }
+    else
+    {
+        float2 axisN = float2(-c.cvShapeAxisU.y, c.cvShapeAxisU.x);
+        float2 plane = float2(dot(rel, c.cvShapeAxisU), dot(rel, axisN));
+
+        if (c.cvShapeDecay >= 1.0f)
+        {
+            d = convTowerSurface(c, plane, r, p.y, above, x);   // forgotten: the tower, exactly
+        }
+        else
+        {
+            float3 xs;
+            float  ds = convShapeSurface(c, plane, p.y, above, xs);
+            if (c.cvShapeDecay > 0.0f)
+            {
+                float3 xt;
+                float  dt = convTowerSurface(c, plane, r, p.y, above, xt);
+                d = lerp(ds, dt, c.cvShapeDecay);
+                x = lerp(xs, xt, c.cvShapeDecay);
+            }
+            else
+            {
+                d = ds;
+                x = xs;
+            }
+            amount = c.cvHeroBillow * lerp(c.cvShapeBillow, 1.0f, c.cvShapeDecay);
+            lobe   = c.cvHeroBillow * lerp(max(c.cvShapeBillow, kShapeLobeFloor), 1.0f,
+                                           c.cvShapeDecay);
+        }
+    }
+    return true;
+}
+
+// The hero alone: its smooth surface and its billow, exactly as before build 22.
+float convHeroInside(ConvectionInput c, float3 p, float above)
+{
+    float  d, amount, lobe;
+    float3 x;
+    if (!convHeroSmooth(c, p, above, d, x, amount, lobe)) return -1e30f;
+    float heroLift = convLift(c, above, amount);
+    return convInside(c, d, heroLift, x + c.cvHeroSeed, c.cvBillowScale * lobe);
+}
+
+// The hero with its group: every tower's smooth surface, blended, and one billow. -1e30
+// when the point is beyond every tower's reach. `nearGroup` is the density's test of the
+// group's circle: outside it no turret can be near, and the loop is not run.
+//
+// ===========================================================================
+// ONE CALL TO THE BILLOW, WHATEVER THE POINT, AND THAT IS ALSO A MEASUREMENT.
+//
+// Where no turret is near, the point is the hero's alone, and the numbers handed to the
+// billow are the hero's own -- no blend arithmetic touches them, so it is the hero's
+// surface exactly. A first version RETURNED convHeroInside there instead, to skip the
+// blend, and near the group the density got 30% SLOWER: a warp whose points split between
+// the two returns ran both billows. The billow is the whole cost, and on a GPU two call
+// sites of it are two costs.
+// ===========================================================================
+float convGroupInside(ConvectionInput c, float3 p, float above, bool nearGroup)
+{
+    float  gMax = -1e30f, gSum = 0.0f, gLift = 0.0f, gLobe = 0.0f;
+    float3 gX   = float3(0.0f, 0.0f, 0.0f);
+
+    float  d, amount, lobe;
+    float3 x;
+    bool   anyTurret = false;
+    for (int k = 0; k < kConvMaxTurrets; ++k)
+    {
+        if (!nearGroup || k >= c.cvTurretCount) break;
+        float kt;
+        if (convTurretSmooth(c, convTurret(c, k), p, above, d, x, kt))
+        {
+            convGroupFold(d, x, convLift(c, above, kt), kt, gMax, gSum, gX, gLift, gLobe);
+            anyTurret = true;
+        }
+    }
+
+    bool  hero     = convHeroSmooth(c, p, above, d, x, amount, lobe);
+    float heroLift = hero ? convLift(c, above, amount) : 0.0f;
+    if (!hero && !anyTurret) return -1e30f;
+
+    float3 at;
+    float  lift, lobeAt;
+    if (!anyTurret)
+    {
+        gMax = d;   at = x;   lift = heroLift;   lobeAt = lobe;
+    }
+    else
+    {
+        if (hero) convGroupFold(d, x, heroLift, lobe, gMax, gSum, gX, gLift, gLobe);
+        at = gX / gSum;   lift = gLift / gSum;   lobeAt = gLobe / gSum;
+    }
+    return convInside(c, gMax, lift, at + c.cvHeroSeed, c.cvBillowScale * lobeAt);
+}
+
+// ---------------------------------------------------------------------------
+// Mamma (build 23)
+// ---------------------------------------------------------------------------
+//
+// ===========================================================================
+// POUCHES HANGING FROM THE UNDERSIDE, WHERE THERE IS CLOUD OVERHEAD TO HANG THEM FROM.
+//
+// Cloudy air sinking into drier air below sags out of the base in round lobes. So the
+// underside's sag at a point is three things multiplied:
+//
+//   the POUCH there   a jittered lattice of hanging hemispheres in the pattern's frame,
+//                     one per slot, overlapping so the underside is mostly lobes with
+//                     sharp creases between them -- and SMOOTH, with no cauliflower,
+//                     which is what makes mamma read as mamma. Each sags and fades over
+//                     half a cell's life, so a timelapse shows them come and go.
+//   the ENVELOPE      how far inside the cloud the base above is: no pouch hangs where
+//                     there is no cloud overhead, and they shallow to nothing towards the
+//                     edge of what there is, so none hangs past its cloud's footprint.
+//   cvMammaDepth      the deepest they hang, from Mamma and Pouch Size.
+//
+// Below the base, a point is inside a pouch when it is less than the sag below the base,
+// and the density ramps up from the pouch's surface as it does from the base. ABOVE THE
+// BASE, the ramp starts at the pouch's bottom rather than at the base -- otherwise every
+// pouch would hang from a forty-metre band of thinning cloud.
+// ===========================================================================
+public static const float kPouchJitter = 0.6f;   // centres within +-0.3 of the slot's middle
+public static const float kPouchRadius = 0.68f;  // slot widths; must stay <= 1 + (1 - J)/2
+
+// THE 3x3 IS EXACT, as the cells' is: a slot two away holds a centre at least
+// 1 + (1 - kPouchJitter)/2 = 1.2 from this slot's edge, past kPouchRadius.
+public float convPouches(ConvectionInput c, float2 q)
+{
+    float2 g  = q / c.cvPouchSize;
+    int2   gi = int2(floor(g));
+    float  r2 = kPouchRadius * kPouchRadius;
+
+    float deepest = 0.0f;
+    for (int j = -1; j <= 1; ++j)
+    for (int i = -1; i <= 1; ++i)
+    {
+        int2   slot = gi + int2(i, j);
+        float2 ctr  = float2(slot) + 0.5f + (hash22(slot, kConvSaltPouch) - 0.5f) * kPouchJitter;
+        float2 d    = g - ctr;
+        float  t2   = dot(d, d) / r2;
+        if (t2 >= 1.0f) continue;
+
+        // HALF A CELL'S LIFE, and never quite gone: a pouch shrinks to a third rather than
+        // vanishing, so the underside stays lobed while each one sags and lifts.
+        float2 h    = hash22(slot, kConvSaltSag);
+        float  life = convLife(frac(2.0f * c.cvAge + h.x));
+        float  sag  = lerp(0.3f, 1.0f, life) * lerp(0.6f, 1.0f, h.y);
+        deepest = max(deepest, sag * sqrt(1.0f - t2));
+    }
+    return deepest;
+}
+
+// HOW FAR INSIDE THE CLOUD THE BASE IS, over xz: the smooth surfaces' distance a metre over
+// the condensation level, with no billow -- the field's with its moat, the hero's, its
+// group's. Positive where there is cloud overhead to hang a pouch from.
+//
+// IN TWO PARTS, because the field's needs the lattice and the density above the base has
+// already run it for the same column: the lattice depends on xz alone. So the density hands
+// its own updraft to convFieldBaseInside, and only the pouches below the base -- where there
+// is no field evaluation to borrow -- run the lattice here.
+public static const float kMammaProbe = 1.0f;   // m over the base the inside is read at
+
+float convFieldBaseInside(ConvectionInput c, float w, float2 slope, float cap)
+{
+    float v     = convTowerHeight(c, w) - kMammaProbe;
+    float delta = w - convNeededUpdraft(c, kMammaProbe);
+    return convSurfaceDistance(v, delta, min(length(slope), cap));
+}
+
+float convGroupBaseInside(ConvectionInput c, float2 xz, bool nearGroup)
+{
+    float best = -1e30f;
+    if (c.cvHeroTop > 0.0f)
+    {
+        float  above = kMammaProbe;
+        float3 p = float3(xz.x, c.cvBase + above, xz.y);
+        float  d, amount, lobe;
+        float3 x;
+        if (convHeroSmooth(c, p, above, d, x, amount, lobe)) best = max(best, d);
+        for (int k = 0; k < kConvMaxTurrets; ++k)
+        {
+            if (!nearGroup || k >= c.cvTurretCount) break;
+            float kt;
+            if (convTurretSmooth(c, convTurret(c, k), p, above, d, x, kt)) best = max(best, d);
+        }
+    }
+    return best;
+}
+
+float convBaseInside(ConvectionInput c, float2 xz, bool nearGroup)
+{
+    float best = -1e30f;
+    if (c.cvHeroAlone == 0)
+    {
+        float  m       = 1.0f;
+        float  capMoat = 0.0f;
+        float2 gMoat   = float2(0.0f, 0.0f);
+        bool   moated  = c.cvMoat > 0.0f && nearGroup;
+        if (moated) m = convMoat(c, xz, gMoat, capMoat);
+        if (m > 0.0f)
+        {
+            float2 slope;
+            float  w   = convUpdraftGrad(c, xz - c.cvDrift, slope);
+            float  cap = convSlopeCap(c);
+            if (moated)
+            {
+                slope = slope * m + gMoat * w;
+                w     = w * m;
+                cap  += capMoat;
+            }
+            best = convFieldBaseInside(c, w, slope, cap);
+        }
+    }
+    return max(best, convGroupBaseInside(c, xz, nearGroup));
+}
+
+// THE UNDERSIDE'S SAG over xz, in metres below the base: zero where nothing hangs. The
+// pouch is taken first, being nine hashes against the base's whole lattice -- and where
+// even a pouch under the deepest cloud could not reach `below` metres down, the lattice is
+// not run at all: the caller only needs to know the sag does not reach it.
+public float convMammaSag(ConvectionInput c, float2 xz, bool nearGroup, float below)
+{
+    float pouch = convPouches(c, xz - c.cvDrift);
+    if (c.cvMammaDepth * pouch <= below) return 0.0f;
+    return convMammaSagOf(c, pouch, convBaseInside(c, xz, nearGroup));
+}
+
+// The sag from a pouch and the base's inside, however the inside was found.
+float convMammaSagOf(ConvectionInput c, float pouch, float inside)
+{
+    if (inside <= 0.0f) return 0.0f;
+    return c.cvMammaDepth * pouch * smoothstep(0.0f, 0.6f * c.cvPouchSize, inside);
+}
+
+// ---------------------------------------------------------------------------
+// Pileus and velum (build 24)
+// ---------------------------------------------------------------------------
+//
+// ===========================================================================
+// THE HERO'S CAP AND VEIL: SMOOTH, THIN, AND WHERE THE TOWER IS NOT.
+//
+// PILEUS is a lens over the crown, kPileusRadius of the hero's radius across: its middle
+// follows the hero's own dome, flattened by kPileusFlatten and lifted by the gap, and it is
+// thickest over the crown and thins to nothing at its rim. So it drapes a little, as a cap
+// does, and the cauliflower pushes up into it where the billows reach the gap.
+//
+// VELUM is a veil at a height on the tower, kVelumExtent of the hero's radius across,
+// fading out over its outer half, and humped up near the tower, which is pushing through
+// it. The tower and the veil are a union, as everything in this layer is, so where they
+// meet the tower is simply cloud.
+//
+// BOTH ARE THINNER THAN THE TOWER, by a density factor, and that is the look: a silky
+// sheet against a cauliflower tower. Their thickness wanders by up to 40% on a
+// kilometre-scale noise, so neither is a machined disc, and they carry no billows.
+//
+// The inside measure is vertical -- half the thickness less the distance from the middle
+// -- which is the true distance for a sheet this flat, and only shortens the soft edge on
+// the lens's slopes.
+// ===========================================================================
+public static const float kPileusRadius  = 0.6f;    // hero radii
+public static const float kPileusFlatten = 0.6f;    // the cap follows the dome at 0.6x the radius
+public static const float kPileusDensity = 0.45f;   // of the layer's extinction
+// SEEN AT 3 RADII: from the default orbit, 4 km out, the camera stood under the veil, which
+// filled the top of the frame as an overcast sheet blazing in the backlight. SEEN AT 2.2: its
+// near edge still crossed the top of that frame, as a ruled diagonal -- a circle's edge in
+// perspective. A veil reads as one when it is round the tower, the eye is outside it, and
+// its edge is not a circle. So it reaches PAST THE TOWER'S WALL by between 75% and all of
+// (kVelumExtent - 1) radii, by bearing, and thins out over the outer 60% of that.
+public static const float kVelumExtent   = 1.9f;    // hero radii from the centre, at the farthest
+public static const float kVelumDensity  = 0.22f;
+public static const float kCapSoft       = 15.0f;   // m
+
+// A thickness factor in [0.6, 1]: |gradientNoise| is at most 1.5.
+float convCapGrain(ConvectionInput c, float2 rel, float scale)
+{
+    float n = gradientNoise(float3(rel.x / scale + c.cvHeroSeed.x * 1e-3f, 0.37f,
+                                   rel.y / scale + c.cvHeroSeed.z * 1e-3f));
+    return saturate(0.8f + 0.1333f * n);
+}
+
+// The cap's and the veil's density, not an inside: they are thinner than the layer, so
+// the caller takes the larger of this and the layer's own density.
+public float convCapDensity(ConvectionInput c, float3 p, float above)
+{
+    float2 rel  = p.xz - c.cvHeroAt;
+    float  r2   = dot(rel, rel);
+    float  R    = c.cvHeroRadius;
+    float  best = 0.0f;
+
+    if (c.cvPileusThick > 0.0f)
+    {
+        float rp = kPileusRadius * R;
+        if (r2 < rp * rp)
+        {
+            float r    = sqrt(r2);
+            float lens = 1.0f - r2 / (rp * rp);
+            float mid  = c.cvPileusGap + convHeroHeight(c, r * kPileusFlatten);
+            float most = 0.5f * c.cvPileusThick * lens;            // before the grain
+            if (abs(above - mid) < most)
+            {
+                float half = most * convCapGrain(c, rel, 900.0f);
+                float s    = half - abs(above - mid);
+                if (s > 0.0f) best = max(best, kPileusDensity * smoothstep(0.0f, kCapSoft, s));
+            }
+        }
+    }
+
+    if (c.cvVelumThick > 0.0f)
+    {
+        float ext = kVelumExtent * R;
+        if (r2 < ext * ext)
+        {
+            float r    = sqrt(r2);
+
+            // THE OUTLINE WANDERS WITH BEARING, on a noise read round the unit circle so it is
+            // continuous all the way round. |gradientNoise| <= 1.5, so this is in [0.75, 1].
+            float2 dir  = r > 1e-3f ? rel / r : float2(1.0f, 0.0f);
+            float  wob  = gradientNoise(float3(1.7f * dir.x + c.cvHeroSeed.x * 1e-3f, 2.3f,
+                                               1.7f * dir.y + c.cvHeroSeed.z * 1e-3f));
+            float  edge = R + (ext - R) * saturate(0.875f + 0.0833f * wob);
+            float fade = 1.0f - smoothstep(R + 0.4f * (edge - R), edge, r);
+            float hump = 0.5f * c.cvVelumThick * (1.0f - smoothstep(R, 2.0f * R, r));
+            float mid  = c.cvVelumHeight + hump;
+            float most = 0.5f * c.cvVelumThick * fade;
+            if (abs(above - mid) < most)
+            {
+                float half = most * convCapGrain(c, rel, 2500.0f);
+                float s    = half - abs(above - mid);
+                if (s > 0.0f) best = max(best, kVelumDensity * smoothstep(0.0f, kCapSoft, s));
+            }
+        }
+    }
+    return c.cvSigma * best;
+}
+
+// THEIR BOUND OVER A BOX: each one's factor where the box can reach it, from the heights it
+// can span. The cap's middle falls with the radius, so over the whole lens it spans its rim's
+// height to its crown's; the veil's rises by at most its hump.
+float convCapBound(ConvectionInput c, float3 lo, float3 hi, float low, float high)
+{
+    float2 nearGap = max(max(lo.xz - c.cvHeroAt, c.cvHeroAt - hi.xz), float2(0.0f, 0.0f));
+    float  gap2    = dot(nearGap, nearGap);
+    float  R       = c.cvHeroRadius;
+    float  best    = 0.0f;
+
+    if (c.cvPileusThick > 0.0f)
+    {
+        float rp     = kPileusRadius * R;
+        float bottom = c.cvPileusGap + convHeroHeight(c, rp * kPileusFlatten) - 0.5f * c.cvPileusThick;
+        float top    = c.cvPileusGap + c.cvHeroTop + 0.5f * c.cvPileusThick;
+        if (gap2 < rp * rp && high >= bottom && low <= top) best = max(best, kPileusDensity);
+    }
+    if (c.cvVelumThick > 0.0f)
+    {
+        float ext    = kVelumExtent * R;
+        float bottom = c.cvVelumHeight - 0.5f * c.cvVelumThick;
+        float top    = c.cvVelumHeight + c.cvVelumThick;
+        if (gap2 < ext * ext && high >= bottom && low <= top) best = max(best, kVelumDensity);
+    }
+    return c.cvSigma * best * 1.00001f;
 }
 
 // ===========================================================================
@@ -779,60 +1568,135 @@ public float convectionDensity(ConvectionInput c, float3 p)
 {
     float above = p.y - c.cvBase;
 
-    // NOTHING BELOW THE CONDENSATION LEVEL, EXACTLY. That line is the flat base.
-    if (above < 0.0f || above > convCeiling(c)) return 0.0f;
+    // NOTHING BELOW THE CONDENSATION LEVEL, EXACTLY -- that line is the flat base -- BUT THE
+    // POUCHES, which hang at most cvMammaDepth under it (build 23). Zero depth is the old line.
+    if (above < -c.cvMammaDepth || above > convCeiling(c)) return 0.0f;
+
+    // THE HERO'S GROUP IS LOCAL (build 22): one circle round the hero covers every turret's
+    // reach and every ring of the moat, and a point outside it skips both, exactly. MEASURED:
+    // without it, looking away from the group, the frame took 20% longer at Connection 1 --
+    // the rings and reaches, run for every density in the sky.
+    float2 fromHero  = p.xz - c.cvHeroAt;
+    bool   nearGroup = dot(fromHero, fromHero) < c.cvGroupReach * c.cvGroupReach;
+
+    // MAMMA (build 23): under the base, the pouch alone. MEASURED: the slab reaching down to
+    // the deepest pouch put every ray through that band, and with the base's lattice run at
+    // every step there the deck's frame took 75% longer. A pouch that cannot reach this deep
+    // even under the deepest cloud now skips the lattice -- see convMammaSag.
+    if (c.cvMammaDepth > 0.0f && above < 0.0f)
+    {
+        float hang = convMammaSag(c, p.xz, nearGroup, -above) + above;   // up from its surface
+        if (hang <= 0.0f) return 0.0f;
+        return c.cvSigma * sqrt(saturate(hang / kConvBaseRamp))
+             * smoothstep(0.0f, kConvEdgeSoft, hang);
+    }
 
     // A LACUNOSE SHEET WEARS SMALLER BILLOWS: see kConvSheetBillowCut. The bound keeps the
     // full lift, which is only ever more. Without lacunarity the factor is exactly one.
     float lift   = convLift(c, above, 1.0f - kConvSheetBillowCut * c.cvLacunarity);
     float inside = -1e30f;
 
+    // MAMMA'S BASE TEST, from the field's own lattice when the point is in the base ramp:
+    // see convBaseInside. -1e30 is what that function's field part says where the field is
+    // not run, so the two agree everywhere.
+    bool  rampBand  = c.cvMammaDepth > 0.0f && above < kConvBaseRamp;
+    float baseField = -1e30f;
+
     // THE CELL FIELD. The updraft and its slope give the distance to the surface; the
     // billow is evaluated only in the shell where it can move the answer.
     if (c.cvHeroAlone == 0)
     {
-        float2 q = p.xz - c.cvDrift;
-        float2 slope;
-        float  w = convUpdraftGrad(c, q, slope);
+        // THE MOAT (build 22): the updraft sinks under the hero's group. In the world's
+        // frame, not the pattern's -- the group stands where the hero does, and the cells
+        // drift through it unless the hero drifts with them.
+        //
+        // TAKEN FIRST, because WHERE IT IS ZERO THE FIELD IS NOTHING and its lattice need not
+        // run: an updraft of zero with a slope of zero -- the ring's slope is zero inside its
+        // inner radius too -- is a tower of zero, d = -above, and a lift of at most 0.7 above
+        // never brings that past zero. So the branch below would leave `inside` at -1e30,
+        // which is what skipping it leaves. That is every point in the group's middle, the
+        // hero's interior included, where the field's lattice was paid and thrown away.
+        float  m       = 1.0f;
+        float  capMoat = 0.0f;
+        float2 gMoat   = float2(0.0f, 0.0f);
+        bool   moated  = c.cvMoat > 0.0f && nearGroup;
+        if (moated) m = convMoat(c, p.xz, gMoat, capMoat);
 
-        // THE SLOPE CLAMPED TO WHAT THE BOUND DIVIDES BY: see convSlopeCap. Without
-        // organization the true slope is always under it, and this is the old line.
-        float v     = convTowerHeight(c, w) - above;
-        float delta = w - convNeededUpdraft(c, above);
-        float d     = convSurfaceDistance(v, delta, min(length(slope), convSlopeCap(c)));
-
-        if (d + lift > 0.0f)
+        if (m > 0.0f)
         {
-            // THE BILLOW IS READ AT THE NEAREST SURFACE POINT, NOT AT p. Read at p, it
-            // varies along the normal as fast as across it, so pockets of high billow sit
-            // out in the air, detached: the first render of side billows was a tower
-            // wrapped in loose flecks. Read at the surface, each point along a normal gets
-            // the same billow, which makes the displacement a relief ON the surface --
-            // round lobes attached to the wall, the cauliflower.
-            //
-            // The nearest point on the plane through both intercepts is
-            // p + d^2 (y/v - g/delta), with g the updraft's gradient. Each term is at
-            // most |d| long, and each ratio is taken only where its divisor is not
-            // vanishing -- where it is, d is too.
-            float  shiftUp = abs(v) > 1e-6f ? d * (d / v) : 0.0f;
-            float2 shiftAcross = abs(delta) > 1e-12f ? slope * (-d * (d / delta))
-                                                     : float2(0.0f, 0.0f);
-            inside = convInside(c, d, lift,
-                                float3(q.x + shiftAcross.x, p.y + shiftUp, q.y + shiftAcross.y),
-                                c.cvBillowScale);
+            float2 q = p.xz - c.cvDrift;
+            float2 slope;
+            float  w   = convUpdraftGrad(c, q, slope);
+            float  cap = convSlopeCap(c);
+            if (moated)
+            {
+                slope = slope * m + gMoat * w;
+                w     = w * m;
+                cap  += capMoat;
+            }
+            if (rampBand) baseField = convFieldBaseInside(c, w, slope, cap);
+
+            // THE SLOPE CLAMPED TO WHAT THE BOUND DIVIDES BY: see convSlopeCap. Without
+            // organization the true slope is always under it, and this is the old line.
+            float v     = convTowerHeight(c, w) - above;
+            float delta = w - convNeededUpdraft(c, above);
+            float d     = convSurfaceDistance(v, delta, min(length(slope), cap));
+
+            if (d + lift > 0.0f)
+            {
+                // THE BILLOW IS READ AT THE NEAREST SURFACE POINT, NOT AT p. Read at p, it
+                // varies along the normal as fast as across it, so pockets of high billow sit
+                // out in the air, detached: the first render of side billows was a tower
+                // wrapped in loose flecks. Read at the surface, each point along a normal gets
+                // the same billow, which makes the displacement a relief ON the surface --
+                // round lobes attached to the wall, the cauliflower.
+                //
+                // The nearest point on the plane through both intercepts is
+                // p + d^2 (y/v - g/delta), with g the updraft's gradient. Each term is at
+                // most |d| long, and each ratio is taken only where its divisor is not
+                // vanishing -- where it is, d is too.
+                float  shiftUp = abs(v) > 1e-6f ? d * (d / v) : 0.0f;
+                float2 shiftAcross = abs(delta) > 1e-12f ? slope * (-d * (d / delta))
+                                                         : float2(0.0f, 0.0f);
+                inside = convInside(c, d, lift,
+                                    float3(q.x + shiftAcross.x, p.y + shiftUp, q.y + shiftAcross.y),
+                                    c.cvBillowScale);
+            }
         }
     }
 
+    // THE HERO'S CAP AND VEIL (build 24): thinner than the layer, so the larger density wins.
+    float capDensity = 0.0f;
+    if (c.cvHeroTop > 0.0f && (c.cvPileusThick > 0.0f || c.cvVelumThick > 0.0f))
+        capDensity = convCapDensity(c, p, above);
+
+    // THE HERO, and its group (build 22). Without turrets, the hero's own path, exactly as it
+    // was. The branch is the same for every point of a launch, so it costs no divergence.
     if (c.cvHeroTop > 0.0f && inside < kConvEdgeSoft)
     {
-        inside = max(inside, convHeroInside(c, p, above));
+        if (c.cvTurretCount > 0)
+            inside = max(inside, convGroupInside(c, p, above, nearGroup));
+        else
+            inside = max(inside, convHeroInside(c, p, above));
     }
 
-    if (inside <= 0.0f) return 0.0f;
+    if (inside <= 0.0f) return capDensity;
+
+    // THE BASE RAMP STARTS AT THE POUCH'S BOTTOM where one hangs; with none, at the base.
+    // Taken only here, where there is cloud for it to change, and from the field's own
+    // lattice above. MEASURED: with a second lattice for it, pouches 16 m deep cost a deck
+    // seen from below 22%.
+    float sag = 0.0f;
+    if (rampBand)
+    {
+        float pouch = convPouches(c, p.xz - c.cvDrift);
+        if (pouch > 0.0f)
+            sag = convMammaSagOf(c, pouch, max(baseField, convGroupBaseInside(c, p.xz, nearGroup)));
+    }
 
     float edge    = smoothstep(0.0f, kConvEdgeSoft, inside);
-    float profile = sqrt(saturate(above / kConvBaseRamp));
-    return c.cvSigma * profile * edge;
+    float profile = sqrt(saturate((above + sag) / kConvBaseRamp));
+    return max(c.cvSigma * profile * edge, capDensity);
 }
 
 // ---------------------------------------------------------------------------
@@ -982,15 +1846,83 @@ public float convUpdraftBound(ConvectionInput c, float2 q0, float2 q1)
     return field + 1e-5f;
 }
 
+// THE SHAPE'S DISTANCE, BOUNDED OVER A BOX: the deepest the box's footprint on the plane
+// reaches into the silhouette, against the nearest the box comes to the plane. The profile
+// is monotone in both (convShapeProfile), so that pair bounds every point in the box.
+//
+// THE DEEPEST IS THE FOOTPRINT'S CENTRE PLUS THE SLOPE BOUND TIMES ITS HALF DIAGONAL, not a
+// search: a small box is tight and a big one is loose, and loose is only slower.
+float convShapeBound(ConvectionInput c, float3 lo, float3 hi, float low, float high)
+{
+    float2 ea = lo.xz - c.cvHeroAt;
+    float2 eb = hi.xz - c.cvHeroAt;
+    float2 au = c.cvShapeAxisU;
+    float2 an = float2(-au.y, au.x);
+
+    float uLo = min(ea.x * au.x, eb.x * au.x) + min(ea.y * au.y, eb.y * au.y);
+    float uHi = max(ea.x * au.x, eb.x * au.x) + max(ea.y * au.y, eb.y * au.y);
+    float nLo = min(ea.x * an.x, eb.x * an.x) + min(ea.y * an.y, eb.y * an.y);
+    float nHi = max(ea.x * an.x, eb.x * an.x) + max(ea.y * an.y, eb.y * an.y);
+    float mMin = (nLo <= 0.0f && nHi >= 0.0f) ? 0.0f : min(abs(nLo), abs(nHi));
+
+    float2 slopeUnused;
+    float2 halfSpan = float2(0.5f * (uHi - uLo), 0.5f * (high - low));
+    float  dMax = convShapeDistance(c, 0.5f * (uLo + uHi), 0.5f * (low + high), slopeUnused)
+                + kShapeLipschitz * length(halfSpan);
+
+    float2 stepUnused;
+    return -convShapeProfile(dMax, mMin, c.cvShapeRound, stepUnused);
+}
+
+// ONE TURRET OVER A BOX: the hero's tower's two cases, from the dome's closed form. Every
+// factor is monotone in the distance from the turret's centre, so the box's nearest point
+// to it bounds them; the lift is taken at the box's top. The distance part and the lift
+// come back apart, for the group's bound (convGroupInside). False past its reach.
+bool convTurretBound(ConvectionInput c, float4 t, float3 lo, float3 hi, float low, float high,
+                     out float dPart, out float lift)
+{
+    dPart = -1e30f;
+    lift  = 0.0f;
+    float2 nearGap = max(max(lo.xz - t.xy, t.xy - hi.xz), float2(0.0f, 0.0f));
+    float  gap2    = dot(nearGap, nearGap);
+    float  reach   = convTurretReach(c, t);
+    if (gap2 >= reach * reach) return false;
+
+    float rMin  = sqrt(gap2);
+    float tower = convDomeHeight(t.w, t.z, c.cvShape, rMin);
+    float ra    = convDomeRadiusAt(t.w, t.z, c.cvShape, low);
+    lift = convLift(c, high, convTurretBillow(c, t.z));
+    if (ra < 0.0f || rMin >= ra)
+    {
+        float hMin = ra < 0.0f ? 1e30f : rMin - ra;
+        dPart = -convDistanceFloor(low - tower, hMin);
+    }
+    else
+    {
+        dPart = max(tower - low, 0.0f);
+    }
+    return true;
+}
+
 public float convectionBound(ConvectionInput c, float3 lo, float3 hi)
 {
     float low  = lo.y - c.cvBase;
     float high = hi.y - c.cvBase;
     float ceiling = convCeiling(c);
 
-    if (high < 0.0f || low > ceiling) return 0.0f;
+    if (high < -c.cvMammaDepth || low > ceiling) return 0.0f;
+
+    // MAMMA (build 23): A BOX BELOW THE BASE IS BOUNDED AS ONE AT IT. A pouch hangs only
+    // where the base over it is inside the cloud, and every inside below is at least that at
+    // height zero; the pouch's own density is at most the ramp from its deepest bottom.
+    bool pouches = c.cvMammaDepth > 0.0f && low < kConvBaseRamp;
     low  = max(low, 0.0f);
-    high = min(high, ceiling);
+    high = min(max(high, 0.0f), ceiling);
+
+    // THE CAP AND THE VEIL (build 24), whose density is the larger of theirs and the layer's.
+    float capBound = 0.0f;
+    if (c.cvHeroTop > 0.0f && (c.cvPileusThick > 0.0f || c.cvVelumThick > 0.0f))
+        capBound = convCapBound(c, lo, hi, low, high);
 
     // THE LIFT AT THE TOP OF THE BOX: it is non-decreasing in height, base cap included.
     float lift   = convLift(c, high, 1.0f);
@@ -1018,8 +1950,10 @@ public float convectionBound(ConvectionInput c, float3 lo, float3 hi)
 
         if (wHi < need)
         {
-            // The density's own clamp, so this floor holds for the distance it computes.
+            // The density's own clamp, so this floor holds for the distance it computes --
+            // with the moat's term wherever the box reaches a ring of it (build 22).
             float slopeMax = convSlopeCap(c);
+            if (c.cvMoat > 0.0f) slopeMax += convMoatSlopeOver(c, lo.xz, hi.xz);
             float floorD = convDistanceFloor(low - tower, (need - wHi) / slopeMax);
             inside = lift - floorD;
         }
@@ -1033,37 +1967,72 @@ public float convectionBound(ConvectionInput c, float3 lo, float3 hi)
     // the distance from its centre, so the box's nearest point to the centre bounds it.
     if (c.cvHeroTop > 0.0f)
     {
+        float groupD = -1e30f, groupLift = 0.0f;   // the hero's, then the group's
+
         float2 nearGap = max(max(lo.xz - c.cvHeroAt, c.cvHeroAt - hi.xz), float2(0.0f, 0.0f));
         float  rMin    = length(nearGap);
 
-        if (rMin < convHeroReach(c))
+        if (rMin < convHeroReachAll(c))
         {
             float tower = convHeroHeight(c, rMin);
             float ra    = convHeroRadiusAt(c, low);
 
             float heroLift = convLift(c, high, c.cvHeroBillow);
-            float heroIn;
+            float towerD;
             if (ra < 0.0f || rMin >= ra)
             {
                 // Outside everywhere: over the top, or beyond the wall at every height
                 // the box reaches. See the field's case above.
                 float hMin = ra < 0.0f ? 1e30f : rMin - ra;
-                heroIn = heroLift - convDistanceFloor(low - tower, hMin);
+                towerD = -convDistanceFloor(low - tower, hMin);
             }
             else
             {
-                heroIn = max(tower - low, 0.0f) + heroLift;
+                towerD = max(tower - low, 0.0f);
             }
-            inside = max(inside, heroIn);
+
+            // THE SHAPE: its own bound, blended with the tower's as the density blends the
+            // two, then the lift the density uses. The tower's bound above is taken in the
+            // world's frame and the density's tower in the plane's, which is the same
+            // number: the tower is round.
+            if (c.cvShapeOn != 0 && c.cvShapeDecay < 1.0f)
+            {
+                float shapeD = convShapeBound(c, lo, hi, low, high);
+                float amount = c.cvHeroBillow * lerp(c.cvShapeBillow, 1.0f, c.cvShapeDecay);
+                groupD    = lerp(shapeD, towerD, c.cvShapeDecay);
+                groupLift = convLift(c, high, amount);
+            }
+            else
+            {
+                groupD    = towerD;
+                groupLift = heroLift;
+            }
         }
+
+        // THE HERO'S GROUP (build 22): each turret a dome, bounded as the hero's tower is,
+        // and the group's billow at most the largest distance part plus the largest lift --
+        // see convGroupInside. Without turrets that is the hero's own bound, as it was.
+        for (int k = 0; k < kConvMaxTurrets; ++k)
+        {
+            if (k >= c.cvTurretCount) break;
+            float turretD, turretLift;
+            if (convTurretBound(c, convTurret(c, k), lo, hi, low, high, turretD, turretLift))
+            {
+                groupD    = max(groupD, turretD);
+                groupLift = max(groupLift, turretLift);
+            }
+        }
+        if (groupD > -1e29f) inside = max(inside, groupD + groupLift);
     }
 
     inside += 1e-3f;
-    if (inside <= 0.0f) return 0.0f;
+    if (inside <= 0.0f) return capBound;
 
-    float edge    = smoothstep(0.0f, kConvEdgeSoft, inside);
-    float profile = sqrt(saturate(high / kConvBaseRamp));
-    return c.cvSigma * profile * edge * 1.00001f;
+    // A POUCH'S EDGE IS ITS OWN, not the cloud's above it, so it is taken at one; and the
+    // ramp from the deepest bottom any pouch can have.
+    float edge    = pouches ? 1.0f : smoothstep(0.0f, kConvEdgeSoft, inside);
+    float profile = sqrt(saturate((pouches ? high + c.cvMammaDepth : high) / kConvBaseRamp));
+    return max(c.cvSigma * profile * edge * 1.00001f, capBound);
 }
 
 #endif // MISTYTUNE_CONVECTION_LIB_SLANG

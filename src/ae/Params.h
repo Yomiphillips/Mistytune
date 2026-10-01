@@ -76,6 +76,9 @@ namespace ae {
 //   TEXT    (name, id, label)                       a static-text readout; see
 //                                                   addStaticText below
 //   SPARE   (name, id)                              reserved, hidden, unused
+//   LAYER   (name, id, label)                       another layer, as a source of
+//                                                   pixels (build 21). No value to
+//                                                   read: pre-render checks it out.
 //
 // IDs ARE PERMANENT AND ARE NEVER REUSED. They are written out explicitly rather
 // than derived from the row's position, precisely so that deleting a row cannot
@@ -87,7 +90,7 @@ namespace ae {
 // real; Quality and Output last because they are settings rather than creative
 // controls.
 
-#define MISTYTUNE_PARAM_TABLE(TOPIC, ENDTOPIC, FLOAT, ANGLE, POPUP, CHECK, TEXT, SPARE) \
+#define MISTYTUNE_PARAM_TABLE(TOPIC, ENDTOPIC, FLOAT, ANGLE, POPUP, CHECK, TEXT, SPARE, LAYER) \
     /* THE CLASSIFIER READOUT: what the user has made, named by the cloud atlas. FIRST, \
      * OUTSIDE EVERY GROUP, because a readout in a collapsed group is a readout nobody  \
      * reads -- it sat at the end of Output until build 17. Static text, which AE has   \
@@ -384,6 +387,18 @@ namespace ae {
     /* Which cauliflower it wears. CONTINUOUS, so keyframing it morphs the lobes. */    \
     FLOAT   (CumulusHeroVariation, 624, "Hero Variation",                               \
              -1000000.0, 1000000.0, 0.0, 10.0, 0.0,  2)                                 \
+    /* HERO CONNECTION (build 22): how much the hero belongs to the field. 0 IS THE     \
+     * LONE TOWER it always was. Rising, turrets grow on its shoulders, a flanking line \
+     * of smaller towers steps down from it INTO THE WIND -- Wind From swings it round  \
+     * -- and the field sinks under the group, so no cell grows through it. A          \
+     * Pareidolia shape stands where the shoulders would, so they give way to it. See   \
+     * heroGroup() in src/engine/ConvectionField.h. Inserted before the Organization    \
+     * group, beside the hero's controls; minor 12. */                                  \
+    FLOAT   (CumulusHeroConnection, 636, "Hero Connection",                             \
+             0.0, 1.0,        0.0, 1.0,          0.6,     3)                            \
+    /* THE HERO RIDES THE WIND WITH THE FIELD, from Hero Position at time zero, so in  \
+     * animation the field no longer slides past it. The orbit rig follows it. */       \
+    CHECK   (CumulusHeroDrift,  637, "Hero Drifts With Wind", true)                     \
     /* HOW THE CONVECTIVE CELLS ARE ARRANGED (build 20): rows, waves, gaps and holes,   \
      * which is most of what the WMO's varieties name. The hero ignores it. Inserted    \
      * before the spares like the hero; minor 10. ROWS ALONG DEFAULTS TO 90 for the     \
@@ -407,6 +422,66 @@ namespace ae {
     FLOAT   (CumulusOrgLacunarity, 634, "Lacunarity",                                   \
              0.0, 1.0,        0.0, 1.0,          0.0,     3)                            \
     ENDTOPIC(CumulusOrgGroupEnd, 635)                                                   \
+    /* MAMMA (build 23): pouches hanging from the layer's underside, wherever it has     \
+     * cloud overhead -- under a deck, under the hero and its group. Smooth, creased     \
+     * between, and each sags and lifts over half a Cell Lifetime. 0 IS NONE and the    \
+     * base is the flat condensation level it was. POUCH SIZE is one pouch's width; they \
+     * hang at most 0.8 of it, at Mamma 1. Inserted before Pareidolia; minor 13. */      \
+    TOPIC   (MammaGroup,        661, "Mamma")                                           \
+    FLOAT   (Mamma,             662, "Mamma",                                           \
+             0.0, 1.0,        0.0, 1.0,          0.0,     3)                            \
+    /* A divisor, floored at 20 m in the engine; the valid minimum says so too. */       \
+    FLOAT   (MammaPouchSize,    663, "Pouch Size",                                      \
+             20.0, 100000.0,  50.0, 3000.0,      450.0,   0)                            \
+    SPARE   (MammaSpare1,       664)                                                    \
+    SPARE   (MammaSpare2,       665)                                                    \
+    ENDTOPIC(MammaGroupEnd,     666)                                                    \
+    /* PILEUS AND VELUM (build 24): the hero's cap and veil, smooth and thin where the   \
+     * tower is cauliflower. PILEUS is a lens just over the crown -- Pileus Gap is from  \
+     * its highest billows to the cap's middle; below zero the turrets push into it.    \
+     * VELUM                                                                            \
+     * is a wide veil the tower rises through, at Velum Height of the hero's height.     \
+     * Both are the hero's, so Hero Cloud Off hides them. 0 IS NONE. Minor 14. */        \
+    TOPIC   (CapGroup,          667, "Pileus and Velum")                                \
+    FLOAT   (Pileus,            668, "Pileus",                                          \
+             0.0, 1.0,        0.0, 1.0,          0.0,     3)                            \
+    FLOAT   (PileusGap,         669, "Pileus Gap",                                      \
+             -10000.0, 10000.0, -600.0, 1500.0,  150.0,   0)                            \
+    FLOAT   (Velum,             670, "Velum",                                           \
+             0.0, 1.0,        0.0, 1.0,          0.0,     3)                            \
+    FLOAT   (VelumHeight,       671, "Velum Height",                                    \
+             0.0, 1.0,        0.0, 1.0,          0.6,     3)                            \
+    SPARE   (CapSpare1,         672)                                                    \
+    SPARE   (CapSpare2,         673)                                                    \
+    ENDTOPIC(CapGroupEnd,       674)                                                    \
+    /* PAREIDOLIA (build 21): another layer's ALPHA or LUMINANCE becomes the hero's     \
+     * silhouette. The pixels above Threshold, cropped to their box, are fitted inside  \
+     * Hero Width by the hero's height, stood on the base and inflated into a cloud --  \
+     * see src/engine/Pareidolia.h. NO SOURCE IS NO SHAPE, and the hero is the tower it \
+     * always was; so is Hero Cloud Off. Inserted before the spares, like the groups    \
+     * above it; minor 11. DECAY 1 is the ordinary hero, so keyframing it melts the     \
+     * shape back into a cumulus. SHAPE BILLOWS IS THE LEGIBILITY KNOB, and 0.2 is a    \
+     * measurement: at the hero's own 0.35 a face's eyes closed over. */                \
+    TOPIC   (PareidoliaGroup,   640, "Pareidolia")                                      \
+    LAYER   (PareidoliaSource,  641, "Shape Source")                                    \
+    POPUP   (PareidoliaChannel, 642, "Shape From", 4, 1,                                \
+             "Alpha|Luminance|Inverted Alpha|Inverted Luminance")                       \
+    FLOAT   (PareidoliaThreshold, 643, "Threshold",                                     \
+             0.0, 1.0,        0.0, 1.0,          0.5,     3)                            \
+    FLOAT   (PareidoliaDecay,   644, "Decay",                                           \
+             0.0, 1.0,        0.0, 1.0,          0.0,     3)                            \
+    /* The rims' radius over half the shape's smaller side: 1 is as deep as it is tall. */\
+    FLOAT   (PareidoliaDepth,   645, "Depth",                                           \
+             0.02, 2.0,       0.1, 1.5,          0.6,     2)                            \
+    FLOAT   (PareidoliaBillows, 646, "Shape Billows",                                   \
+             0.0, 1.0,        0.0, 1.0,          0.2,     3)                            \
+    /* TURN TO CAMERA keeps the face on the lens whatever the camera does. FIXED faces  \
+     * an eye standing at Facing Bearing on the Orbit dial: 0 is the default camera. */ \
+    POPUP   (PareidoliaFacing,  647, "Facing", 2, 1, "Turn to Camera|Fixed Bearing")    \
+    ANGLE   (PareidoliaBearing, 648, "Facing Bearing", 0.0)                             \
+    SPARE   (PareidoliaSpare1,  649)                                                    \
+    SPARE   (PareidoliaSpare2,  650)                                                    \
+    ENDTOPIC(PareidoliaGroupEnd, 659)                                                   \
     SPARE   (CumulusSpare1,     614)                                                    \
     SPARE   (CumulusSpare2,     615)                                                    \
     SPARE   (CumulusSpare3,     616)                                                    \
@@ -486,6 +561,7 @@ namespace ae {
 #define MT_ENUM_CHECK(name, id, label, d)                       kMistytune##name,
 #define MT_ENUM_TEXT(name, id, label)                           kMistytune##name,
 #define MT_ENUM_SPARE(name, id)                                 kMistytune##name,
+#define MT_ENUM_LAYER(name, id, label)                          kMistytune##name,
 
 enum ParamIndex {
     // INDEX 0 IS THE INPUT LAYER, ALWAYS, and PARAMS_SETUP does not add it -- AE
@@ -495,7 +571,7 @@ enum ParamIndex {
 
     MISTYTUNE_PARAM_TABLE(MT_ENUM_TOPIC, MT_ENUM_ENDTOPIC, MT_ENUM_FLOAT,
                           MT_ENUM_ANGLE, MT_ENUM_POPUP, MT_ENUM_CHECK,
-                          MT_ENUM_TEXT, MT_ENUM_SPARE)
+                          MT_ENUM_TEXT, MT_ENUM_SPARE, MT_ENUM_LAYER)
 
     kMistytuneNumParams
 };
@@ -508,6 +584,7 @@ enum ParamIndex {
 #undef MT_ENUM_CHECK
 #undef MT_ENUM_TEXT
 #undef MT_ENUM_SPARE
+#undef MT_ENUM_LAYER
 
 // The permanent IDs, in their own namespace. Generated from the same rows so an ID
 // cannot be typed twice or skipped.
@@ -519,11 +596,12 @@ enum ParamIndex {
 #define MT_ID_CHECK(name, id, label, d)                       kMistytuneId##name = (id),
 #define MT_ID_TEXT(name, id, label)                           kMistytuneId##name = (id),
 #define MT_ID_SPARE(name, id)                                 kMistytuneId##name = (id),
+#define MT_ID_LAYER(name, id, label)                          kMistytuneId##name = (id),
 
 enum ParamId {
     MISTYTUNE_PARAM_TABLE(MT_ID_TOPIC, MT_ID_ENDTOPIC, MT_ID_FLOAT,
                           MT_ID_ANGLE, MT_ID_POPUP, MT_ID_CHECK,
-                          MT_ID_TEXT, MT_ID_SPARE)
+                          MT_ID_TEXT, MT_ID_SPARE, MT_ID_LAYER)
     kMistytuneIdLast
 };
 
@@ -535,6 +613,7 @@ enum ParamId {
 #undef MT_ID_CHECK
 #undef MT_ID_TEXT
 #undef MT_ID_SPARE
+#undef MT_ID_LAYER
 
 // ---------------------------------------------------------------------------
 // The controls the classifier reads
@@ -560,6 +639,10 @@ constexpr PF_ParamFlags classifierFlags(int index) {
         case kMistytuneCumulusHero:
         case kMistytuneCumulusHeroWidth:
         case kMistytuneCumulusHeroHeight:
+        case kMistytuneMamma:
+        case kMistytuneMammaPouchSize:
+        case kMistytunePileus:
+        case kMistytuneVelum:
         case kMistytuneCumulusOrgMode:
         case kMistytuneCumulusOrgCoherence:
         case kMistytuneCumulusOrgWaveAmp:
@@ -698,13 +781,21 @@ inline PF_Err addStaticText(PF_InData* in_data, const char* label, A_long id) {
         if (spareErr) return spareErr;                                        \
     } while (0);
 
+// NO SOURCE BY DEFAULT: a layer the user has not picked is no shape, and the hero stays
+// the tower it always was. PF_ADD_LAYER does not clear `def`, so it is cleared here.
+#define MT_SETUP_LAYER(name, id, label)                                       \
+    do {                                                                      \
+        AEFX_CLR_STRUCT(def);                                                 \
+        PF_ADD_LAYER(label, PF_LayerDefault_NONE, id);                        \
+    } while (0);
+
 inline PF_Err paramsSetup(PF_InData* in_data, PF_OutData* out_data) {
     PF_ParamDef def;
     AEFX_CLR_STRUCT(def);
 
     MISTYTUNE_PARAM_TABLE(MT_SETUP_TOPIC, MT_SETUP_ENDTOPIC, MT_SETUP_FLOAT,
                           MT_SETUP_ANGLE, MT_SETUP_POPUP, MT_SETUP_CHECK,
-                          MT_SETUP_TEXT, MT_SETUP_SPARE)
+                          MT_SETUP_TEXT, MT_SETUP_SPARE, MT_SETUP_LAYER)
 
     // AE COMPARES THIS AGAINST THE NUMBER OF PARAMETERS ACTUALLY ADDED, and the
     // count comes from the same table that added them -- so it cannot be one out.
@@ -720,6 +811,7 @@ inline PF_Err paramsSetup(PF_InData* in_data, PF_OutData* out_data) {
 #undef MT_SETUP_CHECK
 #undef MT_SETUP_TEXT
 #undef MT_SETUP_SPARE
+#undef MT_SETUP_LAYER
 
 // ---------------------------------------------------------------------------
 // Checkout, generated
@@ -746,6 +838,7 @@ struct ParamValues {
 #define MT_READ_ENDTOPIC(name, id)                              /* no value */
 #define MT_READ_SPARE(name, id)                                 /* not read */
 #define MT_READ_TEXT(name, id, label)                           /* a readout */
+#define MT_READ_LAYER(name, id, label)                          /* checked out at pre-render */
 
 #define MT_READ_FLOAT(name, id, label, vn, vx, sn, sx, d, p)                   \
     if (!err) {                                                                \
@@ -800,7 +893,7 @@ inline PF_Err readParams(PF_InData* in_data, ParamValues& out) {
 
     MISTYTUNE_PARAM_TABLE(MT_READ_TOPIC, MT_READ_ENDTOPIC, MT_READ_FLOAT,
                           MT_READ_ANGLE, MT_READ_POPUP, MT_READ_CHECK,
-                          MT_READ_TEXT, MT_READ_SPARE)
+                          MT_READ_TEXT, MT_READ_SPARE, MT_READ_LAYER)
 
     return err;
 }
@@ -813,6 +906,7 @@ inline PF_Err readParams(PF_InData* in_data, ParamValues& out) {
 #undef MT_READ_CHECK
 #undef MT_READ_TEXT
 #undef MT_READ_SPARE
+#undef MT_READ_LAYER
 
 // THE SAME VALUES FROM THE PARAMS ARRAY, which the UI commands are handed and the render
 // commands are not. The same conversions as the checkout above -- angles out of 16.16,
@@ -821,6 +915,7 @@ inline PF_Err readParams(PF_InData* in_data, ParamValues& out) {
 #define MT_ARR_ENDTOPIC(name, id)                              /* no value */
 #define MT_ARR_SPARE(name, id)                                 /* not read */
 #define MT_ARR_TEXT(name, id, label)                           /* a readout */
+#define MT_ARR_LAYER(name, id, label)                          /* pixels, not a value */
 #define MT_ARR_FLOAT(name, id, label, vn, vx, sn, sx, d, p)                    \
     if (params[kMistytune##name])                                              \
         out.v[kMistytune##name] = params[kMistytune##name]->u.fs_d.value;
@@ -839,7 +934,7 @@ inline void readParamsFromArray(PF_ParamDef* const params[], ParamValues& out) {
     if (!params) return;
     MISTYTUNE_PARAM_TABLE(MT_ARR_TOPIC, MT_ARR_ENDTOPIC, MT_ARR_FLOAT,
                           MT_ARR_ANGLE, MT_ARR_POPUP, MT_ARR_CHECK,
-                          MT_ARR_TEXT, MT_ARR_SPARE)
+                          MT_ARR_TEXT, MT_ARR_SPARE, MT_ARR_LAYER)
 }
 
 #undef MT_ARR_TOPIC
@@ -850,6 +945,7 @@ inline void readParamsFromArray(PF_ParamDef* const params[], ParamValues& out) {
 #undef MT_ARR_CHECK
 #undef MT_ARR_TEXT
 #undef MT_ARR_SPARE
+#undef MT_ARR_LAYER
 
 // ---------------------------------------------------------------------------
 // Values -> the engine's structs
@@ -1021,6 +1117,19 @@ inline cloud::ConvectionParams toConvection(const ParamValues& p) {
     out.heroWidth     = static_cast<float>(p.v[kMistytuneCumulusHeroWidth]);
     out.heroHeight    = static_cast<float>(p.v[kMistytuneCumulusHeroHeight]);
     out.heroVariation = static_cast<float>(p.v[kMistytuneCumulusHeroVariation]);
+    // Clamped in heroGroup, which also turns a NaN into none.
+    out.heroConnection = static_cast<float>(p.v[kMistytuneCumulusHeroConnection]);
+    out.heroDrift      = p.v[kMistytuneCumulusHeroDrift] > 0.5;
+
+    // MAMMA. Clamped in mammaDepth(), which also turns a NaN into none.
+    out.mamma     = static_cast<float>(p.v[kMistytuneMamma]);
+    out.pouchSize = static_cast<float>(p.v[kMistytuneMammaPouchSize]);
+
+    // PILEUS AND VELUM. Clamped in deriveConvection.
+    out.pileus      = static_cast<float>(p.v[kMistytunePileus]);
+    out.pileusGap   = static_cast<float>(p.v[kMistytunePileusGap]);
+    out.velum       = static_cast<float>(p.v[kMistytuneVelum]);
+    out.velumHeight = static_cast<float>(p.v[kMistytuneVelumHeight]);
 
     // THE ORGANIZATION GROUP. The popup is 0-based here, and the bearings are not wrapped,
     // for the reason Wind From is not. Everything is clamped in resolveOrganization.
@@ -1033,6 +1142,19 @@ inline cloud::ConvectionParams toConvection(const ParamValues& p) {
     out.organization.waveAngle     = static_cast<float>(p.v[kMistytuneCumulusOrgWaveAngle]);
     out.organization.gapFraction   = static_cast<float>(p.v[kMistytuneCumulusOrgGap]);
     out.organization.lacunarity    = static_cast<float>(p.v[kMistytuneCumulusOrgLacunarity]);
+
+    // PAREIDOLIA. The picture is not here -- the effect checks the layer out at pre-render
+    // -- only how to read it. Popups 0-based and clamped like the rest; the numbers are
+    // clamped in resolveShape. The bearing is the slider's; under Turn to Camera the
+    // effect replaces it once the camera is known (placeShape).
+    const int channel = static_cast<int>(std::lround(p.v[kMistytunePareidoliaChannel]));
+    out.pareidolia.channel   = channel < 0 ? 0 : (channel > 3 ? 3 : channel);
+    out.pareidolia.threshold = static_cast<float>(p.v[kMistytunePareidoliaThreshold]);
+    out.pareidolia.decay     = static_cast<float>(p.v[kMistytunePareidoliaDecay]);
+    out.pareidolia.depth     = static_cast<float>(p.v[kMistytunePareidoliaDepth]);
+    out.pareidolia.billows   = static_cast<float>(p.v[kMistytunePareidoliaBillows]);
+    out.pareidolia.facing    = std::lround(p.v[kMistytunePareidoliaFacing]) == 1 ? 1 : 0;
+    out.pareidolia.bearing   = static_cast<float>(p.v[kMistytunePareidoliaBearing]);
 
     // Polarity and coverage are clamped to [0, 1] in SlangBridge.h, where the kernel's
     // bound needs them to be; billow octaves have no control and keep the default.

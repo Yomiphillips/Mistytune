@@ -19,6 +19,9 @@
 
 #include "AirMapPlan.h"
 
+// The pareidolia map is HOST data the request only points at; see `shapeMap` below.
+namespace plugin::cloud { struct ShapeMap; }
+
 namespace plugin::kernel {
 
 // WHERE A PIXEL'S FOUR FLOATS SIT IN MEMORY, and it is not the same on both
@@ -145,6 +148,24 @@ struct RenderRequest {
     // no cumulus at all -- the layer is off, or the air is too dry to saturate under the
     // lid. See src/engine/ConvectionField.h.
     cloud::ConvectionDerived convection;
+
+    // ===================================================================
+    // PAREIDOLIA (build 21): the hero's silhouette from another layer's matte.
+    //
+    // `shapeMap` IS THE ONE THING A CALLER SETS, and it is HOST memory the caller owns for
+    // the length of the render: the effect builds it from the layer it checked out, the
+    // CLI from a file. Null is no shape. THE DEVICE NEVER DEREFERENCES IT -- this struct
+    // is a kernel argument, and deriveRenderInputs() reads what the kernel needs out of it
+    // on the host: the placement into `shape`, by value, and the texels' address into
+    // `shapeBuffer`, which renderCuda then replaces with a device copy, as it does the
+    // transmittance table. `shapeHash` is the map's own, which keys that upload and the
+    // shadow maps' build: the picture is not a parameter, so nothing else would notice it
+    // change.
+    // ===================================================================
+    const cloud::ShapeMap* shapeMap = nullptr;
+    cloud::ShapeGeometry   shape;
+    const void*            shapeBuffer = nullptr;
+    uint64_t               shapeHash   = 0;
 
     // THE REASON ALL FIVE ARE HERE RATHER THAN COMPUTED WHERE THEY ARE USED: the
     // marshalling into the kernel's structs runs ON THE DEVICE, inside renderPixel,

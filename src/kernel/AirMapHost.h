@@ -86,6 +86,10 @@ AirMapPlan planAirMapsFor(const RenderRequest& req, SceneT& scene,
     airMapKeyAppend(key, &scene.medium_0, sizeof scene.medium_0);
     airMapKeyAppend(key, &scene.medium2_0, sizeof scene.medium2_0);
     airMapKeyAppend(key, req.drift.xz, sizeof req.drift.xz);
+
+    // THE PAREIDOLIA MAP'S CONTENT, which the medium's bytes only point at: an animated
+    // picture keeps its buffer and changes what is in it.
+    airMapKeyAppend(key, &req.shapeHash, sizeof req.shapeHash);
     return plan;
 }
 

@@ -168,6 +168,32 @@
 //
 // A MINOR BUMP BECAUSE THE PARAMETER LIST CHANGED: an Organization topic was inserted
 // into the Ice group and one into the Cumulus group, each before its spares.
+// MINOR 11, BUILD 21 -- PAREIDOLIA. Another layer's alpha or luminance becomes the hero's
+// silhouette: a signed distance map built on the host, stood up facing the camera,
+// inflated with rounded rims, and billowed. Decay melts it back into the ordinary hero.
+//
+// A MINOR BUMP FOR BOTH REASONS: a Pareidolia topic was inserted into the Cumulus group
+// before its spares, and out_flags LOST PF_OutFlag_PIX_INDEPENDENT, which stopped being
+// true the moment the effect read another layer.
+// MINOR 12, BUILD 22 -- HERO CONNECTION. The hero stops looking set down on the field:
+// turrets on its shoulders, a flanking line of smaller towers stepping down into the
+// wind, the field's updraft sinking under the group, and the hero drifting with the wind.
+//
+// A MINOR BUMP BECAUSE THE PARAMETER LIST CHANGED: Hero Connection and Hero Drifts With
+// Wind were inserted after Hero Variation, before the Organization topic.
+// MINOR 13, BUILD 23 -- MAMMA. Pouches hanging from the cumulus layer's underside wherever
+// it has cloud overhead: smooth hemispheres on a lattice of their own, creased between,
+// sagging and lifting over half a cell's life.
+//
+// A MINOR BUMP BECAUSE THE PARAMETER LIST CHANGED: a Mamma topic was inserted after the
+// cumulus Organization group, before Pareidolia.
+// MINOR 14, BUILD 24 -- PILEUS AND VELUM. The hero's cap and veil: a smooth thin lens over
+// its crown and a wide thin veil it rises through, both thinner than the tower.
+//
+// A MINOR BUMP BECAUSE THE PARAMETER LIST AND THE FLAGS CHANGED: a Pileus and Velum topic
+// was inserted after Mamma, before Pareidolia, and out_flags gained
+// PF_OutFlag_NON_PARAM_VARY. Without it AE played back one frame of an effect with nothing
+// keyframed, so nothing drifted.
 #define PLUGIN_MAJOR 0
-#define PLUGIN_MINOR 10
-#define PLUGIN_BUILD 20
+#define PLUGIN_MINOR 14
+#define PLUGIN_BUILD 24

@@ -301,6 +301,11 @@ PL_TEST(EveryReadoutFitsInAnAfterEffectsParameterName) {
         f.convection.organization.lacunarity    = next();
         f.ice.organization.mode                 = static_cast<int32_t>(next() * 4.0f);
         f.ice.organization.coherence            = next();
+        // Mamma (build 23), a word after all of them.
+        f.convection.mamma = next() < 0.5f ? 0.0f : next();
+        // The hero's cap and veil (build 24): with mamma, the longest names there are.
+        f.convection.pileus = next() < 0.5f ? 0.0f : next();
+        f.convection.velum  = next() < 0.5f ? 0.0f : next();
 
         const std::string text = describe(f);
         sweep.require(!text.empty() && text.size() <= static_cast<size_t>(kReadoutMaxChars), i);
@@ -314,4 +319,51 @@ PL_TEST(ASmallBufferIsNeverOverrun) {
     std::memset(tiny, 'x', sizeof(tiny));
     describeSky(classifySky(effectDefaults()), tiny, static_cast<int>(sizeof(tiny)));
     PL_CHECK(std::strlen(tiny) == sizeof(tiny) - 1);
+}
+
+// MAMMA ARE NAMED AFTER THE VARIETIES, as the atlas writes them, and only when they hang.
+// The deck is the effect's default sky with closed cells: the longest name it makes.
+PL_TEST(MammaAreNamedAfterTheVarieties) {
+    FieldParams f = effectDefaults();
+    f.convection.heroMode = 0;
+    f.convection.polarity = 1.0f;
+    f.convection.coverage = 0.9f;
+    f.convection.organization.mode          = 2;     // waves: undulatus
+    f.convection.organization.waveAmplitude = 0.8f;
+
+    const std::string flat = describe(f);
+    PL_CHECK(flat.find("mam") == std::string::npos);
+
+    f.convection.mamma = 0.6f;
+    const std::string sagging = describe(f);
+    PL_CHECK(sagging.find("mam") != std::string::npos);
+    PL_CHECK(sagging.find("mam") > sagging.find(" un"));
+    PL_CHECK(sagging.size() <= static_cast<size_t>(kReadoutMaxChars));
+
+    // ON THE HERO TOO, and on a layer the air cannot make, not at all.
+    f.convection.heroMode = 1;
+    PL_CHECK(describe(f).find("mam") != std::string::npos);
+    f.physics.surfaceHumidity = 0.05f;
+    PL_CHECK(describe(f).find("mam") == std::string::npos);
+}
+
+// PILEUS AND VELUM ARE THE HERO'S: named with it, after mamma as the atlas orders features
+// and accessory clouds, and not on a field without one.
+PL_TEST(TheCapAndVeilAreNamedWithTheHero) {
+    FieldParams f = effectDefaults();
+    f.convection.mamma  = 0.5f;
+    f.convection.pileus = 0.7f;
+    f.convection.velum  = 0.4f;
+    const std::string all = describe(f);
+    PL_CHECK(all.find("pil") != std::string::npos);
+    PL_CHECK(all.find("vel") != std::string::npos);
+    PL_CHECK(all.find("mam") < all.find("pil"));
+    PL_CHECK(all.find("pil") < all.find("vel"));
+    PL_CHECK(all.size() <= static_cast<size_t>(kReadoutMaxChars));
+
+    f.convection.heroMode = 0;
+    const std::string field = describe(f);
+    PL_CHECK(field.find("pil") == std::string::npos);
+    PL_CHECK(field.find("vel") == std::string::npos);
+    PL_CHECK(field.find("mam") != std::string::npos);
 }

@@ -185,6 +185,124 @@ std::vector<std::pair<const char*, ConvectionInput_0>> organizedCases() {
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// PAREIDOLIA'S MAP, ANALYTIC (build 21)
+// ---------------------------------------------------------------------------
+//
+// NOT THE ENGINE'S BUILDER: this test links no host code, and it does not need it. The
+// kernel takes any map whose neighbouring texels differ by at most one -- the property its
+// slope bound is built on -- and an exact signed distance function sampled on the grid has
+// it. So the silhouette is a disc with an eye punched out of it and a bar sticking out of
+// its side, in texel units, as max and min of exact distances, with the slopes by central
+// differences as the host writes them.
+constexpr int   kShapeW = 180, kShapeH = 200;
+constexpr float kShapeTexel = 10.0f;     // m
+constexpr float kShapeOffsetU = 90.0f, kShapeOffsetY = 16.0f;
+
+// Texel-edge coordinates (texel i's centre is i + 0.5): the signed distance, + inside.
+float shapeSdf(float x, float y) {
+    const float disc = 80.0f - std::hypot(x - 90.0f, y - 100.0f);
+    const float qx = std::fabs(x - 135.0f) - 35.0f, qy = std::fabs(y - 50.0f) - 10.0f;
+    const float bar = -(std::hypot(std::max(qx, 0.0f), std::max(qy, 0.0f)) + std::min(std::max(qx, qy), 0.0f));
+    const float eye = std::hypot(x - 65.0f, y - 125.0f) - 12.0f;
+    return std::min(std::max(disc, bar), eye);
+}
+
+std::vector<float> shapeTexels() {
+    std::vector<float> d(static_cast<size_t>(kShapeW) * kShapeH);
+    for (int j = 0; j < kShapeH; ++j)
+        for (int i = 0; i < kShapeW; ++i) d[static_cast<size_t>(j) * kShapeW + i] = shapeSdf(i + 0.5f, j + 0.5f);
+    auto at = [&](int i, int j) { return d[static_cast<size_t>(j) * kShapeW + i]; };
+    std::vector<float> t(d.size() * 4, 0.0f);
+    for (int j = 0; j < kShapeH; ++j) {
+        for (int i = 0; i < kShapeW; ++i) {
+            const int il = i > 0 ? i - 1 : i, ir = i < kShapeW - 1 ? i + 1 : i;
+            const int jd = j > 0 ? j - 1 : j, ju = j < kShapeH - 1 ? j + 1 : j;
+            float* o = t.data() + (static_cast<size_t>(j) * kShapeW + i) * 4;
+            o[0] = at(i, j);
+            o[1] = (at(ir, j) - at(il, j)) / static_cast<float>(ir - il);
+            o[2] = (at(i, ju) - at(i, jd)) / static_cast<float>(ju - jd);
+        }
+    }
+    return t;
+}
+
+// The hero wears the map: facing `bearingDeg` on the orbit dial, as the host resolves it.
+void addShape(ConvectionInput_0& c, const Device<float>& map, float bearingDeg, float decay,
+              float billow) {
+    const float b = bearingDeg * 0.01745329252f;
+    c.cvShapeOn_0        = 1;
+    c.cvShapeMap_0       = map.ro();
+    c.cvShapeDim_0       = make_int2(kShapeW, kShapeH);
+    c.cvShapeOffset_0    = make_float2(kShapeOffsetU, kShapeOffsetY);
+    c.cvShapeTexel_0     = kShapeTexel;
+    c.cvShapeAxisU_0     = make_float2(std::cos(b), -std::sin(b));
+    c.cvShapeRound_0     = 400.0f;
+    c.cvShapeHalfWidth_0 = 800.0f;
+    c.cvShapeDecay_0     = decay;
+    c.cvShapeBillow_0    = billow;
+}
+
+// A hero with room for the map: 1640 m tall at most, 800 m either side of its axis.
+ConvectionInput_0 shapeHero(float polarity, bool alone) {
+    ConvectionInput_0 c = defaults(polarity);
+    c.cvHeroAt_0     = make_float2(-300.0f, 700.0f);
+    c.cvHeroRadius_0 = 900.0f;
+    c.cvHeroTop_0    = 1700.0f;
+    c.cvHeroSeed_0   = make_float3(1731.0f, 613.0f, 2477.0f);
+    c.cvHeroBillow_0 = 1.6f;
+    c.cvHeroAlone_0  = alone ? 1 : 0;
+    return c;
+}
+
+// ---------------------------------------------------------------------------
+// HERO CONNECTION'S GROUP, IN THE KERNEL'S OWN TERMS (build 22)
+// ---------------------------------------------------------------------------
+//
+// The host's layout at Connection 1 with the wind from 250 degrees, written out rather
+// than linked -- TestConvection checks the host's half. Shoulders can be left out, as the
+// host leaves them out under a pareidolia shape.
+void addGroup(ConvectionInput_0& c, float moat, bool shoulders) {
+    const float b  = 250.0f * 0.01745329252f;
+    const float ux = std::sin(b), uz = std::cos(b);
+    const float vx = uz, vz = -ux;
+    struct Spec { float along, across, radius, top; bool shoulder; };
+    const Spec specs[] = {
+        { -0.30f,  0.80f, 0.45f, 0.80f, true  },
+        {  0.35f, -0.78f, 0.40f, 0.68f, true  },
+        {  1.25f,  0.12f, 0.55f, 0.72f, false },
+        {  2.05f, -0.10f, 0.42f, 0.52f, false },
+        {  2.70f,  0.10f, 0.32f, 0.36f, false },
+    };
+    float4* slots[] = { &c.cvTurret0_0, &c.cvTurret1_0, &c.cvTurret2_0, &c.cvTurret3_0, &c.cvTurret4_0 };
+    const float R = c.cvHeroRadius_0;
+    int n = 0;
+    for (const Spec& s : specs) {
+        if (s.shoulder && !shoulders) continue;
+        *slots[n++] = make_float4(c.cvHeroAt_0.x + R * (s.along * ux + s.across * vx),
+                                  c.cvHeroAt_0.y + R * (s.along * uz + s.across * vz),
+                                  R * s.radius, c.cvHeroTop_0 * s.top);
+    }
+    c.cvTurretCount_0 = n;
+    c.cvMoat_0        = moat;
+
+    // THE GROUP'S CIRCLE, as SlangBridge.h sizes it -- without it the density looks for no
+    // group at all, and every check below would pass on the lone hero.
+    const float lift = 1.5f * c.cvBillow_0 * c.cvHeroBillow_0 + 24.0f;
+    float reach = 1.3f * R;
+    for (int k = 0; k < n; ++k) {
+        const float4 t = *slots[k];
+        const float out = std::max(t.z + lift, 1.3f * t.z);
+        reach = std::max(reach, std::hypot(t.x - c.cvHeroAt_0.x, t.y - c.cvHeroAt_0.y) + out);
+    }
+    c.cvGroupReach_0 = reach * 1.01f + 10.0f;
+}
+
+float4 turretOf(const ConvectionInput_0& c, int k) {
+    const float4 all[] = { c.cvTurret0_0, c.cvTurret1_0, c.cvTurret2_0, c.cvTurret3_0, c.cvTurret4_0 };
+    return all[k];
+}
+
 } // namespace
 
 int main() {
@@ -237,6 +355,105 @@ int main() {
     // clamped to what the bound divides by, and this is where a slip in either shows.
     for (const auto& oc : organizedCases()) cases.push_back({ oc.first, oc.second });
 
+    // PAREIDOLIA (build 21): the map stood up on the hero at three facings, blended into the
+    // tower, at full billows, and forgotten. THE MAP'S BUFFER OUTLIVES EVERY CASE.
+    const std::vector<float> shapeHost = shapeTexels();
+    Device<float> shapeMap(shapeHost.size());
+    shapeMap.put(shapeHost);
+    {
+        ConvectionInput_0 c = shapeHero(0.0f, false);
+        addShape(c, shapeMap, 0.0f, 0.0f, 0.2f);
+        cases.push_back({ "shape, facing 0", c });
+
+        c = shapeHero(0.0f, true);
+        addShape(c, shapeMap, 37.0f, 0.4f, 0.2f);
+        cases.push_back({ "shape alone, 37 deg, decay .4", c });
+
+        c = shapeHero(0.5f, true);
+        addShape(c, shapeMap, 200.0f, 0.0f, 1.0f);
+        cases.push_back({ "shape alone, 200 deg, billow 1", c });
+
+        c = shapeHero(0.0f, true);
+        addShape(c, shapeMap, 123.0f, 1.0f, 0.2f);
+        cases.push_back({ "shape alone, decay 1", c });
+    }
+
+    // HERO CONNECTION (build 22): the group's domes, and the moat's slope term in the
+    // field's clamp. The organized case is where the moat's term and the organization's
+    // add up.
+    {
+        ConvectionInput_0 c = defaults(0.0f);
+        c.cvHeroAt_0     = make_float2(500.0f, -800.0f);
+        c.cvHeroRadius_0 = 1500.0f;
+        c.cvHeroTop_0    = 1500.0f;
+        c.cvHeroSeed_0   = make_float3(1731.0f, 613.0f, 2477.0f);
+        c.cvHeroBillow_0 = 1.67f;
+        addGroup(c, 1.0f, true);
+        cases.push_back({ "group with the field", c });
+        c.cvHeroAlone_0 = 1;
+        cases.push_back({ "group alone", c });
+
+        ConvectionInput_0 o = defaults(0.6f);
+        o.cvCoverage_0 = 0.9f;
+        organize(o, 30.0f, 3.0f, 0.7f);
+        addWave(o, 60.0f, 2200.0f, 0.7f);
+        o.cvGapWidth_0   = 0.4f;
+        o.cvHeroAt_0     = make_float2(-1200.0f, 300.0f);
+        o.cvHeroRadius_0 = 700.0f;       // smaller than a cell: the narrowest moat bands
+        o.cvHeroTop_0    = 1400.0f;
+        o.cvHeroBillow_0 = 0.78f;        // under one: the turrets' billow is the hero's
+        addGroup(o, 0.5f, true);
+        cases.push_back({ "group, half moat, organized", o });
+
+        ConvectionInput_0 s = shapeHero(0.0f, false);
+        addShape(s, shapeMap, 37.0f, 0.3f, 0.2f);
+        addGroup(s, 1.0f, false);
+        cases.push_back({ "shape with the flanking line", s });
+    }
+
+    // MAMMA (build 23): pouches under a closed deck, under the hero, and under the group.
+    // The boxes and the seeds below reach down to the deepest pouch.
+    {
+        ConvectionInput_0 c = defaults(1.0f);
+        c.cvCoverage_0   = 0.9f;
+        c.cvMammaDepth_0 = 360.0f;
+        c.cvPouchSize_0  = 450.0f;
+        cases.push_back({ "closed deck, mamma", c });
+
+        ConvectionInput_0 h = defaults(0.0f);
+        h.cvHeroAt_0     = make_float2(500.0f, -800.0f);
+        h.cvHeroRadius_0 = 1500.0f;
+        h.cvHeroTop_0    = 1500.0f;
+        h.cvHeroSeed_0   = make_float3(1731.0f, 613.0f, 2477.0f);
+        h.cvHeroBillow_0 = 1.67f;
+        h.cvMammaDepth_0 = 200.0f;
+        h.cvPouchSize_0  = 300.0f;
+        h.cvHeroAlone_0  = 1;
+        cases.push_back({ "hero alone, mamma", h });
+        addGroup(h, 1.0f, true);
+        h.cvHeroAlone_0  = 0;
+        cases.push_back({ "group, mamma", h });
+    }
+
+    // PILEUS AND VELUM (build 24): the cap and the veil with the field, and alone with a
+    // gap that lets the billows push into the cap.
+    {
+        ConvectionInput_0 c = defaults(0.0f);
+        c.cvHeroAt_0     = make_float2(500.0f, -800.0f);
+        c.cvHeroRadius_0 = 1500.0f;
+        c.cvHeroTop_0    = 1500.0f;
+        c.cvHeroSeed_0   = make_float3(1731.0f, 613.0f, 2477.0f);
+        c.cvHeroBillow_0 = 1.67f;
+        c.cvPileusThick_0 = 260.0f;
+        c.cvPileusGap_0   = 300.0f;
+        c.cvVelumThick_0  = 200.0f;
+        c.cvVelumHeight_0 = 900.0f;
+        cases.push_back({ "cap and veil, the field", c });
+        c.cvHeroAlone_0  = 1;
+        c.cvPileusGap_0  = 60.0f;
+        cases.push_back({ "cap and veil alone, gap 60", c });
+    }
+
     const float extents[] = { 15.0f, 60.0f, 250.0f, 900.0f, 2500.0f };
     const int   perBox    = 192;
 
@@ -244,9 +461,16 @@ int main() {
         const ConvectionInput_0& c = k.c;
         HostRng rng(0xc0ffee);
 
-        // The layer's ceiling, as convCeiling has it: the field's or the hero's, billows in.
-        const float top = c.cvBase_0 + std::max(c.cvDepth_0 + c.cvBillow_0,
-                                                c.cvHeroTop_0 > 0.0f ? c.cvHeroTop_0 + c.cvBillow_0 * c.cvHeroBillow_0 : 0.0f);
+        // The layer's ceiling, as convCeiling has it: the field's or the hero's, billows in,
+        // or the cap's and the veil's (build 24) -- else the boxes never reach the cap's top.
+        const bool  hero    = c.cvHeroTop_0 > 0.0f;
+        const float capTop  = hero && c.cvPileusThick_0 > 0.0f
+                            ? c.cvHeroTop_0 + c.cvPileusGap_0 + c.cvPileusThick_0 : 0.0f;
+        const float veilTop = hero && c.cvVelumThick_0 > 0.0f
+                            ? c.cvVelumHeight_0 + 1.5f * c.cvVelumThick_0 : 0.0f;
+        const float top = c.cvBase_0 + std::max(std::max(c.cvDepth_0 + c.cvBillow_0,
+                                                         hero ? c.cvHeroTop_0 + c.cvBillow_0 * c.cvHeroBillow_0 : 0.0f),
+                                                std::max(capTop, veilTop));
 
         // SEEDS: points already known to be cloud, which the second half of the boxes
         // centre on. Found by sampling the slab and keeping the ones with density.
@@ -254,12 +478,12 @@ int main() {
         // looked for around it instead -- otherwise the half of the boxes meant to sit on
         // cloud would mostly sit on nothing.
         const bool   alone = c.cvHeroAlone_0 != 0 && c.cvHeroTop_0 > 0.0f;
-        const float  span  = alone ? c.cvHeroRadius_0 * 2.0f : 20000.0f;
+        const float  span  = alone ? c.cvHeroRadius_0 * (c.cvTurretCount_0 > 0 ? 4.5f : 2.0f) : 20000.0f;
         const float2 mid   = alone ? c.cvHeroAt_0 : make_float2(0.0f, 0.0f);
         std::vector<float3> probe(200000);
         for (float3& p : probe) {
             p = make_float3(mid.x + rng.range(-span, span),
-                            rng.range(c.cvBase_0, top),
+                            rng.range(c.cvBase_0 - c.cvMammaDepth_0, top),
                             mid.y + rng.range(-span, span));
         }
         const std::vector<float> probeD = densities(c, probe);
@@ -277,7 +501,7 @@ int main() {
                 centre = cloud[static_cast<size_t>(rng.next() * cloud.size()) % cloud.size()];
             } else {
                 centre = make_float3(rng.range(-20000.0f, 20000.0f),
-                                     rng.range(c.cvBase_0 - 200.0f, top + 200.0f),
+                                     rng.range(c.cvBase_0 - 200.0f - c.cvMammaDepth_0, top + 200.0f),
                                      rng.range(-20000.0f, 20000.0f));
             }
             const float3 l = make_float3(centre.x - ex * rng.range(0.0f, 1.0f),
@@ -849,6 +1073,356 @@ int main() {
             check(filling, "the sheet did not fill the seams as lacunarity rose");
             check(fullFrac > 0.3 && fullFrac < 0.95, "full lacunarity is not a sheet with holes");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // 8. Pareidolia: the picture is the cloud, and forgetting it is the tower (build 21)
+    // -----------------------------------------------------------------------
+    std::printf("\n8. Pareidolia\n\n");
+    {
+        auto check = [&](bool ok, const char* what) {
+            if (!ok) { std::printf("    FAIL: %s\n", what); ++failures; }
+        };
+        HostRng rng(2121);
+
+        // (a) DECAY 1 FACING 0 IS THE HERO WITHOUT A SHAPE, BIT FOR BIT. At bearing 0 the
+        // plane's frame is the world's exactly (x * 1 + z * 0), and decay 1 takes the
+        // tower's own path, so nothing may differ -- the density or the bound.
+        {
+            ConvectionInput_0 plain = shapeHero(0.0f, true);
+            ConvectionInput_0 gone  = plain;
+            addShape(gone, shapeMap, 0.0f, 1.0f, 0.2f);
+
+            std::vector<float3> pts(100000);
+            for (float3& q : pts) {
+                q = make_float3(-300.0f + rng.range(-1500.0f, 1500.0f),
+                                plain.cvBase_0 + rng.range(-50.0f, 2400.0f),
+                                700.0f + rng.range(-1500.0f, 1500.0f));
+            }
+            const std::vector<float> a = densities(plain, pts);
+            const std::vector<float> b = densities(gone, pts);
+            int differ = 0, cloudy = 0;
+            for (size_t i = 0; i < a.size(); ++i) {
+                if (a[i] != b[i]) ++differ;
+                if (a[i] > 0.0f) ++cloudy;
+            }
+            std::printf("  decay 1 against no shape: %d of %zu densities differ (%d cloud)\n",
+                        differ, a.size(), cloudy);
+            check(differ == 0, "decay 1 is not the ordinary hero");
+            check(cloudy > 1000, "too little of the hero was sampled to mean anything");
+        }
+
+        // (b) WITH NO BILLOWS, THE PLANE'S CROSS-SECTION IS THE SILHOUETTE: on the plane the
+        // profile's distance is D itself, so cloud stands exactly where the map is inside.
+        // Checked away from the edge by more than the soft edge and a texel's rounding --
+        // and at every facing, so the axis and its sign are the ones the host resolves.
+        for (float bearing : { 0.0f, 90.0f, 211.0f }) {
+            ConvectionInput_0 c = shapeHero(0.0f, true);
+            c.cvBillow_0 = 0.0f;
+            addShape(c, shapeMap, bearing, 0.0f, 0.0f);
+            const float b = bearing * 0.01745329252f;
+            const float ux = std::cos(b), uz = -std::sin(b);
+
+            std::vector<float3> pts;
+            std::vector<float>  sdf;
+            for (int k = 0; k < 60000; ++k) {
+                const float u = rng.range(-900.0f, 900.0f);
+                const float y = rng.range(60.0f, 1700.0f);
+                const float x = u / kShapeTexel + kShapeOffsetU;
+                const float z = y / kShapeTexel + kShapeOffsetY;
+                const float d = shapeSdf(x, z) * kShapeTexel;
+                if (std::fabs(d) < 30.0f) continue;          // the soft edge, and a texel
+                pts.push_back(make_float3(c.cvHeroAt_0.x + u * ux, c.cvBase_0 + y, c.cvHeroAt_0.y + u * uz));
+                sdf.push_back(d);
+            }
+            const std::vector<float> den = densities(c, pts);
+            int wrong = 0, inside = 0;
+            for (size_t i = 0; i < pts.size(); ++i) {
+                if ((den[i] > 0.0f) != (sdf[i] > 0.0f)) ++wrong;
+                if (sdf[i] > 0.0f) ++inside;
+            }
+            std::printf("  facing %5.1f: %d of %zu plane points disagree with the silhouette (%d inside)\n",
+                        bearing, wrong, pts.size(), inside);
+            check(wrong == 0, "the plane's cross-section is not the silhouette");
+            check(inside > 5000, "too little of the silhouette was sampled");
+        }
+
+        // (c) THE RIMS ARE ROUND: along the normal through the disc's deepest point, the
+        // cloud reaches out to R and no further (no billows), and through a point D inside
+        // the edge, to sqrt(D (2R - D)).
+        {
+            ConvectionInput_0 c = shapeHero(0.0f, true);
+            c.cvBillow_0 = 0.0f;
+            addShape(c, shapeMap, 0.0f, 0.0f, 0.0f);
+            const float R = c.cvShapeRound_0;
+            // THE EXPECTATION FROM THE SAME DISTANCE FUNCTION, not from the disc alone: the
+            // eye sits 23 texels from the disc's centre, and a first version of this check
+            // expected R there and failed on the eye's own rim. One probe where D is past R
+            // (the cushion's flat face), one 200 m inside the disc's left edge.
+            struct Probe { float u; float y; float expect; };
+            auto profileAt = [&](float u, float y) {
+                const float d = shapeSdf(u / kShapeTexel + kShapeOffsetU, y / kShapeTexel + kShapeOffsetY) * kShapeTexel;
+                return d >= R ? R : std::sqrt(d * (2.0f * R - d));
+            };
+            const Probe probes[] = { { 200.0f, 740.0f, profileAt(200.0f, 740.0f) },
+                                     { -600.0f, 840.0f, profileAt(-600.0f, 840.0f) } };
+            for (const Probe& pr : probes) {
+                std::vector<float3> pts;
+                for (int k = 0; k < 400; ++k) {
+                    const float n = k * 2.5f;   // 0 .. 1000 m along the normal (+Z at bearing 0)
+                    pts.push_back(make_float3(c.cvHeroAt_0.x + pr.u, c.cvBase_0 + pr.y, c.cvHeroAt_0.y + n));
+                }
+                const std::vector<float> den = densities(c, pts);
+                float reach = 0.0f;
+                for (int k = 0; k < 400; ++k) if (den[k] > 0.0f) reach = k * 2.5f;
+                std::printf("  through u = %6.0f m the cloud reaches %6.1f m from the plane (profile %6.1f)\n",
+                            pr.u, reach, pr.expect);
+                check(std::fabs(reach - pr.expect) < 8.0f, "the rim is not the profile");
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 9. Hero Connection: the field yields to the group, and the group is local (build 22)
+    // -----------------------------------------------------------------------
+    std::printf("\n9. Hero Connection\n\n");
+    {
+        auto check = [&](bool ok, const char* what) {
+            if (!ok) { std::printf("    FAIL: %s\n", what); ++failures; }
+        };
+        HostRng rng(2222);
+
+        // (a) THE MOAT CLEARS THE FIELD UNDER THE HERO. A hero only 150 m tall, so the
+        // field's towers would stand above it: well inside the moat's inner radius -- by more
+        // than any billow reaches -- there must be no cloud above the hero's own ceiling,
+        // where without the moat there is. THE HERO IS PUT ON A FIELD CLOUD, found by
+        // sampling, so there is something to clear: the first place tried was clear air.
+        {
+            ConvectionInput_0 c = defaults(0.3f);
+            c.cvCoverage_0   = 0.9f;
+            c.cvHeroRadius_0 = 2500.0f;
+            c.cvHeroTop_0    = 150.0f;
+            c.cvHeroBillow_0 = 1.0f;
+
+            std::vector<float3> probe(20000);
+            for (float3& q : probe)
+                q = make_float3(rng.range(-8000.0f, 8000.0f), c.cvBase_0 + rng.range(550.0f, 800.0f),
+                                rng.range(-8000.0f, 8000.0f));
+            const std::vector<float> probeD = densities(c, probe);   // no hero yet: cvHeroTop set, at 0,0
+            float2 at = make_float2(0.0f, 0.0f);
+            for (size_t i = 0; i < probe.size(); ++i)
+                if (probeD[i] > 0.0f && std::hypot(probe[i].x, probe[i].z) > 3000.0f) {
+                    at = make_float2(probe[i].x, probe[i].z);
+                    break;
+                }
+            c.cvHeroAt_0 = at;
+
+            const float inner = 0.75f * c.cvHeroRadius_0 - 600.0f;   // past every billow
+            std::vector<float3> pts(100000);
+            for (float3& q : pts) {
+                const float a = rng.range(0.0f, 6.2831853f), r = inner * std::sqrt(rng.range(0.0f, 1.0f));
+                q = make_float3(at.x + r * std::cos(a), c.cvBase_0 + rng.range(520.0f, 1400.0f),
+                                at.y + r * std::sin(a));
+            }
+            const std::vector<float> open = densities(c, pts);
+            ConvectionInput_0 m = c;
+            m.cvMoat_0       = 1.0f;
+            m.cvGroupReach_0 = 1.3f * m.cvHeroRadius_0 * 1.01f + 10.0f;
+            const std::vector<float> moat = densities(m, pts);
+            int before = 0, after = 0;
+            for (size_t i = 0; i < pts.size(); ++i) {
+                if (open[i] > 0.0f) ++before;
+                if (moat[i] > 0.0f) ++after;
+            }
+            std::printf("  over a low hero's middle: field cloud at %d points without the moat, %d with it\n",
+                        before, after);
+            check(before > 500, "the field has no cloud over the hero to clear -- the test proves nothing");
+            check(after == 0, "the moat left field cloud over the hero's middle");
+        }
+
+        // (b) EVERY TURRET IS CLOUD: on its axis at 40% of its height, alone with the hero.
+        {
+            ConvectionInput_0 c = defaults(0.0f);
+            c.cvHeroAt_0     = make_float2(500.0f, -800.0f);
+            c.cvHeroRadius_0 = 1500.0f;
+            c.cvHeroTop_0    = 1500.0f;
+            c.cvHeroSeed_0   = make_float3(1731.0f, 613.0f, 2477.0f);
+            c.cvHeroBillow_0 = 1.67f;
+            c.cvHeroAlone_0  = 1;
+            addGroup(c, 1.0f, true);
+            std::vector<float3> pts;
+            for (int k = 0; k < c.cvTurretCount_0; ++k) {
+                const float4 t = turretOf(c, k);
+                pts.push_back(make_float3(t.x, c.cvBase_0 + 0.4f * t.w, t.y));
+            }
+            const std::vector<float> den = densities(c, pts);
+            int solid = 0;
+            for (float d : den) if (d > 0.0f) ++solid;
+            std::printf("  turrets that are cloud on their own axis: %d of %d\n", solid, c.cvTurretCount_0);
+            check(solid == c.cvTurretCount_0, "a turret is not there");
+        }
+
+        // (c) THE GROUP IS LOCAL: past every tower's moat and reach, the field is the field
+        // it was, bit for bit.
+        {
+            ConvectionInput_0 plain = defaults(0.0f);
+            plain.cvHeroAt_0     = make_float2(500.0f, -800.0f);
+            plain.cvHeroRadius_0 = 1500.0f;
+            plain.cvHeroTop_0    = 1500.0f;
+            plain.cvHeroSeed_0   = make_float3(1731.0f, 613.0f, 2477.0f);
+            plain.cvHeroBillow_0 = 1.67f;
+            ConvectionInput_0 group = plain;
+            addGroup(group, 1.0f, true);
+
+            std::vector<float3> pts;
+            while (pts.size() < 100000) {
+                const float3 q = make_float3(rng.range(-12000.0f, 12000.0f),
+                                             rng.range(plain.cvBase_0, plain.cvBase_0 + 2000.0f),
+                                             rng.range(-12000.0f, 12000.0f));
+                bool clear = true;
+                for (int k = -1; k < group.cvTurretCount_0 && clear; ++k) {
+                    const float4 t = k < 0 ? make_float4(plain.cvHeroAt_0.x, plain.cvHeroAt_0.y,
+                                                         plain.cvHeroRadius_0, plain.cvHeroTop_0)
+                                           : turretOf(group, k);
+                    const float reach = std::max(1.3f * t.z, t.z + 1.5f * 350.0f * 1.67f + 24.0f) + 10.0f;
+                    clear = std::hypot(q.x - t.x, q.z - t.y) > reach;
+                }
+                if (clear) pts.push_back(q);
+            }
+            const std::vector<float> a = densities(plain, pts);
+            const std::vector<float> b = densities(group, pts);
+            int differ = 0, cloudy = 0;
+            for (size_t i = 0; i < a.size(); ++i) {
+                if (a[i] != b[i]) ++differ;
+                if (a[i] > 0.0f) ++cloudy;
+            }
+            std::printf("  away from the group: %d of %zu densities differ (%d cloud)\n",
+                        differ, a.size(), cloudy);
+            check(differ == 0, "the group changed the field away from it");
+            check(cloudy > 1000, "too little field was sampled to mean anything");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 10. Mamma: pouches hang where there is cloud overhead, and nowhere else (build 23)
+    // -----------------------------------------------------------------------
+    std::printf("\n10. Mamma\n\n");
+    {
+        auto check = [&](bool ok, const char* what) {
+            if (!ok) { std::printf("    FAIL: %s\n", what); ++failures; }
+        };
+        HostRng rng(2323);
+        ConvectionInput_0 flat = defaults(1.0f);
+        flat.cvCoverage_0 = 0.9f;
+        flat.cvPouchSize_0 = 450.0f;
+        ConvectionInput_0 sag = flat;
+        sag.cvMammaDepth_0 = 360.0f;
+
+        // (a) ABOVE THE BASE RAMP, THE CLOUD IS THE CLOUD IT WAS, bit for bit: the pouches
+        // touch only the bottom forty metres and what hangs below.
+        {
+            std::vector<float3> pts(100000);
+            for (float3& q : pts)
+                q = make_float3(rng.range(-10000.0f, 10000.0f), flat.cvBase_0 + rng.range(40.0f, 1500.0f),
+                                rng.range(-10000.0f, 10000.0f));
+            const std::vector<float> a = densities(flat, pts);
+            const std::vector<float> b = densities(sag, pts);
+            int differ = 0, cloudy = 0;
+            for (size_t i = 0; i < a.size(); ++i) {
+                if (a[i] != b[i]) ++differ;
+                if (a[i] > 0.0f) ++cloudy;
+            }
+            std::printf("  above the ramp: %d of %zu densities differ (%d cloud)\n", differ, a.size(), cloudy);
+            check(differ == 0, "mamma changed the cloud above the base ramp");
+            check(cloudy > 10000, "too little deck was sampled to mean anything");
+        }
+
+        // (b) NOTHING HANGS WHERE THERE IS NO CLOUD OVERHEAD: a column with no cloud in its
+        // first sixty metres has no pouch under it. (c) AND THEY DO HANG, most of the way.
+        {
+            const int columns = 20000, up = 12, down = 24;
+            std::vector<float3> pts;
+            for (int k = 0; k < columns; ++k) {
+                const float x = rng.range(-10000.0f, 10000.0f), z = rng.range(-10000.0f, 10000.0f);
+                for (int j = 0; j < up; ++j)   pts.push_back(make_float3(x, flat.cvBase_0 + 1.0f + 5.0f * j, z));
+                for (int j = 0; j < down; ++j) pts.push_back(make_float3(x, flat.cvBase_0 - 0.5f - 15.0f * j, z));
+            }
+            const std::vector<float> overhead = densities(flat, pts);
+            const std::vector<float> hanging  = densities(sag, pts);
+            int stray = 0, withPouch = 0;
+            float deepest = 0.0f;
+            for (int k = 0; k < columns; ++k) {
+                const size_t at = static_cast<size_t>(k) * (up + down);
+                bool cloud = false;
+                for (int j = 0; j < up; ++j) cloud = cloud || overhead[at + j] > 0.0f;
+                bool pouch = false;
+                for (int j = 0; j < down; ++j) {
+                    const float d = hanging[at + up + j];
+                    if (d > 1e-6f * sag.cvSigma_0) {
+                        pouch = true;
+                        deepest = std::max(deepest, 0.5f + 15.0f * j);
+                        if (!cloud) ++stray;
+                    }
+                }
+                if (pouch) ++withPouch;
+            }
+            std::printf("  columns with a pouch: %d of %d, the deepest found %.0f m (at most %.0f); "
+                        "under no cloud: %d\n", withPouch, columns, deepest, sag.cvMammaDepth_0, stray);
+            check(stray == 0, "a pouch hangs where there is no cloud overhead");
+            check(withPouch > columns / 10, "almost no pouches hang under a 90% deck");
+            check(deepest > 0.5f * sag.cvMammaDepth_0, "no pouch hangs even half its depth");
+            check(deepest <= sag.cvMammaDepth_0, "a pouch hangs past the deepest it may");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 11. Pileus and velum: where the cap and the veil stand (build 24)
+    // -----------------------------------------------------------------------
+    std::printf("\n11. Pileus and velum\n\n");
+    {
+        auto check = [&](bool ok, const char* what) {
+            if (!ok) { std::printf("    FAIL: %s\n", what); ++failures; }
+        };
+        ConvectionInput_0 c = defaults(0.0f);
+        c.cvHeroAt_0     = make_float2(500.0f, -800.0f);
+        c.cvHeroRadius_0 = 1500.0f;
+        c.cvHeroTop_0    = 1500.0f;
+        c.cvHeroBillow_0 = 1.67f;
+        c.cvHeroAlone_0  = 1;
+        c.cvBillow_0     = 0.0f;     // smooth, so the gap between crown and cap is exact
+        ConvectionInput_0 capped = c;
+        capped.cvPileusThick_0 = 260.0f;
+        capped.cvPileusGap_0   = 400.0f;
+        capped.cvVelumThick_0  = 200.0f;
+        capped.cvVelumHeight_0 = 900.0f;
+
+        // On the hero's axis, up through crown, gap and cap; and out along the veil, whose
+        // middle rises by its hump near the tower: half its thickness at the wall, nothing at
+        // two radii, on a smoothstep.
+        const float x = c.cvHeroAt_0.x, z = c.cvHeroAt_0.y, b = c.cvBase_0;
+        const float R = c.cvHeroRadius_0;
+        const float ht = (1.15f * R - R) / R;
+        const float veilHump = 0.5f * capped.cvVelumThick_0 * (1.0f - ht * ht * (3.0f - 2.0f * ht));
+        std::vector<float3> pts = {
+            make_float3(x, b + 1500.0f - 30.0f, z),       // 0 the crown, just under its top
+            make_float3(x, b + 1500.0f + 200.0f, z),      // 1 between crown and cap
+            make_float3(x, b + 1500.0f + 400.0f, z),      // 2 the cap's middle
+            make_float3(x, b + 1500.0f + 600.0f, z),      // 3 over the cap
+            make_float3(x + 1.15f * R, b + 900.0f + veilHump, z),   // 4 the veil, off the tower
+            make_float3(x + 1.15f * R, b + 1300.0f, z),             // 5 over the veil
+            make_float3(x + 1.95f * R, b + 900.0f, z),              // 6 past its farthest edge
+        };
+        const std::vector<float> plain = densities(c, pts);
+        const std::vector<float> with  = densities(capped, pts);
+        std::printf("  crown %.4f/%.4f, gap %.4f, cap %.4f, over the cap %.4f\n",
+                    plain[0], with[0], with[1], with[2], with[3]);
+        std::printf("  veil %.4f, over it %.4f, past its edge %.4f\n", with[4], with[5], with[6]);
+        check(with[0] == plain[0], "the cap changed the crown under it");
+        check(with[1] == 0.0f, "there is cloud between the crown and the cap");
+        check(with[2] > 0.0f && with[2] < c.cvSigma_0 * 0.5f, "the cap is missing, or as dense as the tower");
+        check(with[3] == 0.0f, "there is cloud over the cap");
+        check(with[4] > 0.0f && with[4] < c.cvSigma_0 * 0.5f, "the veil is missing, or as dense as the tower");
+        check(with[5] == 0.0f && with[6] == 0.0f, "the veil reaches where it should not");
     }
 
     const cudaError_t err = cudaDeviceSynchronize();

@@ -600,3 +600,27 @@ PL_TEST(LookAtSpansTheCloudThatIsThere) {
     orbitAimSpan(heroField(), lo, hi);
     PL_CHECK(thi > hi);
 }
+
+// A DRIFTING HERO STAYS FRAMED (build 22): the rig circles where the hero is now, not
+// where its sliders put it at time zero. Pinned, the two are the same.
+PL_TEST(TheOrbitFollowsADriftingHero) {
+    FieldParams f = heroField();
+    f.convection.heroDrift = true;
+    f.convection.windSpeed = 10.0f;
+    f.timeSeconds          = 60.0f;
+    OrbitControls c;
+    c.distance = 2000.0f;
+
+    Real x = 0, z = 0;
+    heroPositionNow(f, x, z);
+    PL_CHECK(std::hypot(x - f.convection.heroX, z - f.convection.heroZ) > 500.0);
+
+    const ViewParams v = orbitOf(f, c);
+    PL_CHECK_NEAR(v.observerX, x, 1e-2);
+    PL_CHECK_NEAR(v.observerZ, z + 2000.0, 1e-2);
+
+    f.convection.heroDrift = false;
+    const ViewParams pinned = orbitOf(f, c);
+    PL_CHECK_NEAR(pinned.observerX, f.convection.heroX, 1e-2);
+    PL_CHECK_NEAR(pinned.observerZ, f.convection.heroZ + 2000.0, 1e-2);
+}

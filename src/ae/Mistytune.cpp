@@ -37,6 +37,7 @@
 #include "FieldCache.h"
 #include "Fingerprint.h"
 #include "KernelApi.h"
+#include "Pareidolia.h"
 
 #include <algorithm>
 #include <cstring>
@@ -110,7 +111,26 @@ struct PreRenderData {
     A_long renderWidth   = 0;
     A_long renderHeight  = 0;
     bool   renderOriginValid = false;
+
+    // PAREIDOLIA'S SOURCE WAS CHECKED OUT, whole, under kShapeCheckout -- so smart render
+    // may ask for its pixels. False for no layer picked, which is no shape.
+    bool shapeCheckedOut = false;
 };
+
+// ===========================================================================
+// THE CHECKOUT IDs FOR PAREIDOLIA'S SOURCE, which are ours to choose and only have to be
+// distinct from every other checkout in this pre-render -- the input layer's is its
+// parameter index, 0. TWO, BECAUSE THE WHOLE LAYER IS WANTED AND ITS SIZE IS NOT KNOWN
+// until something has been checked out: the probe asks for what AE asked of us and reads
+// back max_result_rect, the layer's whole extent; the second asks for exactly that. Only
+// the second's pixels are ever checked out.
+// ===========================================================================
+constexpr A_long kShapeProbeCheckout = 7001;
+constexpr A_long kShapeCheckout      = 7002;
+
+// A SOURCE LARGER THAN THIS ON A SIDE IS CROPPED TO IT. The map is 256 texels across
+// whatever the source is, so a bigger checkout only costs AE a render nobody reads.
+constexpr A_long kShapeMaxSide = 8192;
 
 void disposePreRenderData(void* p) {
     delete static_cast<PreRenderData*>(p);
@@ -290,11 +310,8 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
             static_cast<int>(extra->input->device_index),
             static_cast<int>(extra->input->bitdepth));
 
-    if (kernel::cudaAvailable()) {
-        extra->output->flags |= PF_RenderOutputFlag_GPU_RENDER_POSSIBLE;
-    } else {
-        diagLog("  no GPU path in this build -- not offering GPU_RENDER_POSSIBLE.");
-    }
+    // THE OFFER ITSELF IS MADE AT THE END, once pareidolia's source has been checked out:
+    // see there for why a source withdraws it.
 
     // new rather than malloc, because PreRenderData holds C++ members with
     // constructors. nothrow because throwing into AE is never allowed and a
@@ -415,6 +432,14 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
     const cloud::SunPlacement placement = toSunPlacement(values);
     data->field.atmosphere.sunAzimuth =
         cloud::placedSunAzimuth(placement, data->field.atmosphere.sunAzimuth, data->view);
+    // THE SHAPE'S FACING, placed like the sun and for the same reason: under Turn to Camera
+    // a camera move turns the shape, so the field key has to see it. See Pareidolia.h.
+    // The hero where it stands NOW: drifting, it has moved from its sliders.
+    cloud::Real heroX = 0, heroZ = 0;
+    cloud::heroPositionNow(data->field, heroX, heroZ);
+    cloud::placeShape(data->field.convection.pareidolia, data->view,
+                      heroX, heroZ);
+
     diagLog("  sun: %s, azimuth %.1f deg, elevation %.1f deg",
             placement == cloud::SunPlacement::Backlit  ? "backlit"
             : placement == cloud::SunPlacement::SideLit ? "side lit"
@@ -487,6 +512,66 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
     data->renderWidth       = rr.right - rr.left;
     data->renderHeight      = rr.bottom - rr.top;
     data->renderOriginValid = (rr.right > rr.left && rr.bottom > rr.top);
+
+    // -----------------------------------------------------------------------
+    // PAREIDOLIA'S SOURCE, WHOLE (build 21).
+    //
+    // A layer parameter's pixels arrive in that layer's own space, masks and effects on,
+    // transforms off -- the picture as its author made it. WHOLE, because the silhouette is
+    // cropped to its own box and a partial checkout would crop a different shape.
+    //
+    // NOT UNIONED INTO THE RESULT RECT: it shapes the cloud, not where our pixels lie.
+    // -----------------------------------------------------------------------
+    {
+        PF_CheckoutResult probe;
+        AEFX_CLR_STRUCT(probe);
+        PF_RenderRequest probeRequest = extra->input->output_request;
+        PF_Err shapeErr = extra->cb->checkout_layer(in_data->effect_ref, kMistytunePareidoliaSource,
+                                                    kShapeProbeCheckout, &probeRequest,
+                                                    in_data->current_time, in_data->time_step,
+                                                    in_data->time_scale, &probe);
+        const PF_LRect& whole = probe.max_result_rect;
+        if (!shapeErr && whole.right > whole.left && whole.bottom > whole.top) {
+            PF_RenderRequest wholeRequest = extra->input->output_request;
+            wholeRequest.rect = whole;
+            if (wholeRequest.rect.right - wholeRequest.rect.left > kShapeMaxSide)
+                wholeRequest.rect.right = wholeRequest.rect.left + kShapeMaxSide;
+            if (wholeRequest.rect.bottom - wholeRequest.rect.top > kShapeMaxSide)
+                wholeRequest.rect.bottom = wholeRequest.rect.top + kShapeMaxSide;
+            wholeRequest.channel_mask = PF_ChannelMask_ARGB;
+            wholeRequest.preserve_rgb_of_zero_alpha = FALSE;
+
+            PF_CheckoutResult got;
+            AEFX_CLR_STRUCT(got);
+            shapeErr = extra->cb->checkout_layer(in_data->effect_ref, kMistytunePareidoliaSource,
+                                                 kShapeCheckout, &wholeRequest,
+                                                 in_data->current_time, in_data->time_step,
+                                                 in_data->time_scale, &got);
+            data->shapeCheckedOut = !shapeErr && got.result_rect.right > got.result_rect.left &&
+                                    got.result_rect.bottom > got.result_rect.top;
+            diagLog("  pareidolia: source [%d,%d %dx%d]%s",
+                    static_cast<int>(got.result_rect.left), static_cast<int>(got.result_rect.top),
+                    static_cast<int>(got.result_rect.right - got.result_rect.left),
+                    static_cast<int>(got.result_rect.bottom - got.result_rect.top),
+                    data->shapeCheckedOut ? "" : " -- EMPTY, no shape");
+        }
+        // A FAILED CHECKOUT OF THE SOURCE IS NO SHAPE, NOT A FAILED FRAME: the sky renders
+        // without it and the log says so.
+        if (shapeErr) diagLog("  pareidolia: source checkout failed (err %d) -- no shape",
+                              static_cast<int>(shapeErr));
+    }
+
+    // THE GPU OFFER, and a picture withdraws it. PF_Cmd_SMART_RENDER_GPU would hand the
+    // source over as a GPU world, which the map builder cannot read; the host path reads it
+    // and still renders on the card through renderCudaToHost. AE has never taken the offer
+    // on this effect anyway (see smartRenderHost), so nothing is lost that was being used.
+    if (!kernel::cudaAvailable()) {
+        diagLog("  no GPU path in this build -- not offering GPU_RENDER_POSSIBLE.");
+    } else if (data->shapeCheckedOut) {
+        diagLog("  pareidolia source present -- not offering GPU_RENDER_POSSIBLE.");
+    } else {
+        extra->output->flags |= PF_RenderOutputFlag_GPU_RENDER_POSSIBLE;
+    }
 
     return err;
 }
@@ -695,7 +780,7 @@ PF_Err smartRenderGpu(PF_InData* in_data, PF_OutData* out_data,
 // into an integer buffer would clamp the sun to white before the tonemap ever saw it.
 PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
                        PF_PixelFormat format, PF_EffectWorld* output,
-                       const PreRenderData& data) {
+                       const PreRenderData& data, const cloud::ShapeMap* shape) {
     (void)out_data;
 
     diagLog("SMART_RENDER_HOST: format=%d output=%dx%d rowbytes=%d samples=%d",
@@ -717,6 +802,21 @@ PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
     req.field   = data.field;
     req.view    = data.view;
     req.quality = data.quality;
+
+    // PAREIDOLIA'S MAP, built by smartRender from the source it checked out. It outlives
+    // this function, so the request may point at it.
+    req.shapeMap = shape;
+
+    // THE PICTURE IS IN THE KEY. It is not a parameter, so pre-render's fingerprint cannot
+    // see it -- and without this, editing the source layer would leave every parameter
+    // unchanged and the accumulator cache would resolve the old shape from memory.
+    sim::RenderKey key = data.key;
+    if (shape) {
+        sim::Fingerprint fp;
+        fp.add(key.field);
+        fp.add(shape->hash);
+        key.field = fp.value();
+    }
 
     // See the note on the GPU path, and PreRenderData on why this is not
     // in_data->output_origin_x/y.
@@ -884,7 +984,7 @@ PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
                                                  : static_cast<int>(req.dest.widthPx);
 
     sim::AccumulatorCache& startCache = useGpu ? t_gpuAccumCache : t_cpuAccumCache;
-    bool resolveOnly = split && startCache.canResolve(data.key, totalSamples,
+    bool resolveOnly = split && startCache.canResolve(key, totalSamples,
                                                       cacheW, cacheH, cachePitch);
     bool fellBack = false;
 
@@ -1004,9 +1104,9 @@ PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
     // so the engine now is the engine the cache was read from.
     sim::AccumulatorCache& endCache = useGpu ? t_gpuAccumCache : t_cpuAccumCache;
     if (resolveOnly) {
-        endCache.adoptResolve(data.key);
+        endCache.adoptResolve(key);
     } else if (split && !fellBack) {
-        endCache.adoptFull(data.key, totalSamples, cacheW, cacheH, cachePitch);
+        endCache.adoptFull(key, totalSamples, cacheW, cacheH, cachePitch);
     }
 
     // THE NUMBER THAT SETTLES "IT RENDERS NOTHING" VERSUS "IT IS STILL RENDERING" --
@@ -1122,6 +1222,48 @@ PF_Err smartRender(PF_InData* in_data, PF_OutData* out_data,
     err = extra->cb->checkout_layer_pixels(in_data->effect_ref, kMistytuneInput, &input);
     if (err) return err;
 
+    // ---------------------------------------------------------------------
+    // PAREIDOLIA'S MAP, from the source pre-render checked out, BEFORE THE OUTPUT: the
+    // pixels are read once into the map and checked straight back in.
+    //
+    // ANY FAILURE HERE IS NO SHAPE, NOT A FAILED FRAME, and the log says which. The GPU
+    // command never gets a source -- pre-render withdraws the GPU offer when there is one
+    // -- so a source seen on that path is named and left alone.
+    // ---------------------------------------------------------------------
+    cloud::ShapeMap shapeMap;
+    bool haveShape = false;
+    if (data->shapeCheckedOut && !isGpu) {
+        PF_EffectWorld* source = nullptr;
+        const double tShape = diagSeconds();
+        const PF_Err srcErr = extra->cb->checkout_layer_pixels(in_data->effect_ref,
+                                                               kShapeCheckout, &source);
+        if (!srcErr && source) {
+            PF_PixelFormat srcFormat = PF_PixelFormat_INVALID;
+            ConstImageView view;
+            if (!pixelFormatOf(in_data, out_data, source, srcFormat) &&
+                toSourceView(source, srcFormat, view)) {
+                const cloud::PareidoliaParams& pp = data->field.convection.pareidolia;
+                haveShape = cloud::buildShapeMap(view, static_cast<cloud::ShapeChannel>(pp.channel),
+                                                 pp.threshold, shapeMap);
+                diagLog("  pareidolia: %dx%d source -> %dx%d map in %.3f s%s",
+                        static_cast<int>(source->width), static_cast<int>(source->height),
+                        static_cast<int>(shapeMap.width), static_cast<int>(shapeMap.height),
+                        diagSeconds() - tShape,
+                        haveShape ? "" : " -- nothing reaches the threshold, no shape");
+            } else {
+                diagLog("  pareidolia: source format %d not readable -- no shape",
+                        static_cast<int>(srcFormat));
+            }
+        } else {
+            diagLog("  pareidolia: source pixels unavailable (err %d) -- no shape",
+                    static_cast<int>(srcErr));
+        }
+        extra->cb->checkin_layer_pixels(in_data->effect_ref, kShapeCheckout);
+    } else if (data->shapeCheckedOut) {
+        diagLog("  pareidolia: source on the GPU path -- not read, no shape");
+        extra->cb->checkin_layer_pixels(in_data->effect_ref, kShapeCheckout);
+    }
+
     err = extra->cb->checkout_output(in_data->effect_ref, &output);
     if (err || !output) diagLog("  checkout_output failed: err=%d", static_cast<int>(err));
 
@@ -1133,7 +1275,8 @@ PF_Err smartRender(PF_InData* in_data, PF_OutData* out_data,
             if (isGpu) {
                 err = smartRenderGpu(in_data, out_data, format, output, extra, *data);
             } else {
-                err = smartRenderHost(in_data, out_data, format, output, *data);
+                err = smartRenderHost(in_data, out_data, format, output, *data,
+                                      haveShape ? &shapeMap : nullptr);
             }
         }
     }

@@ -53,6 +53,8 @@ struct CudaV {
     static __host__ __device__ float2 v2(float x, float y) { return make_float2(x, y); }
     static __host__ __device__ float3 v3(float x, float y, float z) { return make_float3(x, y, z); }
     static __host__ __device__ int3 i3(int x, int y, int z) { return make_int3(x, y, z); }
+    static __host__ __device__ int2 i2(int x, int y) { return make_int2(x, y); }
+    static __host__ __device__ float4 v4(float x, float y, float z, float w) { return make_float4(x, y, z, w); }
 };
 
 template <typename T>

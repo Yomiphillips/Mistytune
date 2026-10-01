@@ -106,6 +106,45 @@ struct TruncatedPhase {
 TruncatedPhase truncateDiffraction(const DropletPhase& fit);
 
 // ---------------------------------------------------------------------------
+// Hero Connection: the towers that tie the hero into the field (build 22)
+// ---------------------------------------------------------------------------
+//
+// ===========================================================================
+// WHY THE HERO LOOKED LIKE IT DID NOT BELONG, SEEN FROM ABOVE AND NOT GUESSED.
+//
+// Rendered top-down, the field's clouds have ragged footprints, since each is a cell's
+// rim or centre. The hero was a perfect disc. Nothing in the frame was between its
+// 3 km and the field's few hundred metres, and a field cell grew out through its wall.
+// So a cloud of another kind had been set down on the field, and the eye reads it that way.
+//
+// A TOWERING CUMULUS IS A GROUP OF TURRETS, not one dome. Its shoulders are thermals of
+// their own, and on the side the wind comes from a FLANKING LINE of smaller towers steps
+// down from it into the field, newer ones each farther out. So Connection grows exactly
+// that out of the hero's own closed form: more towers of the same family, each a dome
+// with the hero's exponent, cauliflower read in the hero's billow frame, lobes sized
+// between the field's and the hero's. Their union with the hero is a hard one, as
+// thermals meet: in creases.
+//
+// A SMOOTH JOIN WAS PLANNED AND IS NOT HERE. A smooth union adds cloud wherever two
+// surfaces are both near, and the base plane is "near" every tower's formula at every
+// point just above it, so it grows a pancake of cloud under the whole group. The
+// overlapping footprints already merge the bases, the way a real group's do.
+//
+// AND THE FIELD YIELDS: its updraft is multiplied down under each tower (the MOAT), so
+// no cell grows through the group. The factor is at most one, so the field's bound
+// holds untouched; its slope term goes into the kernel's clamp (convMoat).
+// ===========================================================================
+constexpr int kMaxHeroTurrets = 5;
+
+struct HeroTurret {
+    Real x      = 0;   // m, world: the centre on the base
+    Real z      = 0;
+    Real radius = 0;   // m, the footprint at the base
+    Real top    = 0;   // m above the base, never above the hero's
+    bool shoulder = false;   // on the hero's own flank, where a pareidolia shape stands
+};
+
+// ---------------------------------------------------------------------------
 // Everything the kernel is handed
 // ---------------------------------------------------------------------------
 
@@ -158,10 +197,64 @@ struct ConvectionDerived {
     // as big; with the field's own lobes a 4 km hero read as a beehive of small ones.
     Real heroBillow = 1;
 
+    // HERO CONNECTION (build 22): the towers that join the hero to the field, and how
+    // hard the field's updraft sinks under them. None and zero for Connection 0, which
+    // is the hero as it was. See heroGroup() below.
+    int32_t    turretCount = 0;
+    HeroTurret turret[kMaxHeroTurrets];
+    Real       moat = 0;   // 0..1
+
+    // MAMMA (build 23): the deepest a pouch can hang below the base, in metres -- zero is
+    // none, and the base is flat -- and one pouch's width. See mammaDepth() below.
+    Real mammaDepth = 0;
+    Real pouchSize  = 450;
+
+    // PILEUS AND VELUM (build 24), resolved: each one's thickness in metres -- zero is none
+    // -- and where it stands, in metres above the base. Zero without a hero.
+    Real pileusThick  = 0;
+    Real pileusGap    = 0;   // from the hero's smooth crown to the cap's middle, billows in
+    Real velumThick   = 0;
+    Real velumHeight  = 0;   // the veil's middle, above the base
+
     TruncatedPhase phase;
 
     // How the cells are arranged, resolved (build 20). Off for the defaults.
     OrganizationResolved organization;
+};
+
+// ---------------------------------------------------------------------------
+// Pareidolia's placement: see Pareidolia.h, which fills it
+// ---------------------------------------------------------------------------
+
+// Everything the kernel needs to place the map, as plain numbers: this travels to the
+// device inside the render request, and the map's texels go separately.
+struct ShapeGeometry {
+    bool on = false;
+
+    int32_t width  = 0;   // the map's texels
+    int32_t height = 0;
+
+    // Texel-edge coordinates of the plane point u = 0, y = 0: the middle of the
+    // silhouette's bottom edge, which stands on the condensation level under the hero's
+    // centre.
+    Real offsetU = 0;
+    Real offsetY = 0;
+
+    Real texelMetres = 1;   // one texel's side
+
+    // THE PLANE'S u AXIS, world (x, z), unit: the camera's right when the shape faces it.
+    // The normal is it turned 90 degrees towards the camera: (-axisUZ, axisUX).
+    Real axisUX = 1;
+    Real axisUZ = 0;
+
+    Real round  = 0;   // m: the rims' radius, and half the thickest part's depth
+    Real extent = 0;   // m: from the hero's axis to the shape's farthest corner, no billows
+    Real decay  = 0;   // 0..1
+    Real billow = 1;   // the shape's billows over the hero's, 0..1
+
+    // The silhouette's size once fitted, for the log and the tests.
+    Real widthMetres  = 0;
+    Real heightMetres = 0;
 };
 
 // The steering wind as a velocity, m/s. BEARING IS WHERE IT COMES FROM, as in
@@ -175,6 +268,58 @@ Real towerFraction(Real instability);
 
 // The updraft that carries the billows, m/s. Stronger with instability.
 Real billowRiseSpeed(Real instability);
+
+// WHERE THE HERO STANDS AT THE FIELD'S TIME: Hero Position, plus the steering wind's
+// drift when Hero Drifts is set. Everything that aims at the hero reads this rather than
+// the sliders -- the orbit rig, the shape's facing, the kernel -- so a drifting hero stays
+// framed and faces the lens.
+void heroPositionNow(const FieldParams& field, Real& outX, Real& outZ);
+
+// The hero's group at `connection` (0..1), around a hero of radius `radius` and height
+// `top` at (x, z), with the flanking line pointing towards `windFromDegrees`. Fills
+// out.turret and out.turretCount; the hero's own fields must already be set. Towers
+// under a metre tall are left out, so Connection 0 is no towers at all.
+void heroGroup(Real connection, Real windFromDegrees, ConvectionDerived& out);
+
+// A PAREIDOLIA SHAPE STANDS WHERE THE SHOULDERS WOULD: a turret on the hero's flank is a
+// bump in front of, or beside, the picture. So they shrink away as the shape holds and
+// return as Decay melts it back into the tower.
+//
+// AND THE FLANKING LINE TURNS INTO THE PICTURE'S PLANE. Left pointing into the wind, it
+// stands between the lens and the face from every orbit that puts the camera upwind. So
+// while the shape holds, the line lies along the plane, on whichever side is nearer the
+// wind, pushed out past the picture's edge; it frames the face rather than covering it,
+// and as Decay melts the shape it swings back into the wind. `g` is the shape as the
+// kernel will have it -- its eased decay, its axis, its width -- and a shape that is off
+// leaves the group alone.
+void fitTurretsToShape(const ShapeGeometry& g, Real windFromDegrees, ConvectionDerived& cd);
+
+// ===========================================================================
+// MAMMA'S DEPTH: how far the deepest pouch hangs below the base, in metres.
+//
+// AT MOST kMammaSag OF A POUCH'S WIDTH. Mamma photographed under anvils hang about as
+// far as they are wide at the most, and usually half that; much past it a pouch stops
+// reading as a sagging lobe and starts reading as a stalactite. The amount scales it
+// linearly, so keyframing Mamma lowers them smoothly from a flat base.
+//
+// The kernel lowers the layer's slab by this and bounds the pouches by it, so it is the
+// definition of the deepest one rather than an estimate.
+// ===========================================================================
+constexpr Real kMammaSag = Real(0.8);
+
+// A pouch narrower than this is floored: it is a divisor, and a few metres would be grain.
+constexpr Real kMinPouchSize = Real(20);
+
+Real mammaDepth(Real amount, Real pouchSize);
+
+// ===========================================================================
+// PILEUS AND VELUM'S THICKNESS AT FULL AMOUNT. A pileus is a thin lens -- a few hundred
+// metres at its thickest, where the tower below it is kilometres -- and a velum thinner
+// still, but kilometres wide. Much thicker and neither reads as an accessory cloud: it
+// reads as a second layer.
+// ===========================================================================
+constexpr Real kPileusMaxThick = Real(260);
+constexpr Real kVelumMaxThick  = Real(200);
 
 void deriveConvection(const FieldParams& field, ConvectionDerived& out);
 
