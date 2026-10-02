@@ -172,6 +172,127 @@ bool layerMapRange(LayerShadowMap m, float3 ro, float3 rd, out float t0, out flo
 }
 
 // ---------------------------------------------------------------------------
+// A shadow ray that hands off to the map (build 25, Draft)
+// ---------------------------------------------------------------------------
+//
+// ===========================================================================
+// THE SHADOW RAY'S CLEAR AIR IS WHERE ITS STEPS GO, AND THE MAP ALREADY KNOWS IT.
+//
+// MEASURED (PROGRESS.md, build 25): a shadow ray is about 22 tracking steps at the default
+// density, and its steps are the most expensive the renderer takes -- every lane of a warp
+// is somewhere else in the cloud. Most of them are null collisions in the clear air between
+// the cloud the point is in and the top of the slab: a long climb at a low sun, at one
+// step per 1/majorant metres, finding nothing.
+//
+// SO THE RAY WALKS EXACTLY -- ratio tracking, as transmittance() -- UNTIL IT HAS CROSSED
+// `handoff` METRES OF CLEAR AIR SINCE THE LAST CLOUD IT MET, and then takes the rest of the
+// way from this map, at the point it has reached. The walk keeps everything near the
+// point: the cloud it scatters in, the billows round it, the cauliflower's own shading.
+// The map supplies only what lies beyond a clear gap: other towers' shadows, softened by
+// its texel.
+//
+// WHY A CLEAR GAP AND NOT A FIXED DISTANCE. A map read inside or beside a cloud blends the
+// columns either side of it, so a sunlit wall would borrow the dark of the tower behind it.
+// A column IS a sun ray, so the point and everything the map adds lie on the ray itself;
+// what bleeds in is only the neighbouring columns, a texel away, BEYOND the gap. Two texels
+// of clear air keeps the cloud the ray left out of that blend.
+//
+// AND ON A SLICE PLANE, NEVER BETWEEN TWO. Between slices the map interpolates along the
+// column, and the slice below the point is the column's transmittance from THERE -- through
+// the cloud the ray has just left. MEASURED in the first version, which read where the gap
+// ran out: sunlit faces up to 20 levels darker in a 9-pixel blur of a 128 spp render, and
+// the backlit rim brighter. So once the gap is long enough the walk carries on, exactly, to
+// the next plane above, and the map is read there, between texels only. Meeting cloud on
+// the way puts the walk back as it was.
+//
+// BIASED, AND DRAFT'S ONLY. Cast shadows soften by about a texel; the cloud's own shading
+// does not change. See QualityParams::shadowHandoff and PROGRESS.md for the measurement.
+// ===========================================================================
+public float transmittanceHandoff(Medium m, MajorantGrid g, StructuredBuffer<float> bounds,
+                                  StructuredBuffer<float2> disp, LayerShadowMap map,
+                                  float handoff, inout Rng rng, float3 p, float3 dir,
+                                  inout int steps)
+{
+    float t0, t1;
+    if (!slabRange(m, p, dir, t0, t1)) return 1.0f;
+    t0 = max(t0, 0.0f);
+
+    float tr        = 1.0f;
+    float t         = t0;
+    float clearFrom = t0;   // where the stretch of clear air the ray is in began
+    float tEnd      = t1;   // the slab's end, or the slice plane the map will be read on
+    bool  toPlane   = false;
+
+    // Slices are equal steps of altitude: see layerMapColumn.
+    float sliceHeight = (map.smTop - map.smBottom) / float(max(map.smSlices - 1, 1));
+
+    Dda   dda      = ddaInit(g, p, dir, t0);
+    float localMaj = gridBound(m, g, bounds, disp, dda.cell, m.majorant);
+
+    for (int i = 0; i < kTrackCap; ++i)
+    {
+        ++steps;
+
+        float cellExit = min(ddaExit(dda), tEnd);
+
+        if (localMaj <= 0.0f)
+        {
+            if (cellExit >= tEnd) break;
+            t = cellExit;
+            ddaAdvance(dda);
+            localMaj = gridBound(m, g, bounds, disp, dda.cell, m.majorant);
+            continue;
+        }
+
+        t -= log(max(1.0f - randFloat(rng), 1e-7f)) / localMaj;
+
+        if (t >= cellExit)
+        {
+            if (cellExit >= tEnd) break;
+            t = cellExit;
+            ddaAdvance(dda);
+            localMaj = gridBound(m, g, bounds, disp, dda.cell, m.majorant);
+            continue;
+        }
+
+        float3 x     = p + dir * t;
+        float  sigma = densityAt(m, disp, x);
+        if (sigma > 0.0f)
+        {
+            tr *= max(0.0f, 1.0f - sigma / localMaj);
+            clearFrom = t;
+
+            // Cloud before the plane: the gap is closed, and the walk goes on to the slab.
+            toPlane = false;
+            tEnd    = t1;
+
+            // The same roulette as transmittance(), unbiased for the walk it ends.
+            if (tr < 0.01f)
+            {
+                if (randFloat(rng) > 0.5f) return 0.0f;
+                tr *= 2.0f;
+            }
+        }
+        else if (!toPlane && t - clearFrom >= handoff)
+        {
+            // THE NEXT SLICE PLANE ABOVE, walked to exactly. The sun is above the horizon
+            // wherever there is a map, so dir.y is positive.
+            float k      = ceil((x.y - map.smBottom) / sliceHeight);
+            float yPlane = map.smBottom + k * sliceHeight;
+            float tPlane = t + max(yPlane - x.y, 0.0f) / max(dir.y, 1e-6f);
+            if (tPlane < t1)
+            {
+                toPlane = true;
+                tEnd    = tPlane;
+            }
+        }
+    }
+
+    if (toPlane) return tr * layerMapTransmittance(map, p + dir * tEnd);
+    return tr;
+}
+
+// ---------------------------------------------------------------------------
 // Building it
 // ---------------------------------------------------------------------------
 

@@ -227,6 +227,11 @@ thread_local DeviceScratch              g_airMap;
 thread_local std::vector<unsigned char> g_airMapKey;
 thread_local void*                      g_airMapBuiltAt = nullptr;
 
+// THE STAGED RENDER'S PATHS AND ITS TWO LISTS OF THE LIVING (build 25), grow-only like the
+// rest. See renderStaged below.
+thread_local DeviceScratch g_paths;
+thread_local DeviceScratch g_pathLists;
+
 // THE PAREIDOLIA MAP, uploaded when its hash moves rather than per launch: a frame is
 // dozens of launches and the map is up to a megabyte. The hash is the map's own
 // (ShapeMap::hash), and the pointer is remembered for the reason the shadow maps' is.
@@ -281,6 +286,127 @@ __global__ void mistytuneKernel(RenderRequest req) {
     renderPixel(req, px, py);
 }
 
+// ---------------------------------------------------------------------------
+// The staged render (build 25)
+// ---------------------------------------------------------------------------
+//
+// ===========================================================================
+// ONE LAUNCH FOR THE CAMERA RAYS, THEN ONE PER BOUNCE OVER THE PATHS STILL ALIVE.
+//
+// MEASURED (PROGRESS.md, build 25): in the single kernel a tracking step cost about 8 ns
+// on the camera ray and 26 ns in a later bounce. By the third bounce a warp's paths are
+// scattered through the cloud and a third of them have ended, and the warp runs at its
+// longest path's pace -- with 250 registers a thread, at a quarter of the threads an SM
+// can hold. Here each launch does one kind of work, and a bounce launch runs only the paths
+// that are still going, gathered into a list by the launch before.
+//
+// THE SAME BITS AS THE SINGLE KERNEL. Each path is pathBegin and then pathBounce until it
+// ends, which is what trace() is; the finish sums a pixel's samples in sample order and
+// writes them exactly as renderPixel does. Which thread runs which path, and in what order
+// the living are listed, changes nothing a path computes.
+// ===========================================================================
+
+// THE PATHS OF A LAUNCH, at most this many at once: 1080p at one sample in one go, 151 MB of
+// path state. A launch with more is taken in bands of whole rows.
+constexpr long long kMaxStagedPaths = 1ll << 21;
+constexpr int       kStagedBlock    = 128;
+
+// The scene and the two tables, marshalled per thread as mistytuneTrace does.
+struct StagedScene {
+    Scene_0                  scene;
+    PhaseInput_0             phase;
+    StructuredBuffer<float>  bounds;
+    StructuredBuffer<float2> drift;
+};
+
+__device__ inline void fillStagedScene(const RenderRequest& req, StagedScene& st) {
+    st.scene = Scene_0{};
+    st.phase = PhaseInput_0{};
+    fillSlangScene<CudaVectors>(req, st.scene, st.phase);
+    st.bounds.data  = nullptr;   // the grid is off: see mistytuneTrace
+    st.bounds.count = 0;
+    st.drift.data   = static_cast<float2*>(const_cast<void*>(req.driftBuffer));
+    st.drift.count  = static_cast<size_t>(cloud::kDriftKnots);
+}
+
+// A slot in a list of the living, one atomic per group of threads that ask together.
+//
+// INTRINSICS, NOT cooperative_groups: CUDA 13's header pulls in CCCL, which refuses MSVC's
+// traditional preprocessor. The kernels that call this are one-dimensional with blocks a
+// multiple of 32, so a thread's lane is its index's low five bits.
+__device__ inline int appendLiving(int* counter) {
+    const unsigned mask   = __activemask();
+    const int      lane   = static_cast<int>(threadIdx.x & 31u);
+    const int      leader = __ffs(static_cast<int>(mask)) - 1;
+    int base = 0;
+    if (lane == leader) base = atomicAdd(counter, __popc(mask));
+    base = __shfl_sync(mask, base, leader);
+    return base + __popc(mask & ((1u << lane) - 1u));
+}
+
+// Every sample of rows [rowStart, rowStart + rows): its camera ray and first bounce. Path i
+// is sample s of pixel px of row rowStart + r at i = (r * width + px) * sampleCount + s, so
+// a pixel's samples lie together, in order.
+__global__ void stagedBeginKernel(RenderRequest req, int rowStart, int rows,
+                                  PathState_0* paths, int* living, int* livingCount) {
+    const long long i  = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int       S  = req.sampleCount;
+    const long long perRow = static_cast<long long>(req.dest.widthPx) * S;
+    if (i >= perRow * rows) return;
+
+    const int r   = static_cast<int>(i / perRow);
+    const int rem = static_cast<int>(i % perRow);
+    const int px  = rem / S;
+    const int s   = rem % S;
+    const int py  = rowStart + r;
+
+    Vec3         dir;
+    unsigned int h;
+    pixelSampleRay(req, px, py, s, dir, h);
+    const Vec3 origin = primaryRayOrigin(req.view);
+
+    StagedScene sc;
+    fillStagedScene(req, sc);
+    const PathState_0 st = beginSample_0(&sc.scene, &sc.phase, sc.bounds, sc.drift,
+                                         make_float3(origin.x, origin.y, origin.z),
+                                         make_float3(dir.x, dir.y, dir.z), h);
+    paths[i] = st;
+    if (st.psAlive_0 != 0) living[appendLiving(livingCount)] = static_cast<int>(i);
+}
+
+// One bounce of every path in `in`; the ones still alive after it go to `out`.
+__global__ void stagedBounceKernel(RenderRequest req, PathState_0* paths, const int* in,
+                                   int count, int* out, int* outCount) {
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= count) return;
+    const int i = in[k];
+
+    StagedScene sc;
+    fillStagedScene(req, sc);
+    PathState_0 st = paths[i];
+    pathBounce_0(&sc.scene, &sc.phase, sc.bounds, sc.drift, &st);
+    paths[i] = st;
+    if (st.psAlive_0 != 0) out[appendLiving(outCount)] = i;
+}
+
+// Each pixel of the rows: its samples summed in sample order, then renderPixel's finish.
+__global__ void stagedFinishKernel(RenderRequest req, int rowStart, int rows,
+                                   const PathState_0* paths) {
+    const int px = blockIdx.x * blockDim.x + threadIdx.x;
+    const int r  = blockIdx.y * blockDim.y + threadIdx.y;
+    if (px >= req.dest.widthPx || r >= rows) return;
+
+    const int       S    = req.sampleCount;
+    const long long base = (static_cast<long long>(r) * req.dest.widthPx + px) * S;
+
+    Vec3 sum = vec3(0.0f, 0.0f, 0.0f);
+    for (int s = 0; s < S; ++s) {
+        const float3 c = paths[base + s].psRadiance_0;
+        sum = sum + vec3(c.x, c.y, c.z);
+    }
+    finishPixel(req, px, rowStart + r, sum);
+}
+
 // The output transform over a finished frame. Same shape, same bounds check, and
 // the same arithmetic as the CPU pass because both call transformPixel().
 __global__ void mistytuneTransformKernel(RenderRequest req) {
@@ -298,6 +424,90 @@ __global__ void airMapKernel(Medium_0 medium, StructuredBuffer<float2> drift,
 }
 
 namespace {
+
+// THE STAGED RENDER'S HOST LOOP. The request is derived and its tables are on the device.
+//
+// 1 rendered, 0 failed (the error is set), -1 THE PATHS DID NOT FIT: their 151 MB is per
+// rendering thread, and several frames in flight on a full card can be refused it. The
+// caller then runs the single kernel, which needs none of it and gives the same bits.
+int renderStaged(const RenderRequest& work) {
+    const int       W = work.dest.widthPx;
+    const int       H = work.dest.heightPx;
+    const int       S = work.sampleCount > 0 ? work.sampleCount : 0;
+    const long long perRow = static_cast<long long>(W) * S;
+
+    int rowsPerBand = H;
+    if (perRow > 0 && perRow * H > kMaxStagedPaths)
+        rowsPerBand = static_cast<int>(kMaxStagedPaths / perRow) > 0
+                    ? static_cast<int>(kMaxStagedPaths / perRow) : 1;
+    const long long maxPaths = perRow * rowsPerBand;
+
+    PathState_0* paths = nullptr;
+    int*         lists = nullptr;
+    if (maxPaths > 0) {
+        paths = static_cast<PathState_0*>(
+            g_paths.reserve(sizeof(PathState_0) * static_cast<size_t>(maxPaths)));
+        // Two lists of path indices, then their two counts.
+        if (paths) {
+            lists = static_cast<int*>(
+                g_pathLists.reserve(sizeof(int) * (2u * static_cast<size_t>(maxPaths) + 2u)));
+        }
+        if (!paths || !lists) {
+            // NOT AN ERROR FOR THE FRAME: clear the failed allocation's status, or the
+            // single kernel's launch check would find it and report it as its own.
+            cudaGetLastError();
+            return -1;
+        }
+    }
+    int* listA  = lists;
+    int* listB  = lists ? lists + maxPaths : nullptr;
+    int* counts = lists ? lists + 2 * maxPaths : nullptr;
+
+    for (int row0 = 0; row0 < H; row0 += rowsPerBand) {
+        const int       rows = rowsPerBand < H - row0 ? rowsPerBand : H - row0;
+        const long long n    = perRow * rows;
+
+        if (n > 0) {
+            int* in  = listA;
+            int* out = listB;
+            int* inCount  = counts;
+            int* outCount = counts + 1;
+
+            cudaMemsetAsync(inCount, 0, sizeof(int));
+            stagedBeginKernel<<<static_cast<unsigned>((n + kStagedBlock - 1) / kStagedBlock),
+                                kStagedBlock>>>(work, row0, rows, paths, in, inCount);
+
+            int living = 0;
+            cudaError_t err = cudaMemcpy(&living, inCount, sizeof(int), cudaMemcpyDeviceToHost);
+            if (err != cudaSuccess) { setError("staged render: first bounce", err); return 0; }
+
+            // pathBounce ends every path at the bounce budget, which is at most the Slang
+            // kBounceCeiling of 256; the cap here only bounds the loop for the reader.
+            for (int bounce = 1; bounce < 4096 && living > 0; ++bounce) {
+                cudaMemsetAsync(outCount, 0, sizeof(int));
+                stagedBounceKernel<<<static_cast<unsigned>(divideRoundUp(living, kStagedBlock)),
+                                     kStagedBlock>>>(work, paths, in, living, out, outCount);
+                err = cudaMemcpy(&living, outCount, sizeof(int), cudaMemcpyDeviceToHost);
+                if (err != cudaSuccess) { setError("staged render: bounce", err); return 0; }
+
+                int* t = in; in = out; out = t;
+                t = inCount; inCount = outCount; outCount = t;
+            }
+        }
+
+        const dim3 block(kBlockX, kBlockY, 1);
+        const dim3 grid(static_cast<unsigned>(divideRoundUp(W, kBlockX)),
+                        static_cast<unsigned>(divideRoundUp(rows, kBlockY)), 1);
+        stagedFinishKernel<<<grid, block>>>(work, row0, rows, paths);
+
+        const cudaError_t launchErr = cudaPeekAtLastError();
+        if (launchErr != cudaSuccess) {
+            setError("staged render launch", cudaGetLastError());
+            return 0;
+        }
+    }
+    return 1;
+}
 
 // Plans the maps for `work`, builds them when the key has moved, and points the request at
 // them. `driftDev` is the drift table already uploaded for this launch.
@@ -496,7 +706,11 @@ bool renderCuda(const RenderRequest& req) {
     // which is inside the 4 KB constant-bank limit for kernel parameters -- so it
     // needs no device allocation, no copy, and no lifetime to manage. That is much
     // of the reason RenderRequest is built the way it is.
-    mistytuneKernel<<<grid, block>>>(work);   // the derived copy, not the caller's
+    const int staged = work.stagedGpu ? renderStaged(work) : -1;
+    if (staged == 0) return false;
+    if (staged < 0) {
+        mistytuneKernel<<<grid, block>>>(work);   // the derived copy, not the caller's
+    }
 
     // PEEK, NOT GET: cudaGetLastError CLEARS the error, and the caller is about to
     // ask for it. This checks that the launch was accepted -- an invalid
@@ -611,7 +825,10 @@ bool renderCudaToHost(const RenderRequest& req, int rowBegin, int rowEnd) {
     // the frame height -- so every ray keeps its true position in the picture while
     // the kernel indexes a buffer that starts at zero. Without this each band would
     // render the TOP of the frame into a different part of the output.
-    devReq.view.originY = req.view.originY + rowBegin;
+    //
+    // AT DRAFT'S PIXEL STRIDE A BUFFER ROW IS `stride` FRAME ROWS, so the band moves that much
+    // further down the frame. One is the line as it always was.
+    devReq.view.originY = req.view.originY + rowBegin * pixelStrideOf(req);
 
     // THE ACCUMULATOR IS CARRIED ACROSS THE LAUNCHES OF ONE BAND, and this function
     // owns it so that no caller has to hold device memory to get a sample split.

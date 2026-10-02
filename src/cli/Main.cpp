@@ -30,6 +30,7 @@
 #include "OrbitCamera.h"
 #include "Pareidolia.h"
 #include "SunPlacement.h"
+#include "Upscale.h"
 
 #include <chrono>
 #include <cmath>
@@ -105,6 +106,15 @@ void printUsage() {
         "  --tilt <deg>  --pan <deg>  --roll <deg>   offsets from that aim\n"
         "  --focal <mm>     focal length on 36 mm film (default 24)\n"
         "  --bounces <n>    scattering events per path (default 32)\n"
+        "  --shadow-handoff <texels>  build 25: a shadow ray walks this many shadow-map\n"
+        "                   texels of clear air, then reads the rest from the map\n"
+        "                   (default 0, the exact ray; Draft uses 2)\n"
+        "  --pixel-stride <n>  build 26: one path per n x n block, denoised at that size\n"
+        "                   and scaled up (default 1; Draft uses 2)\n"
+        "  --draft          Render Quality Draft: 1 spp, hand-off 2, stride 2, and a full\n"
+        "                   denoise (on, amount 1, as the effect does)\n"
+        "  --megakernel     the GPU's single kernel, each pixel's paths start to finish,\n"
+        "                   instead of build 25's launch per bounce. Same bits; A/B only.\n"
         "\n"
         "  The cumulus layer (cellular convection). OFF unless one of these is given,\n"
         "  so every golden scene above is a lone cirrus:\n"
@@ -118,6 +128,7 @@ void printUsage() {
         "  --conv-density <s>  peak extinction per metre (default 0.03)\n"
         "  --billow <m>     billow displacement (default 160)\n"
         "  --billow-scale <m>  the largest billow (default 320)\n"
+        "  --billow-octaves <n>  billow octaves, 1..4 (default 3)\n"
         "  --humidity <rh>  surface humidity 0..1, which sets the base (default 0.7)\n"
         "  --hero <1|2>     a hero cloud with the field, or alone\n"
         "  --hero-x <m>  --hero-z <m>  --hero-width <m>  --hero-height <0..1>  --hero-var <v>\n"
@@ -628,6 +639,10 @@ int main(int argc, char** argv) {
         else if (argIs(a, "--cam-z") && hasNext)         req.view.observerZ = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--altitude") && hasNext)      req.view.observerAltitude = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--bounces") && hasNext)       req.quality.maxBounces = std::atoi(argv[++i]);
+        else if (argIs(a, "--shadow-handoff") && hasNext) req.quality.shadowHandoff = static_cast<cloud::Real>(std::atof(argv[++i]));
+        else if (argIs(a, "--draft"))                    req.quality = cloud::draftQuality(req.quality);
+        else if (argIs(a, "--pixel-stride") && hasNext)  req.quality.pixelStride = std::atoi(argv[++i]);
+        else if (argIs(a, "--megakernel"))               req.stagedGpu = false;
         else if (argIs(a, "--conv-grid") && hasNext)     req.convectionGrid = std::atoi(argv[++i]) != 0;
         // The convection layer. Any of its settings turns it on, since setting one of
         // them on an absent layer would otherwise be a flag that silently does nothing.
@@ -641,6 +656,7 @@ int main(int argc, char** argv) {
         else if (argIs(a, "--conv-density") && hasNext)  { req.field.convection.enabled = true; req.field.convection.density         = static_cast<float>(std::atof(argv[++i])); }
         else if (argIs(a, "--billow") && hasNext)        { req.field.convection.enabled = true; req.field.convection.billowAmount    = static_cast<float>(std::atof(argv[++i])); }
         else if (argIs(a, "--billow-scale") && hasNext)  { req.field.convection.enabled = true; req.field.convection.billowScale     = static_cast<float>(std::atof(argv[++i])); }
+        else if (argIs(a, "--billow-octaves") && hasNext) req.field.convection.billowOctaves = std::atoi(argv[++i]);
         else if (argIs(a, "--humidity") && hasNext)      req.field.physics.surfaceHumidity = static_cast<float>(std::atof(argv[++i]));
         // THE ORGANIZATION GROUP, the cumulus layer's (which it turns on) and the ice's.
         else if (argIs(a, "--org") && hasNext)           { req.field.convection.enabled = true; req.field.convection.organization.mode = parseOrgMode(argv[++i]); }
@@ -889,6 +905,24 @@ int main(int argc, char** argv) {
     req.dest.pitchPx  = destW;
     req.dest.order    = kernel::ChannelOrder::ARGB;
 
+    // DRAFT'S PIXEL STRIDE, AS THE EFFECT RUNS IT: traced into a buffer 1/stride the size,
+    // denoised there, then scaled up into `pixels` before the transform. See Upscale.h.
+    const int stride = req.quality.pixelStride > 1 ? std::min(req.quality.pixelStride, 8) : 1;
+    std::vector<float> traced;
+    if (stride > 1) {
+        if (resolveCheck) {
+            std::fprintf(stderr, "--resolve-check does not take a pixel stride\n");
+            return 2;
+        }
+        const int tw = cloud::strideExtent(destW, stride);
+        const int th = cloud::strideExtent(destH, stride);
+        traced.assign(static_cast<size_t>(tw) * static_cast<size_t>(th) * 4, 0.0f);
+        req.dest.data     = traced.data();
+        req.dest.widthPx  = tw;
+        req.dest.heightPx = th;
+        req.dest.pitchPx  = tw;
+    }
+
     req.firstSample        = 0;
     req.sampleCount        = req.quality.samplesPerPixel;
     req.samplesAlreadyDone = 0;
@@ -1005,6 +1039,14 @@ int main(int argc, char** argv) {
     // BEFORE THE TRANSFORM AND AFTER EVERY SAMPLE -- see KernelApi.h. A no-op unless
     // --denoise was given, and a no-op with a reported reason if OIDN is not installed.
     kernel::denoiseCpu(req);
+    if (stride > 1) {
+        cloud::upscaleFromStride(traced.data(), req.dest.widthPx, req.dest.heightPx,
+                                 req.dest.pitchPx, pixels.data(), destW, destH, destW, stride);
+        req.dest.data     = pixels.data();
+        req.dest.widthPx  = destW;
+        req.dest.heightPx = destH;
+        req.dest.pitchPx  = destW;
+    }
     kernel::transformCpu(req, threads);
 
     // ---------------------------------------------------------------------

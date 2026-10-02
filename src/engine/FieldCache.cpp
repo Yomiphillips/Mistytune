@@ -48,6 +48,13 @@ uint64_t samplingHash(const ViewParams& v, const QualityParams& q) {
     fp.add(q.maxBounces);
     fp.add(q.densityMajorant);
 
+    // DRAFT'S SHADOW HAND-OFF (build 25) changes the picture, so a Draft frame's samples
+    // are not the Best frame's.
+    fp.add(q.shadowHandoff);
+
+    // AND DRAFT'S PIXEL STRIDE (build 26), for the same reason.
+    fp.add(q.pixelStride);
+
     // DENOISE AND DENOISE AMOUNT USED TO BE HERE AND ARE NOW IN resolveHash.
     //
     // The old reason was sound when written: OIDN would need auxiliary albedo and

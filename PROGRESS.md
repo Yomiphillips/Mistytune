@@ -4,7 +4,277 @@ Tracked against `PLAN.md`. Newest first.
 
 ---
 
+## 2026-10-02 — RENDER QUALITY: THE EFFECT'S OWN DRAFT/BEST SWITCH, AND A DRAFT THAT IS AS BRIGHT AS BEST. Build 26, minor 15. Draft traces one path per 2x2 block at one sample, with build 25's shadow hand-off and a full denoise, and leaves Max Bounces alone. Against Best at the same size, at 1 spp on the RTX 2070 SUPER: 3.4 to 3.9x less trace time at 480x270, 4.2 to 6.3x at 1920x1080. Its cloud is within 2 levels of a 64-spp reference. Through build 25, Draft capped Max Bounces at 16, and that left a close hero 27 levels dark. BUILT AND TESTED; INSTALL PENDING (After Effects was open).
+
+### What was reported, and what the log says
+
+Reported from the host, after build 25's advice to preview with the layer's Draft switch: "Just
+setting Draft in AE does not help in any way. Ideally the plugin should have its own draft/best
+option."
+
+- **The layer switch never reached the effect.** `%TEMP%\mistytune.log` holds builds 15 to 24,
+  close to 7,000 traced frames. It never recorded "layer quality Draft", the line pre-render wrote
+  whenever `in_data->quality == PF_Quality_LO`. Whether the user never set it or AE never passed
+  it, it did nothing either way. Build 26 logs `layer=LO|HI` on every frame, so the next session
+  that touches the switch will say which.
+- **Even working, it would have bought little.** The last session in the log ran at quarter
+  resolution with Samples already 1. That leaves Draft only the 16-bounce cap and, since build 25,
+  the hand-off.
+
+### What Draft could be made of, measured
+
+CLI, scenes as in build 25 (A the default backlit hero, close a side-lit close-up, B a cumulus
+field). The CLI's fixed cost is 0.27 s: a 16x9 render takes that, `--help` takes 4 ms, and
+switching off the shadow maps saves 10 ms of it. So the 0.27 s is CUDA start-up, which AE pays
+once per session. Times below are net of it, with interleaved medians of three.
+
+**Bounces are expensive, but cutting them darkens the hero.** At 32 spp, 640x360, no denoise,
+display levels against 32 bounces:
+
+| bounces | 16 | 8 | 4 | 2 |
+| --- | --- | --- | --- | --- |
+| A, mean | -6.4 | -15.7 | -27.3 | -39.7 |
+| close, mean | -21.6 | -47.2 | -73.4 | -94.0 |
+| B, mean | -0.6 | -2.4 | -5.8 | -9.6 |
+| close, time (32: 39.6 s) | 27.4 s | 16.4 s | 8.5 s | 4.3 s |
+
+Build 16's "1% darker" for the 16 cap was measured on a cumulus field, which matches B. The hero
+is far thicker, so much of its light arrives after the 16th bounce.
+
+**Billow octaves cost almost nothing.** `--billow-octaves` (new, CLI only) at 3, 2 and 1: 0.2% and
+2 to 3% less time. The billow is only evaluated in the surface shell.
+
+**Half resolution is the big constant factor.** At 240x136 instead of 480x270, trace time falls
+2.3x for Best and 2.7x for build 25's Draft.
+
+**A roulette in place of the cap was tried and lost.** The idea: from the fourth bounce, a path
+survives each scattering with probability at most p, and the survivors carry 1/p more. That is
+unbiased in linear light, whereas the cap is not. The existing roulette takes p from the
+throughput, and in a cloud of albedo near one that is always 1, so it never ends a path. The
+denoised preview test below found it dark anyway: OIDN treats the rare, heavily weighted survivors
+as outliers. Removed. The kernel keeps a comment saying why.
+
+### The preview, denoised: what the user would actually see
+
+480x270, 1 spp, denoised, four seeds averaged, against a 64-spp denoised render at the same size.
+"Cloud" is the reference's brightest 40% of pixels. Levels, then RMSE per frame:
+
+| | A cloud | close cloud | B cloud | RMSE A / close / B |
+| --- | --- | --- | --- | --- |
+| Best (Denoise Amount 0.8) | -3.7 | -7.8 | -1.7 | 14.5 / 17.3 / 10.6 |
+| Best, bounces capped at 16 (build 25's Draft) | -6.9 | -30.3 | -2.2 | 20.8 / 37.1 / 11.5 |
+| Best, roulette 0.85 | -5.9 | -16.2 | -2.2 | 18.2 / 25.2 / 11.7 |
+| Half res + hand-off, amount 0.8 | -2.9 | -5.6 | -0.6 | 18.0 / 18.1 / 14.1 |
+| **Draft: half res + hand-off, amount 1** | **-1.8** | **-2.0** | **0.0** | **15.6 / 12.3 / 13.6** |
+| Best, amount 1 | -1.5 | -1.9 | -0.7 | 11.0 / 9.9 / 9.0 |
+
+At amount 0.8, half resolution was the right brightness but covered a close hero in white 2x2
+speckles. Amount 0.8 blends a fifth of the raw frame back in, and at half resolution each raw
+firefly is a block. A full denoise removes them (montages in `build/tmp/b26/preview*.png`). So
+Draft always denoises in full, whatever Denoise and Denoise Amount say.
+
+### Draft against Best, trace time
+
+1 spp, no denoise (a Draft denoise runs on a quarter of the pixels, so it is cheaper still):
+
+| | A | close | B |
+| --- | --- | --- | --- |
+| 1920x1080 | 5.69 -> 1.04 s (5.5x) | 9.66 -> 1.54 s (6.3x) | 1.29 -> 0.31 s (4.2x) |
+| 960x540 | 1.48 -> 0.31 s (4.8x) | 2.46 -> 0.45 s (5.5x) | 0.42 -> 0.12 s (3.4x) |
+| 480x270 | 0.49 -> 0.14 s (3.5x) | 0.73 -> 0.19 s (3.9x) | 0.19 -> 0.055 s (3.4x) |
+
+For comparison, build 25's Draft at 480x270 was 0.24 / 0.32 / 0.085 s. At Full 1080p, Draft is
+still about a second, so it is not real time there. At quarter resolution it is a tenth to a fifth
+of a second.
+
+### What was built
+
+- **Render Quality**, a Draft | Best popup directly under the classifier readout and outside every
+  group, because a look session touches it most. ID 308, default Best, so a render queue gets what
+  the sliders say unless asked. It was inserted, hence the minor bump. `draftRequested()` in
+  Params.h treats anything an expression delivers other than Draft as Best. The layer switch no
+  longer does anything.
+- **`QualityParams::pixelStride`** (in `samplingHash`). `primaryRayDirection` takes a stride: buffer
+  pixel (px, py) is the stride x stride block at origin + stride * (px, py), traced from the
+  block's centre with the jitter spread over the block. The frame is not halved, so framing and
+  field of view are exact at odd sizes; halving `widthPx` would round. The seed is the block's
+  first frame pixel. The CUDA band offset moves `rowBegin * stride`. STRIDE ONE TAKES THE OLD
+  EXPRESSION, ROUNDING INCLUDED: the dev build's 32-spp renders of A and close came out
+  byte-identical to build 25's, and the goldens pass unchanged.
+- **`src/engine/Upscale.h`**: `strideExtent` and `upscaleFromStride`, bilinear between block
+  centres, clamped at the edges, honouring both pitches. It works in linear light, after the
+  denoise and before the output transform. `smartRenderHost` traces into a buffer the stride's
+  size, runs the bands, chunks and denoise on it, scales it up into AE's world or the staging
+  buffer, and transforms there. `smartRenderGpu` keeps every pixel, because nothing scales a
+  smaller buffer into AE's device memory. Measured in AE 2026, that command is never called.
+- **`draftQuality`**: one sample (never raised), hand-off 2, stride 2, denoise on at amount 1. Max
+  Bounces untouched.
+- **CLI**: `--pixel-stride`, `--billow-octaves`, and `--draft` meaning the above.
+- **Tests**: `TestUpscale.cpp` (new, five: extents, stride one copies, a flat field stays exactly
+  flat, a ramp lands on the block centres, padded rows honoured and untouched). `TestCamera.cpp`
+  gains two: a strided pixel looks through its block centre, odd frame, origin and band offset
+  included; stride one equals the unstrided ray bit for bit. `TestFieldCache.cpp`: Draft's recipe,
+  including a full denoise with the switch off, and the stride in the sampling hash.
+
+### Known limits
+
+- Draft is softer than Best: half resolution, fully denoised. That is the trade, and it is the
+  only one. Brightness, shadows (to a texel) and bounces are Best's.
+- The 2x2 blocks align to the buffer AE hands over, not to the frame. Two different request rects
+  of one frame put them differently. This affects Draft only.
+- Not real time at Full 1080p (A about 1 s). The remaining large costs are build 25's: the camera
+  ray's sun walk through clear air, and multiple scattering inside the hero.
+
+---
+
+## 2026-10-02 — FASTER: THE CAMERA RAY WALKED ONCE, THE GPU ONE BOUNCE PER LAUNCH, AND DRAFT'S SHADOWS FROM THE MAP. Build 25, minor 14. Against build 24 at 1 spp on the RTX 2070 SUPER: Best takes 26 to 34% less time at 1080p, with the same picture up to its noise; the layer's Draft switch is 2.5 to 3x faster at 1080p and about 2x at Third. INSTALLED (2026-10-02, 00:48), NOT YET SEEN IN THE HOST.
+
+### Where a frame's time went
+
+Asked for from the host: "work on optimising to make preview faster and reduce render time to
+feel real time". Measured before anything was changed, CLI, Best quality, 1 spp, no denoise:
+
+| | 1920x1080 | 640x360 |
+| --- | --- | --- |
+| A, the default backlit hero | 8.1 s | 1.1 s |
+| B, a cumulus field, no hero | 2.3 s | 0.5 s |
+
+A PROBE (throwaway, `build/tmp/b25/probe*.py`): a negative `--nee-scale` made the kernel return its
+tracking steps per pixel as colour. Steps per pixel-sample at 640x360:
+
+| | total | camera ray: sun walk + first flight | later free flights | shadow rays | scatter events |
+| --- | --- | --- | --- | --- | --- |
+| A | 278 | 85 + 58 | 27 | 107 | 4.8 |
+| wide | 237 | 87 + 61 | 17 | 72 | 2.4 |
+| close | 374 | 42 + 11 | 40 | 280 | 12.3 |
+| B | 158 | 73 + 60 | 8 | 16 | 1.0 |
+
+- **A step is not a step.** `--bounces` from 1 to 32 against the probe's counts: a step along the
+  camera ray costs about 8 ns of frame time, a step in a later bounce about 26 ns. The camera rays
+  of a warp walk side by side; by the third bounce its 32 paths are scattered through the cloud
+  and a third of them have ended. Lanes doing useful work, from the probe image in 16x2 warps:
+  41% in A, 53% in B. The kernel used 250 registers a thread, so an SM held a quarter of the
+  threads it can.
+- **Shadow rays were the largest category**, about 22 steps each, most of them null collisions in
+  the clear air between the cloud a point is in and the slab's top. Reading the shadow map for
+  the whole ray instead (a throwaway, wrong in the near field) took A from 8.1 to 4.4 s: the
+  most any shadow change could buy.
+
+Measured and rejected:
+
+- **The scene in device memory, built once per launch**, instead of per ray on each thread's
+  stack (3.5 KB of stack frame): 10% SLOWER in global memory and no faster in constant memory.
+  The stack was not the bottleneck. Reverted.
+- **Empty-space skipping.** The cumulus layer's procedural majorant grid ADDS steps in every scene
+  (A 278 to 292, B 158 to 181): a box's bound must allow every billow that could reach into it,
+  hundreds of metres from any tower, so almost no box is provably empty. A stored grid of the same
+  bounds would skip nothing either.
+- **Block shapes** were timed while After Effects was rendering on the same GPU and told nothing.
+
+### The camera ray, walked once
+
+`cameraSegmentSun` walks the whole camera ray to estimate the sun along it, and then `trace()`
+walked the same stretch again, by delta tracking, to find the first collision. The walk's own
+tentative points are a Poisson process at a rate at or above the density, which is all delta
+tracking needs: each is now accepted as real with probability sigma / rate on a fourth draw per
+step, and the first accepted point is the path's first collision, in either layer. When the
+walk's roulette ends it first -- optical depth past 4.6 with nothing accepted, one ray in a
+hundred -- `trace()` tracks on from where it stopped.
+
+- **Steps**: A 278 to 218, wide 237 to 175, close 374 to 361, B 158 to 98.
+- **Time**: only 5 to 15% at 1080p. The steps it removed were the cheap, coherent ones.
+- **The same picture up to its noise.** Build 24 and build 25 at 64 spp, 160x90, against build
+  24 at 256: every mean difference within one standard error (A, close, B, and the three golden
+  scenes), and the spread between them no larger than noise predicts (ratio 0.70 to 0.95).
+- **slang.bounce** passes unchanged: the closed forms, the majorant sweep, the thin-slab variance
+  gain (7.28x), the furnace at scale 4 (0.999996), and the full path against delta tracking (0.29
+  standard errors apart).
+- **The goldens were re-blessed**, from the CPU path: the noise moved (mean 1 level, max 124 on
+  single pixels at 24 spp). The old references are in `build/tmp/b25/golden-old/`.
+
+### The GPU, one bounce per launch
+
+`trace()` is now `pathBegin` -- the camera ray and the whole first bounce -- and `pathBounce` in a
+loop (`BounceLib.slang`, `PathState`). The CPU reference and every test suite run that loop. The
+GPU runs it in stages (`renderStaged` in `Mistytune.cu`): one launch begins every sample of the
+request, then one launch per bounce runs only the paths still alive, gathered into a list by the
+launch before, and a last launch sums each pixel's samples in sample order and writes them as
+`renderPixel` does. Each launch does one kind of work, and the bounce kernel uses 164 registers.
+
+- **The same bits.** Byte-identical to the single kernel (`--megakernel`, kept for A/B) at 1 and 4
+  spp and in Draft, and the restructured `trace()` byte-identical to the one before it at 128 spp.
+  New test: **determinism.gpuStaged**, a hero in a cumulus field with bands and sample chunks.
+- **Time, against the single kernel in the same binary**, 1080p 1 spp: A 0.75x, B 0.73x, close
+  0.75x, wide 0.76x, o90 0.68x.
+- **Memory**: 151 MB of path state per rendering thread for 1080p at one sample, the GPU band
+  budget. A frame that cannot get it -- several in flight on a full card -- runs the single
+  kernel instead, with the same result.
+- **The Windows display timeout** sees one bounce per launch rather than a whole band.
+
+### Draft: the shadow ray hands off to the map
+
+The layer's Draft switch now also sets `QualityParams::shadowHandoff` to 2 (texels of the shadow
+map; 0, Best's, is the exact ray). It is a sampling input and in `samplingHash`. A shadow ray walks
+exactly, by ratio tracking, until it has crossed two texels of clear air since the last cloud it
+met; then it walks on, still exactly, to the next slice plane above, and takes the rest of its way
+to the sun from the cumulus layer's shadow map, read on that plane. Below the cirrus slab, the
+cirrus's share is one read of its map. See `transmittanceHandoff` in `AirMapLib.slang`.
+
+- **Why the plane.** The first version read the map where the gap ran out, between two slices, and
+  the slice below holds the column's transmittance through the cloud the ray had just left:
+  sunlit faces came out up to 20 levels darker (9-pixel blur of a 128 spp render) and the backlit
+  rim brighter. Read on the plane, the mean difference against the exact ray is +0.04 to +0.20
+  levels in four views, and the blurred 1st and 99th percentiles (about ±5 to 9) are what the
+  noise of two 128 spp renders gives. Left: a faint brightening on A's backlit right rim and a
+  slightly warmer patch on o90's overhead base, up to about 20 levels in the blur. Side by side
+  the frames cannot be told apart.
+- **Cost**: the cumulus map keeps its 16 slices. More would shorten the walk to the plane, but the
+  same map draws the air's and the ground's shadows in Best, which would then change.
+- **Time**, 640x360, 128 spp, against build 25's exact ray in the single kernel: A 125 to 50 s,
+  close 203 to 90 s, wide 106 to 31 s, o90 143 to 42 s (staged kernel and hand-off together).
+
+### Against build 24, end to end
+
+CLI, 1 spp, interleaved runs, best of three. Chrome was drawing on the GPU, so the absolute times
+drift between sets; the ratios held.
+
+| | Best, 1080p | Draft, 1080p | Draft, 640x360 |
+| --- | --- | --- | --- |
+| A | 0.72x | 0.39x (9.4 to 3.7 s) | 0.53x (1.27 to 0.67 s) |
+| close | 0.74x | 0.33x (15.2 to 5.0 s) | 0.43x |
+| o90 | 0.66x | 0.33x (9.3 to 3.1 s) | 0.48x |
+| B | 0.66x | | |
+
+The 640x360 times include about 0.3 s of process start and CUDA initialisation that the effect
+does not pay per frame.
+
+### What it did not do
+
+Real time at 1080p is not here: a Draft frame of the default hero is still over three seconds at
+full resolution on this card. What is left is the work itself -- a dense cloud scatters a path a
+dozen times, and each event needs a shadow ray -- and the 1080p Best frame is about 4 µs per
+pixel-sample. The next levers, in the order the measurements rank them: the camera ray's sun walk
+through clear air (85 steps in A, coherent but long), a finer shadow map round the hero so the
+hand-off could start sooner, and the density function's own cost inside the hero group.
+
+### Tests
+
+All 28 ctest suites pass (27 and determinism.gpuStaged). The goldens moved once, for the single
+walk, and were re-blessed from the CPU.
+
+### What needs the host
+
+- **Preview with the layer's Draft switch** (the layer's Quality switch): 1 spp, 16 bounces, and
+  the shadow hand-off. Best is unchanged apart from its noise.
+- Does Draft at Half or Third feel interactive now, and does its look match Best's closely enough
+  to judge a frame by?
+- Builds 22 to 24's items still apply.
+
+---
+
 ## 2026-10-01 — PILEUS AND VELUM, AND THE CLOUDS FINALLY MOVE IN PLAYBACK. Build 24, minor 14. The hero gets a smooth cap over its crown and a wide thin veil it rises through, both thinner than the tower. At 0 the frame is byte-identical to build 21. And the effect now tells AE its picture changes with time: since Phase 1, AE played back one frame of an effect with nothing keyframed. BUILT AND TESTED, NOT INSTALLED: After Effects was open.
+
+**Installed afterwards, and REPORTED from the host on 2026-10-01:** "the playback was not the issue". The cumulus looked still because the default orbit rig follows the drifting hero, so the frame moves with the wind; with the hero not followed, the drift shows. The flag stays, because the SDK says an effect whose picture changes with time must set it, and this build cannot show whether it was also needed. Offered and declined ("I think it's fine"): a camera that stays put while the hero drifts, and a Time Scale.
 
 ### Why nothing drifted (found from a user report)
 

@@ -38,6 +38,7 @@
 #include "Fingerprint.h"
 #include "KernelApi.h"
 #include "Pareidolia.h"
+#include "Upscale.h"
 
 #include <algorithm>
 #include <cstring>
@@ -333,15 +334,24 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
     data->field.timeSeconds = currentTimeSeconds(in_data);
     data->quality          = toQuality(values);
 
-    // THE LAYER'S DRAFT SWITCH IS THE PREVIEW MODE. See draftQuality in CloudParams.h.
+    // THE RENDER QUALITY POPUP IS THE PREVIEW MODE (build 26), and the layer's quality switch
+    // no longer is. See draftQuality in CloudParams.h for why, and for what Draft buys.
     // Applied here, before the sampling hash is taken below, so a Draft frame and a Best
     // frame are different accumulations and neither is mistaken for the other.
-    if (in_data->quality == PF_Quality_LO) {
-        data->quality = cloud::draftQuality(data->quality);
-        diagLog("  layer quality Draft: %d spp, %d bounces",
-                static_cast<int>(data->quality.samplesPerPixel),
-                static_cast<int>(data->quality.maxBounces));
-    }
+    //
+    // THE LAYER SWITCH IS STILL LOGGED, because builds 15 to 24 never once saw it at LO and
+    // that is worth confirming rather than assuming: a line with layer=LO in it says AE does
+    // pass it, and the popup is then a choice rather than a workaround.
+    const bool draft = draftRequested(values);
+    if (draft) data->quality = cloud::draftQuality(data->quality);
+    diagLog("  render quality %s (layer=%s): %d spp, %d bounces, hand-off %.1f, stride %d, denoise %.2f",
+            draft ? "Draft" : "Best",
+            in_data->quality == PF_Quality_LO ? "LO" : "HI",
+            static_cast<int>(data->quality.samplesPerPixel),
+            static_cast<int>(data->quality.maxBounces),
+            static_cast<double>(data->quality.shadowHandoff),
+            static_cast<int>(data->quality.pixelStride),
+            data->quality.denoise ? static_cast<double>(data->quality.denoiseAmount) : 0.0);
 
     data->view.exposureEV = static_cast<float>(values.v[kMistytuneExposureEV]);
     data->view.renderDistance = static_cast<float>(values.v[kMistytuneRenderDistance]);
@@ -656,6 +666,11 @@ PF_Err smartRenderGpu(PF_InData* in_data, PF_OutData* out_data,
     req.dest    = toSurface(output, format);
     req.dest.data = destMem;
 
+    // EVERY PIXEL HERE, EVEN IN DRAFT: this buffer is AE's device memory and nothing on this
+    // path scales a smaller one up into it. Draft keeps its other savings. Measured in AE
+    // 2026, this command is never called anyway -- see smartRenderHost.
+    req.quality.pixelStride = 1;
+
     // The offset of this buffer's pixel (0,0) within the frame. Without it the
     // renderer draws the wrong part of the picture into the right buffer -- see the
     // frame/window note in CloudParams.h, and PreRenderData on where it comes from.
@@ -858,6 +873,33 @@ PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
     }
 
     // =======================================================================
+    // DRAFT TRACES A SMALLER BUFFER (build 26), one path per stride x stride block, and
+    // everything from here to the denoise runs on it: the bands, the chunks, the cache's
+    // dimensions. After the denoise it is scaled up into `frameDest` -- AE's world or the
+    // staging buffer, whichever the frame was going to be written to -- and the output
+    // transform runs there at full size. See QualityParams::pixelStride and Upscale.h.
+    //
+    // traceW/traceH REPLACE output->width/height BELOW THIS LINE, and only the scale-up
+    // and the log go back to the output's own size.
+    // =======================================================================
+    const kernel::Surface frameDest = req.dest;
+    const int stride = data.quality.pixelStride < 1 ? 1
+                     : (data.quality.pixelStride > 8 ? 8 : data.quality.pixelStride);
+    std::vector<float> traced;
+    if (stride > 1) {
+        const int tw = cloud::strideExtent(output->width, stride);
+        const int th = cloud::strideExtent(output->height, stride);
+        traced.assign(static_cast<size_t>(tw) * static_cast<size_t>(th) * 4, 0.0f);
+        req.dest.data     = traced.data();
+        req.dest.widthPx  = tw;
+        req.dest.heightPx = th;
+        req.dest.pitchPx  = tw;
+        // order stays frameDest's, so the scale-up copies channels straight across
+    }
+    const A_long traceW = req.dest.widthPx;
+    const A_long traceH = req.dest.heightPx;
+
+    // =======================================================================
     // RENDERED IN BANDS OF ROWS, AND THE REASON IS THE ONE FAILURE THAT LOOKS
     // EXACTLY LIKE A BROKEN PLUGIN.
     //
@@ -903,9 +945,9 @@ PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
     // beside the measurement that sets it.
     const long long kBandBudget = useGpu ? kernel::kGpuPixelSampleBudget : (256 * 1024);
     const long long perRow =
-        static_cast<long long>(output->width) * data.quality.samplesPerPixel;
+        static_cast<long long>(traceW) * data.quality.samplesPerPixel;
 
-    int rowsPerBand = perRow > 0 ? static_cast<int>(kBandBudget / perRow) : output->height;
+    int rowsPerBand = perRow > 0 ? static_cast<int>(kBandBudget / perRow) : traceH;
 
     // A FLOOR, BECAUSE THE BAND IS ALSO THE UNIT OF PARALLELISM.
     //
@@ -928,7 +970,7 @@ PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
     // the same starvation as the CPU case, one level down.
     const int kMinRowsPerBand = useGpu ? 16 : static_cast<int>(hw) * 2;
     if (rowsPerBand < kMinRowsPerBand) rowsPerBand = kMinRowsPerBand;
-    if (rowsPerBand > output->height)  rowsPerBand = output->height;
+    if (rowsPerBand > traceH)          rowsPerBand = traceH;
 
     // =======================================================================
     // AND THE SAMPLES ARE SPLIT TOO, ONCE THE ROWS CANNOT GO ANY FINER.
@@ -945,11 +987,11 @@ PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
     const int totalSamples = data.quality.samplesPerPixel > 0 ? data.quality.samplesPerPixel : 1;
     const int samplesPerChunk = kernel::samplesPerLaunch(
         kBandBudget,
-        static_cast<long long>(output->width) * kMinRowsPerBand,
+        static_cast<long long>(traceW) * kMinRowsPerBand,
         totalSamples);
 
     const int chunksPerBand = (totalSamples + samplesPerChunk - 1) / samplesPerChunk;
-    const A_long bandCount  = (output->height + rowsPerBand - 1) / rowsPerBand;
+    const A_long bandCount  = (traceH + rowsPerBand - 1) / rowsPerBand;
     const A_long totalUnits = bandCount * chunksPerBand;
     A_long unitsDone = 0;
 
@@ -995,8 +1037,8 @@ PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
 
     const double t0 = diagSeconds();
 
-    for (A_long y = 0; y < output->height; y += rowsPerBand) {
-        const A_long y1 = std::min<A_long>(y + rowsPerBand, output->height);
+    for (A_long y = 0; y < traceH; y += rowsPerBand) {
+        const A_long y1 = std::min<A_long>(y + rowsPerBand, traceH);
 
         // THE BAND IS RESTARTED, NOT RESUMED, IF THE GPU DROPS OUT PARTWAY THROUGH IT.
         //
@@ -1077,7 +1119,7 @@ PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
                 // staging buffer below would hand AE a half-rendered frame to cache.
                 if (PF_Err abortErr = PF_ABORT(in_data)) {
                     diagLog("  aborted at row %d of %d, sample %d of %d, after %.2f s",
-                            static_cast<int>(y1), static_cast<int>(output->height),
+                            static_cast<int>(y1), static_cast<int>(traceH),
                             s0 + n, totalSamples, diagSeconds() - t0);
                     return abortErr;
                 }
@@ -1113,9 +1155,10 @@ PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
     // and now also the one that says whether the cache did anything. "resolved" is the
     // line to look for after dragging Exposure or Denoise Amount at final quality; a
     // "traced" there, on a frame that was just rendered, is a cache miss worth knowing.
-    diagLog("  %s %dx%d on the %s in %.2f s (%d rows per band, %d samples%s)",
+    diagLog("  %s %dx%d%s on the %s in %.2f s (%d rows per band, %d samples%s)",
             resolveOnly ? "resolved" : "traced",
-            static_cast<int>(output->width), static_cast<int>(output->height),
+            static_cast<int>(traceW), static_cast<int>(traceH),
+            stride > 1 ? " (Draft: one path per 2x2 block)" : "",
             useGpu ? "GPU" : "CPU", diagSeconds() - t0, rowsPerBand, totalSamples,
             resolveOnly ? " from the accumulator" : (split ? "" : ", unsplit -- not cacheable"));
 
@@ -1159,6 +1202,22 @@ PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
         // folder or a quarantined DLL produces -- so the log has to name it.
         diagLog("  denoise %.3f s (%s)", diagSeconds() - tDenoise,
                 denoised ? "applied" : cloud::denoiserDescription());
+    }
+
+    // DRAFT'S SCALE-UP, after the denoise and before the transform -- see above the band loop.
+    // From here on req.dest is the frame's own buffer again.
+    if (stride > 1) {
+        const double tUp = diagSeconds();
+        cloud::upscaleFromStride(traced.data(), static_cast<int>(traceW),
+                                 static_cast<int>(traceH), static_cast<int>(req.dest.pitchPx),
+                                 static_cast<float*>(frameDest.data),
+                                 static_cast<int>(frameDest.widthPx),
+                                 static_cast<int>(frameDest.heightPx),
+                                 static_cast<int>(frameDest.pitchPx), stride);
+        req.dest = frameDest;
+        diagLog("  scaled up to %dx%d in %.3f s",
+                static_cast<int>(frameDest.widthPx), static_cast<int>(frameDest.heightPx),
+                diagSeconds() - tUp);
     }
 
     const double tTransform = diagSeconds();

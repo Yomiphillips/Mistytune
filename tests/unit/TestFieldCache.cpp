@@ -482,9 +482,11 @@ PL_TEST(ASecondResolveStillResolves) {
 // Draft, and the two view inputs added with the travelling camera
 // ---------------------------------------------------------------------------
 
-// DRAFT CAPS, IT NEVER RAISES. A user already below the caps keeps their values, and
-// the field is untouched -- Draft is a quality setting, not a different sky.
-PL_TEST(DraftCapsSamplesAndBouncesAndNothingElse) {
+// DRAFT CAPS THE SAMPLES AND LEAVES THE BOUNCES (build 26): the bounce cap it had through
+// build 25 darkened a thick hero. It halves the resolution instead, and denoises in full.
+// A user already below the sample cap keeps their value, and the field is untouched --
+// Draft is a quality setting, not a different sky.
+PL_TEST(DraftCapsSamplesKeepsBouncesAndAddsItsSavings) {
     QualityParams q;
     q.samplesPerPixel = 64;
     q.maxBounces      = 32;
@@ -493,9 +495,17 @@ PL_TEST(DraftCapsSamplesAndBouncesAndNothingElse) {
 
     const QualityParams d = draftQuality(q);
     PL_CHECK_EQ(d.samplesPerPixel, kDraftSamples);
-    PL_CHECK_EQ(d.maxBounces, kDraftMaxBounces);
+    PL_CHECK_EQ(d.maxBounces, 32);
+    PL_CHECK_NEAR(d.shadowHandoff, kDraftShadowHandoff, 1e-6);
+    PL_CHECK_EQ(d.pixelStride, kDraftPixelStride);
     PL_CHECK(d.denoise);
-    PL_CHECK_NEAR(d.denoiseAmount, 0.6, 1e-6);
+    PL_CHECK_NEAR(d.denoiseAmount, 1.0, 1e-6);
+
+    // A FULL DENOISE EVEN WITH THE SWITCH OFF: at half resolution the raw frame's fireflies
+    // are 2x2 speckles. See draftQuality.
+    QualityParams raw = q;
+    raw.denoise = false;
+    PL_CHECK(draftQuality(raw).denoise);
 
     QualityParams low;
     low.samplesPerPixel = 1;
@@ -503,6 +513,24 @@ PL_TEST(DraftCapsSamplesAndBouncesAndNothingElse) {
     const QualityParams dl = draftQuality(low);
     PL_CHECK_EQ(dl.samplesPerPixel, 1);
     PL_CHECK_EQ(dl.maxBounces, 4);
+
+    // BEST IS UNTOUCHED: the defaults are the exact estimator at every pixel.
+    const QualityParams best;
+    PL_CHECK_EQ(best.pixelStride, 1);
+    PL_CHECK_EQ(best.shadowHandoff, 0.0f);
+}
+
+// DRAFT'S STRIDE CHANGES WHICH RAYS ARE TRACED, so a Draft accumulation is never resolved
+// as a Best one.
+PL_TEST(DraftsStrideIsInTheSamplingHash) {
+    ViewParams v;
+    QualityParams q;
+    const uint64_t base = samplingHash(v, q);
+
+    QualityParams stride = q;  stride.pixelStride = 2;
+
+    PL_CHECK(samplingHash(v, stride) != base);
+    PL_CHECK(samplingHash(v, draftQuality(q)) != base);
 }
 
 // WHERE THE EYE STANDS AND HOW FAR IT DRAWS ARE SAMPLING INPUTS. Both change which

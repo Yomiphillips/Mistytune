@@ -652,34 +652,77 @@ struct QualityParams {
     // encoded images and darken the midtones.
     // ===================================================================
     Real denoiseAmount = 0.8f;
+
+    // ===================================================================
+    // DRAFT'S SHADOW HAND-OFF, in texels of the clouds' shadow maps (build 25). A shadow
+    // ray walks exactly until it has crossed this many texels of clear air, then reads the
+    // rest of its way to the sun from the map. ZERO IS THE EXACT RAY, and the default: only
+    // draftQuality() turns it on.
+    //
+    // A SAMPLING INPUT, so it is in samplingHash: a Draft frame's samples are not samples
+    // of the Best frame. See transmittanceHandoff in AirMapLib.slang for the argument and
+    // PROGRESS.md (build 25) for what it costs the picture.
+    // ===================================================================
+    Real shadowHandoff = 0.0f;
+
+    // ===================================================================
+    // DRAFT'S PIXEL STRIDE (build 26): one path per stride x stride block of the frame,
+    // traced from the block's centre with the jitter spread over the block. The caller
+    // renders into a buffer 1/stride the size, denoises it there and scales it up with
+    // upscaleFromStride (src/engine/Upscale.h). ONE IS EVERY PIXEL, and the default.
+    //
+    // THE FRAME DOES NOT CHANGE, so the field of view and the framing are exact at any
+    // size, odd ones included -- unlike halving widthPx, which rounds.
+    //
+    // A SAMPLING INPUT, in samplingHash.
+    // ===================================================================
+    int32_t pixelStride = 1;
 };
 
 // ---------------------------------------------------------------------------
-// Draft: what the layer's Draft switch buys
+// Draft: what the Render Quality switch buys
 // ---------------------------------------------------------------------------
 //
 // ===========================================================================
-// ONE SAMPLE, AND AT MOST SIXTEEN BOUNCES, WHILE THE LAYER IS SET TO DRAFT.
+// THE EFFECT'S OWN SWITCH SINCE BUILD 26, NOT THE LAYER'S.
 //
-// Reported from the host: cumulus was only interactive at Third resolution AND Samples
-// 1, so every look change meant dragging the Samples slider down and back up again.
-// AE's layer quality switch already says "I am adjusting, not rendering" -- it reaches
-// the effect as in_data->quality == PF_Quality_LO -- so it drives this instead, and the
-// Samples slider keeps the value the final render wants.
+// Through build 25 the layer's quality switch drove this, read as in_data->quality ==
+// PF_Quality_LO. Reported from the host: "Just setting Draft in AE does not help in any
+// way." The log agrees: across builds 15 to 24 it never once recorded a Draft frame.
+// Whatever the layer switch does in AE 2026, it did not reach this effect, so the Render
+// Quality popup at the top of the panel decides now. See Params.h.
 //
-// SIXTEEN BOUNCES, MEASURED on the default cumulus at 640x360: 32 -> 16 is 1% darker for
-// about 10% less time; 8 is 3% darker for 28% less. Bounces are NOT where the time is --
-// the samples are -- so the cap stops where the picture starts to move, which keeps
-// Draft a faithful preview of the look rather than a darker one.
+// WHAT IT BUYS, MEASURED (PROGRESS.md, build 26) on an RTX 2070 SUPER at 1 spp, trace
+// time against Best at the same size: 3.4 to 3.9x less at 480x270 (a quarter-resolution
+// 1080p preview), 3.5 to 5.5x at 960x540, 4.2 to 6.3x at 1920x1080.
 //
-// NEVER RAISES ANYTHING: a user already at one sample or eight bounces keeps them.
+//   * ONE SAMPLE. NEVER RAISES ANYTHING: a user already at one sample keeps it.
+//   * HALF RESOLUTION, one path per 2x2 block (QualityParams::pixelStride), denoised at
+//     that size and scaled up. The largest single saving, and it changes only sharpness.
+//   * THE SHADOW HAND-OFF (build 25): two texels of clear air, then the map. Cast shadows
+//     soften by about a texel. See QualityParams::shadowHandoff.
+//   * A FULL DENOISE, whatever Denoise and Denoise Amount say. Amount 0.8 blends a fifth
+//     of the raw frame back in, and at half resolution its fireflies come back as 2x2
+//     white speckles all over a close hero -- seen, not just measured. Fully denoised,
+//     Draft's cloud is within 2 levels of a 64-spp reference on all three test frames.
+//
+// MAX BOUNCES IS LEFT ALONE, so Draft is as bright as Best. Through build 25 Draft capped
+// it at 16, measured then as 1% darker on a cumulus field. The hero is far thicker: on a
+// close side-lit frame, denoised, the cap put the mean 27 levels under a 64-spp reference
+// where Best sits 4 under. A roulette that survives at most 0.85 a bounce was tried in its
+// place -- unbiased in linear light, but OIDN treats its heavily weighted survivors as
+// outliers, and it sat 13 under.
 // ===========================================================================
-constexpr int32_t kDraftSamples    = 1;
-constexpr int32_t kDraftMaxBounces = 16;
+constexpr int32_t kDraftSamples       = 1;
+constexpr Real    kDraftShadowHandoff = 2.0f;
+constexpr int32_t kDraftPixelStride   = 2;
 
 inline QualityParams draftQuality(QualityParams q) {
     if (q.samplesPerPixel > kDraftSamples)  q.samplesPerPixel = kDraftSamples;
-    if (q.maxBounces > kDraftMaxBounces)    q.maxBounces = kDraftMaxBounces;
+    if (!(q.shadowHandoff > 0.0f))          q.shadowHandoff = kDraftShadowHandoff;
+    if (q.pixelStride < kDraftPixelStride)  q.pixelStride = kDraftPixelStride;
+    q.denoise       = true;
+    q.denoiseAmount = 1.0f;
     return q;
 }
 

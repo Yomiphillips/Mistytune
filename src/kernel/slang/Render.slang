@@ -47,6 +47,48 @@ void renderRays(uint3 tid : SV_DispatchThreadID,
                                   origins[i], directions[i], seed + uint(i));
 }
 
+// THE STAGED RENDER (build 25): every sample's camera ray and first bounce, then one bounce
+// per launch over the paths still alive. Mistytune.cu calls beginSample and pathBounce from
+// kernels of its own, as it calls renderSample; these entry points are what make slangc
+// emit them. See PathState in BounceLib.slang.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void beginPaths(uint3 tid : SV_DispatchThreadID,
+                uniform Scene scene,
+                uniform PhaseInput phase,
+                uniform StructuredBuffer<float> bounds,
+                uniform StructuredBuffer<float2> drift,
+                uniform StructuredBuffer<float3> origins,
+                uniform StructuredBuffer<float3> directions,
+                uniform RWStructuredBuffer<PathState> paths,
+                uniform uint seed,
+                uniform int count)
+{
+    int i = int(tid.x);
+    if (i >= count) return;
+
+    paths[i] = beginSample(scene, phase, bounds, drift, origins[i], directions[i],
+                           seed + uint(i));
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void bouncePaths(uint3 tid : SV_DispatchThreadID,
+                 uniform Scene scene,
+                 uniform PhaseInput phase,
+                 uniform StructuredBuffer<float> bounds,
+                 uniform StructuredBuffer<float2> drift,
+                 uniform RWStructuredBuffer<PathState> paths,
+                 uniform int count)
+{
+    int i = int(tid.x);
+    if (i >= count) return;
+
+    PathState st = paths[i];
+    pathBounce(scene, phase, bounds, drift, st);
+    paths[i] = st;
+}
+
 // THE CLOUDS' SHADOW MAP, one texel's column per thread. Mistytune.cu calls
 // layerMapColumn from a kernel of its own, as it calls renderSample; this entry point is
 // what makes slangc emit it. See AirMapLib.slang.

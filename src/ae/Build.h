@@ -194,6 +194,24 @@
 // was inserted after Mamma, before Pareidolia, and out_flags gained
 // PF_OutFlag_NON_PARAM_VARY. Without it AE played back one frame of an effect with nothing
 // keyframed, so nothing drifted.
+// BUILD 25 -- FASTER. The camera ray is walked once rather than twice, the GPU traces a
+// frame one bounce per launch over the paths still alive, and the layer's Draft switch
+// adds a shadow hand-off: a shadow ray walks the cloud near it exactly and reads the rest
+// of its way to the sun from the shadow map. Against build 24, at 1 spp on an RTX 2070
+// SUPER: Best 26 to 34% less time at 1080p, Draft 2.5 to 3x faster. Best's picture is the
+// same up to its noise; Draft's cast shadows soften by about a texel. PROGRESS.md carries
+// the numbers.
+//
+// STILL MINOR 14: no parameter or flag changed.
+// MINOR 15, BUILD 26 -- RENDER QUALITY: THE EFFECT'S OWN DRAFT/BEST SWITCH. Reported from
+// the host: "Just setting Draft in AE does not help in any way. Ideally the plugin should
+// have its own draft/best option." The log never once saw the layer switch at Draft. Draft
+// now traces one path per 2x2 block at one sample, with the shadow hand-off and a full
+// denoise, and leaves Max Bounces alone so it is as bright as Best. Against Best at the
+// same size: 3.4 to 3.9x less trace time at 480x270, 4.2 to 6.3x at 1920x1080.
+//
+// A MINOR BUMP BECAUSE THE PARAMETER LIST CHANGED: Render Quality was inserted directly
+// under the classifier readout, outside every group.
 #define PLUGIN_MAJOR 0
-#define PLUGIN_MINOR 14
-#define PLUGIN_BUILD 24
+#define PLUGIN_MINOR 15
+#define PLUGIN_BUILD 26

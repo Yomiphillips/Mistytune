@@ -109,6 +109,36 @@ elseif(MODE STREQUAL "gpubands")
     endif()
     message(STATUS "gpu bands: identical to a single launch")
 
+elseif(MODE STREQUAL "gpustaged")
+    # THE STAGED GPU RENDER AGAINST THE SINGLE KERNEL (build 25).
+    #
+    # The staged render traces a launch's samples one bounce per launch, gathering the
+    # paths still alive each time; the single kernel traces each pixel's paths start to
+    # finish. Same arithmetic per path, so the two must agree to the bit -- which is the
+    # claim that lets the staged render ship without new goldens.
+    #
+    # A CUMULUS LAYER WITH A HERO, Draft's shadow hand-off on, and bands and sample chunks,
+    # because that is where the paths are long and differ: a sky alone would end every path
+    # at its first bounce and compare the two kernels on nothing.
+    set(SCENE -w 128 -h 72 -s 6 --hero 1 --coverage 0.6 --hero-connection 0.6
+              --orbit 0 --sun-placement backlit --shadow-handoff 2)
+
+    gpu_render("${OUT_DIR}/gpu_staged.ppm" --gpu-band-rows 37 --sample-chunk 4)
+    gpu_render("${OUT_DIR}/gpu_single.ppm" --gpu-band-rows 37 --sample-chunk 4 --megakernel)
+
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E compare_files
+                "${OUT_DIR}/gpu_staged.ppm" "${OUT_DIR}/gpu_single.ppm"
+        RESULT_VARIABLE _same)
+    if(NOT _same EQUAL 0)
+        message(FATAL_ERROR
+            "THE STAGED GPU RENDER DIFFERS FROM THE SINGLE KERNEL.\n"
+            "  Each path must be pathBegin and then pathBounce until it ends, exactly as\n"
+            "  trace() runs them, and the finish must sum a pixel's samples in sample\n"
+            "  order. Look at what renderStaged() hands each kernel, and at the path index.")
+    endif()
+    message(STATUS "gpu staged: identical to the single kernel")
+
 elseif(MODE STREQUAL "gpubandchunks")
     # ===================================================================
     # BANDS *AND* SAMPLE CHUNKS TOGETHER, WHICH NEITHER OF THE TWO TESTS ABOVE

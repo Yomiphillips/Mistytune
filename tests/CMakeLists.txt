@@ -64,6 +64,10 @@ add_executable(plugin_tests
     # three things in it.
     unit/TestOutputConvert.cpp
 
+    # Draft's scale-up (build 26): a flat field stays flat, a ramp lands on the block
+    # centres, and AE's padded rows are honoured. See src/engine/Upscale.h.
+    unit/TestUpscale.cpp
+
     # Whether the renderer encodes its own output. The tests that matter are the ones
     # about the DEFAULTS: a host that cannot be asked must decide what the hardcoded
     # constant used to, because the alternative darkens every render on every machine

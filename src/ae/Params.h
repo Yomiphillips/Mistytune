@@ -97,6 +97,13 @@ namespace ae {
      * no control for: see addStaticText below, and src/engine/Classifier.h for the     \
      * rules. Moved, not re-made: the ID is the one it always had. */                   \
     TEXT    (Classification,    403, "--")                                              \
+    /* DRAFT OR BEST, THE EFFECT'S OWN SWITCH (build 26), and second only to the readout \
+     * because it is the control a look session touches most. Reported from the host:   \
+     * the layer's Draft switch "does not help in any way", and the log never once saw  \
+     * it. BEST BY DEFAULT, so a render queue gets what the sliders say unless asked.  \
+     * What Draft buys is draftQuality in CloudParams.h. INSERTED, with the minor bump  \
+     * that makes that safe; ID 308 is the Quality block's next. */                     \
+    POPUP   (RenderQuality,     308, "Render Quality", 2, 2, "Draft|Best")              \
                                                                                         \
     /* ---------------- Sun and Sky ---------------- */                                 \
     TOPIC   (SkyGroup,          100, "Sun and Sky")                                     \
@@ -1221,6 +1228,12 @@ inline cloud::QualityParams toQuality(const ParamValues& p) {
     if (out.samplesPerPixel < 1) out.samplesPerPixel = 1;
     if (out.maxBounces < 1)      out.maxBounces = 1;
     return out;
+}
+
+// RENDER QUALITY: Draft is item 0 once the popup is 0-based, Best is 1. Anything else an
+// expression delivers is Best, so a broken expression can only cost time, never quality.
+inline bool draftRequested(const ParamValues& p) {
+    return std::lround(p.v[kMistytuneRenderQuality]) == 0;
 }
 
 } // namespace ae

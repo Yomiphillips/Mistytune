@@ -177,6 +177,16 @@ if(PLUGIN_CUDA_FOUND)
                      -P "${CMAKE_CURRENT_SOURCE_DIR}/RunDeterminism.cmake")
 endif()
 
+# THE STAGED GPU RENDER MUST GIVE THE SINGLE KERNEL'S BITS (build 25). See the mode.
+if(PLUGIN_CUDA_FOUND)
+    add_test(NAME determinism.gpuStaged
+             COMMAND ${CMAKE_COMMAND}
+                     -DMISTYTUNEC=$<TARGET_FILE:mistytunec>
+                     -DOUT_DIR=${GOLDEN_OUT}
+                     -DMODE=gpustaged
+                     -P "${CMAKE_CURRENT_SOURCE_DIR}/RunDeterminism.cmake")
+endif()
+
 # BANDS AND SAMPLE CHUNKS AT THE SAME TIME, a combination neither test above renders.
 #
 # IT DOES NOT CATCH A WRONG ACCUMULATOR OFFSET, and it was added believing it would --

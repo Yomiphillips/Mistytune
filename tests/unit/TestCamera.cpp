@@ -124,6 +124,43 @@ PL_TEST(BandOffsetMatchesTheUnsplitFrame) {
 }
 
 // --------------------------------------------------------------------------
+// Draft's pixel stride (build 26)
+// --------------------------------------------------------------------------
+
+// A STRIDE-2 PIXEL LOOKS THROUGH THE CENTRE OF ITS 2x2 BLOCK, in the same frame: the corner
+// where the block's four frame pixels meet, which is a stride-1 ray at the block's first
+// pixel with half a pixel of jitter. Exact framing, odd sizes included, with an origin and
+// a band offset (originY + rowBegin * stride, as Mistytune.cu moves it) on top.
+PL_TEST(AStridedPixelLooksThroughItsBlockCentre) {
+    ViewParams v = frameOf(481, 271);     // odd on purpose: halving it would round
+    v.originX = 7;
+    v.originY = 3;
+
+    const int px[][2] = { {0, 0}, {120, 67}, {240, 135}, {13, 101} };
+    for (const auto& p : px) {
+        checkSameRay(primaryRayDirection(v, p[0], p[1], 0.0f, 0.0f, 2),
+                     primaryRayDirection(v, 2 * p[0], 2 * p[1], 0.5f, 0.5f, 1));
+    }
+
+    ViewParams band = v;
+    band.originY = v.originY + 40 * 2;
+    checkSameRay(primaryRayDirection(band, 50, 5, 0.0f, 0.0f, 2),
+                 primaryRayDirection(v, 50, 45, 0.0f, 0.0f, 2));
+}
+
+// STRIDE ONE IS THE OLD EXPRESSION, BIT FOR BIT -- what keeps every golden and every Best
+// render unchanged by build 26.
+PL_TEST(StrideOneIsTheUnstridedRayExactly) {
+    ViewParams v = frameOf(1920, 1080);
+    v.originX = 5;
+    const Vec3 a = primaryRayDirection(v, 333, 444, 0.25f, -0.125f);
+    const Vec3 b = primaryRayDirection(v, 333, 444, 0.25f, -0.125f, 1);
+    PL_CHECK_EQ(a.x, b.x);
+    PL_CHECK_EQ(a.y, b.y);
+    PL_CHECK_EQ(a.z, b.z);
+}
+
+// --------------------------------------------------------------------------
 // After Effects' camera, converted
 // --------------------------------------------------------------------------
 //

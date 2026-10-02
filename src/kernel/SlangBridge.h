@@ -360,6 +360,8 @@ MT_DEVICE void fillSlangScene(const RenderRequest& req, SceneT& s, PhaseT& ph) {
     fillAirMap<V>(req.airMaps.layer[0], req.airMapBuffer, s.airMapIce_0);
     fillAirMap<V>(req.airMaps.layer[1], req.airMapBuffer, s.airMapCu_0);
 
+    // DRAFT'S SHADOW HAND-OFF (build 25), which needs the maps: see QualityParams.
+    s.shadowHandoff_0 = s.airMapOn_0 != 0 ? static_cast<float>(req.quality.shadowHandoff) : 0.0f;
     // -----------------------------------------------------------------------
     // The second layer: cellular convection
     // -----------------------------------------------------------------------

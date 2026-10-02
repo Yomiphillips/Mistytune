@@ -228,6 +228,12 @@ public struct Scene
     int            airMapOn;
     LayerShadowMap airMapIce;   // medium's
     LayerShadowMap airMapCu;    // medium2's
+
+    // DRAFT'S SHADOW HAND-OFF (build 25), in texels of each layer's map: a shadow ray walks
+    // exactly until it has crossed this many texels of clear air, then reads the rest from
+    // the map. Zero is the exact ray, which is what a zeroed struct and every final render
+    // get. Only with the maps (airMapOn). See transmittanceHandoff in AirMapLib.slang.
+    float          shadowHandoff;
 };
 
 // A STRUCTURAL CEILING, SEPARATE FROM THE PARAMETER. A GPU loop wants a bound the
@@ -309,14 +315,35 @@ MajorantGrid gridFor(Medium m, MajorantGrid g, float3 p)
 // the answer: transmittance through a sum of media is exp(-A - B) = exp(-A) exp(-B).
 // Skipping the second layer when the first has already gone black costs nothing in
 // expectation, and it is where most shadow rays in a thick cumulus end.
+//
+// EVERY CALLER ASKS TOWARDS THE SUN, which is what lets Draft's hand-off read the shadow
+// maps: a map's column is a sun ray. Below the first layer's slab its whole share is one
+// read of its map -- a cumulus point under a cirrus deck -- and the second layer's ray
+// walks until it has crossed shadowHandoff texels of clear air. See transmittanceHandoff.
 float sceneTransmittance(Scene s, StructuredBuffer<float> bounds, StructuredBuffer<float2> drift,
                          inout Rng rng, float3 p, float3 dir, inout int steps)
 {
-    float tr = transmittance(s.medium, s.grid, bounds, drift, rng, p, dir, steps);
+    bool handoff = s.shadowHandoff > 0.0f && s.airMapOn != 0;
+
+    float tr;
+    if (handoff && p.y < s.medium.slabBottom)
+        tr = layerMapTransmittance(s.airMapIce, p);
+    else
+        tr = transmittance(s.medium, s.grid, bounds, drift, rng, p, dir, steps);
+
     if (s.layer2On != 0 && tr > 0.0f)
     {
-        tr *= transmittance(s.medium2, gridFor(s.medium2, s.grid2, p), bounds, drift,
-                            rng, p, dir, steps);
+        MajorantGrid g2 = gridFor(s.medium2, s.grid2, p);
+        if (handoff)
+        {
+            float texel = max(s.airMapCu.smTexel.x, s.airMapCu.smTexel.y);
+            tr *= transmittanceHandoff(s.medium2, g2, bounds, drift, s.airMapCu,
+                                       s.shadowHandoff * texel, rng, p, dir, steps);
+        }
+        else
+        {
+            tr *= transmittance(s.medium2, g2, bounds, drift, rng, p, dir, steps);
+        }
     }
     return tr;
 }
@@ -383,20 +410,23 @@ bool sceneFreeFlight(Scene s, StructuredBuffer<float> bounds, StructuredBuffer<f
 
 // One layer's walk along the camera segment, advanced to its next tentative collision.
 //
-// THREE DRAWS PER STEP, EVERY STEP, as cameraSegmentSun has always taken them -- and on
-// the layer's own stream, so a moving cumulus cannot shift the cirrus's points or the
-// other way round. An empty cell of a procedural grid is crossed without a draw, as the
-// trackers cross one.
+// FOUR DRAWS PER STEP, EVERY STEP -- the point, the reservoir's keep test, the roulette,
+// and since build 25 the coin that says whether the point is the ray's first REAL
+// collision -- and on the layer's own stream, so a moving cumulus cannot shift the
+// cirrus's points or the other way round. An empty cell of a procedural grid is crossed
+// without a draw, as the trackers cross one.
 //
 // Returns false when the segment is used up. `budget` is kTrackCap shared across the
 // calls for one layer, so the walk has the bound the GPU needs.
 bool segmentStep(Medium m, MajorantGrid g, StructuredBuffer<float> bounds,
                  StructuredBuffer<float2> drift, float scale, float tEnd,
                  inout Dda dda, inout float rate, inout float t, inout Rng rng,
-                 out float uKeep, out float uLive, inout int budget, inout int steps)
+                 out float uKeep, out float uLive, out float uHit,
+                 inout int budget, inout int steps)
 {
     uKeep = 0.0f;
     uLive = 0.0f;
+    uHit  = 0.0f;
 
     while (budget > 0)
     {
@@ -417,6 +447,7 @@ bool segmentStep(Medium m, MajorantGrid g, StructuredBuffer<float> bounds,
         float uStep = randFloat(rng);
         uKeep = randFloat(rng);
         uLive = randFloat(rng);
+        uHit  = randFloat(rng);
 
         t -= log(max(1.0f - uStep, 1e-7f)) / rate;
 
@@ -494,11 +525,41 @@ bool segmentStep(Medium m, MajorantGrid g, StructuredBuffer<float> bounds,
 // were the first event.
 //
 // POINTS IN EMPTY AIR COST NOTHING: a zero weight draws nothing and leaves T alone.
+//
+// ===========================================================================
+// THE SAME WALK FINDS THE PATH'S FIRST COLLISION (build 25), so the camera ray is walked
+// once rather than twice.
+//
+// These tentative points are a Poisson process at a rate at or above the density -- which
+// is all delta tracking asks of its own. Accepting each as REAL with probability
+// sigma / rate, the first accepted point is distributed exactly as delta tracking's first
+// collision, in either layer: the merged walk is a process at the summed rate, and each of
+// its points belongs to a layer in proportion to that layer's rate. So trace() takes the
+// collision from here (`hit` = 1) or the ray's escape (`hit` = 0), and tracks nothing.
+//
+// MEASURED (PROGRESS.md, build 25): the camera ray's free flight was 58 of 278 tracking
+// steps per pixel-sample in the default frame and 60 of 158 in a cumulus field -- the
+// same stretch of air the sum had just walked.
+//
+// WHEN THE ROULETTE ENDS THE WALK FIRST, `hit` = 2 and trace() tracks on from `tResume`,
+// the last point walked. The roulette looks only at points already walked, so the process
+// beyond them is fresh, and the exponential is memoryless. That is a ray past optical
+// depth 4.6 with no collision accepted: one in a hundred.
+//
+// THE PATH'S OWN STREAM IS UNTOUCHED BY THIS. The coin is the walk's fourth draw, every
+// step, so as the cloud drifts the first collision moves with the density under fixed
+// points, as the sum's estimate does.
 // ===========================================================================
 float3 cameraSegmentSun(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
                         StructuredBuffer<float2> drift,
-                        inout Rng rng, Rng rng2, float3 ro, float3 rd, inout int steps)
+                        inout Rng rng, Rng rng2, float3 ro, float3 rd, inout int steps,
+                        out int hit, out float3 hitAt, out int hitLayer, out float tResume)
 {
+    hit      = 0;
+    hitAt    = float3(0.0f, 0.0f, 0.0f);
+    hitLayer = 0;
+    tResume  = 0.0f;
+
     const float3 none = float3(0.0f, 0.0f, 0.0f);
 
     // NEVER BELOW THE MAJORANT. Under it, sigma/rate can exceed 1, the clamp on
@@ -529,11 +590,11 @@ float3 cameraSegmentSun(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
     Dda   ddaA    = ddaInit(s.grid, ro, rd, tA);
     float rateA   = gridBound(s.medium, s.grid, bounds, drift, ddaA.cell, s.medium.majorant) * scale;
     int   budgetA = kTrackCap;
-    float keepA   = 0.0f, rouletteA = 0.0f;
+    float keepA   = 0.0f, rouletteA = 0.0f, coinA = 0.0f;
     if (haveA)
     {
         haveA = segmentStep(s.medium, s.grid, bounds, drift, scale, endA,
-                            ddaA, rateA, tA, rng, keepA, rouletteA, budgetA, steps);
+                            ddaA, rateA, tA, rng, keepA, rouletteA, coinA, budgetA, steps);
     }
 
     // INITIALISED, because the && below skips slabRange when there is no second layer
@@ -545,11 +606,11 @@ float3 cameraSegmentSun(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
     Dda   ddaB    = ddaInit(gridB, ro, rd, tB);
     float rateB   = gridBound(s.medium2, gridB, bounds, drift, ddaB.cell, s.medium2.majorant) * scale;
     int   budgetB = kTrackCap;
-    float keepB   = 0.0f, rouletteB = 0.0f;
+    float keepB   = 0.0f, rouletteB = 0.0f, coinB = 0.0f;
     if (haveB)
     {
         haveB = segmentStep(s.medium2, gridB, bounds, drift, scale, endB,
-                            ddaB, rateB, tB, rng2, keepB, rouletteB, budgetB, steps);
+                            ddaB, rateB, tB, rng2, keepB, rouletteB, coinB, budgetB, steps);
     }
 
     float  tr        = 1.0f;
@@ -558,6 +619,7 @@ float3 cameraSegmentSun(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
     float3 keptAt    = float3(0.0f, 0.0f, 0.0f);   // x_J
     float  keptT     = 0.0f;                       // and its distance, for the air
     int    keptLayer = 0;
+    bool   rouletted = false;                      // the walk ended on the roulette
 
     // BOUNDED BY THE TWO BUDGETS: every pass consumes at least one step of one walk,
     // and each walk stops at kTrackCap. Hitting a cap truncates the sum, which is
@@ -571,8 +633,10 @@ float3 cameraSegmentSun(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
         float rate  = takeA ? rateA : rateB;
         float uKeep = takeA ? keepA : keepB;
         float uLive = takeA ? rouletteA : rouletteB;
+        float uHit  = takeA ? coinA : coinB;
 
         float3 p     = ro + rd * t;
+        tResume      = t;
         float  sigma = takeA ? densityAt(s.medium, drift, p) : densityAt(s.medium2, drift, p);
 
         // POINTS IN EMPTY AIR COST NOTHING: a zero weight draws nothing further and
@@ -580,6 +644,15 @@ float3 cameraSegmentSun(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
         if (sigma > 0.0f)
         {
             float w = sigma / rate;
+
+            // THE PATH'S FIRST COLLISION: real with probability sigma / rate, as delta
+            // tracking accepts one. Only the first acceptance is the path's.
+            if (hit == 0 && uHit < w)
+            {
+                hit      = 1;
+                hitAt    = p;
+                hitLayer = takeA ? 0 : 1;
+            }
 
             // T_k is the product over the points BEFORE this one, so it is used first
             // and updated after. The other order drops this point's own extinction into
@@ -607,12 +680,12 @@ float3 cameraSegmentSun(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
             // reservoir sees as doubled weights from here on.
             if (tr < 0.01f)
             {
-                if (uLive > 0.5f) break;
+                if (uLive > 0.5f) { rouletted = true; break; }
                 tr *= 2.0f;
             }
         }
 
-        // THREE DRAWS PER STEP, EVERY STEP, on the taken layer's own stream -- see
+        // FOUR DRAWS PER STEP, EVERY STEP, on the taken layer's own stream -- see
         // segmentStep. Step k's point, keep test and roulette then come from the same
         // numbers on every frame, so as the cloud drifts the points stay where they were
         // and only the density under them changes, which is what keeps this estimate's
@@ -620,14 +693,18 @@ float3 cameraSegmentSun(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
         if (takeA)
         {
             haveA = segmentStep(s.medium, s.grid, bounds, drift, scale, endA,
-                                ddaA, rateA, tA, rng, keepA, rouletteA, budgetA, steps);
+                                ddaA, rateA, tA, rng, keepA, rouletteA, coinA, budgetA, steps);
         }
         else
         {
             haveB = segmentStep(s.medium2, gridB, bounds, drift, scale, endB,
-                                ddaB, rateB, tB, rng2, keepB, rouletteB, budgetB, steps);
+                                ddaB, rateB, tB, rng2, keepB, rouletteB, coinB, budgetB, steps);
         }
     }
+
+    // NO COLLISION ACCEPTED, AND THE WALK DID NOT REACH THE END OF THE MEDIUM: the roulette
+    // stopped it, or a budget ran out. trace() tracks on from the last point walked.
+    if (hit == 0 && (rouletted || budgetA <= 0 || budgetB <= 0)) hit = 2;
 
     if (!(total > 0.0f) || !(kept > 0.0f)) return none;
 
@@ -706,17 +783,171 @@ float airShadow(Scene s, StructuredBuffer<float> bounds, StructuredBuffer<float2
 //
 // Transcribed from proto/index.html's `trace()`, with the atmosphere behind the
 // Environment seam and the shadow-ray offset removed.
-public TraceResult trace(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
-                         StructuredBuffer<float2> drift,
-                         inout Rng rng, float3 ro, float3 rd)
+// ---------------------------------------------------------------------------
+// One path, in pieces (build 25)
+// ---------------------------------------------------------------------------
+//
+// ===========================================================================
+// THE PATH LOOP, CUT AT ITS BOUNCES, SO THE GPU CAN RUN ONE BOUNCE PER LAUNCH.
+//
+// MEASURED (PROGRESS.md, build 25): a tracking step along the camera ray cost about 8 ns
+// and one in a later bounce about 26 ns. The camera rays of a warp walk side by side;
+// by the third bounce its 32 paths are scattered through the cloud, a third of them have
+// ended, and the warp runs at the pace of its longest. Mistytune.cu therefore runs
+// pathBegin for every sample in one launch, then pathBounce over the paths still alive,
+// one launch per bounce, gathering the survivors each time.
+//
+// trace() IS pathBegin AND pathBounce IN A LOOP, so the CPU reference, the test suites
+// and the GPU run the same arithmetic in the same order -- the goldens and slang.cpuParity
+// hold the staged GPU path to the bit, as they held the loop it replaced.
+//
+// FIELD NAMES CARRY `ps`, unique across the kernel, for the reason Environment.envMode
+// gives above.
+// ===========================================================================
+public struct PathState
 {
-    TraceResult r;
-    r.pathRadiance      = float3(0.0f, 0.0f, 0.0f);
-    r.scatterEvents = 0;
-    r.capped        = 0;
-    r.trackingSteps         = 0;
+    float3 psRadiance;     // what the path has gathered so far
+    float3 psThroughput;
+    float3 psOrigin;       // where the next free flight leaves from
+    float3 psDir;          // and its direction
+    Rng    psRng;          // the path's own stream
+    int    psBounce;       // the bounce pathBounce runs next
+    int    psAlive;        // nonzero while the path goes on
+    int    psEvents;       // real collisions so far
+    int    psCapped;       // nonzero: still alive when the budget ran out
+    int    psSteps;        // tracking iterations, every walk included
+};
 
-    float3 throughput = float3(1.0f, 1.0f, 1.0f);
+// What a path that leaves the medium carries home. `first` is bounce 0, where the camera
+// ray meets the sky; see environmentRadiance.
+float3 pathEnvironment(Scene s, float3 ro, float3 rd, bool first)
+{
+    // The path left the medium. Whatever the environment is in that direction
+    // is what it carries home -- which makes skylight a transport result
+    // rather than an ambient constant.
+    //
+    // `ro` IS WHERE IT IS LEAVING FROM: the camera at bounce 0, and the last
+    // scattering point after that. The sky is asked from there rather than
+    // from the ground, which is what makes the skylight on a high cirrus the
+    // sky that crystal can actually see.
+    //
+    // THE GROUND IT LANDS ON IS IN THE CLOUDS' SHADOW where the maps say so, which
+    // is the ground in view AND the light the ground throws back up at the cloud
+    // bases. Without it the ground under a thick deck was lit as if the sky were
+    // clear, and brightened the deck's own underside.
+    float groundLit = s.airMapOn != 0
+                    ? groundShadow(s.airMapIce, s.airMapCu, ro, rd) : 1.0f;
+    return environmentRadiance(s.environment, ro, rd, first, groundLit);
+}
+
+// What happens at a real collision at p in `layer`, after the free flight found it: the
+// next event towards the sun when `nee`, the scatter, and the roulette. False when the
+// roulette ends the path. psBounce is the bounce this collision belongs to.
+bool pathScatter(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
+                 StructuredBuffer<float2> drift, inout PathState st, float3 p, int layer,
+                 bool nee)
+{
+    // WHAT THE PATH HIT: ice or water. The phase function and the albedo are the
+    // matter's, not the scene's -- a crystal and a droplet scatter differently.
+    PhaseInput matterPhase = ph;
+    float3     matterAlbedo = s.albedo;
+    if (layer != 0)
+    {
+        matterPhase  = s.phase2;
+        matterAlbedo = s.albedo2;
+    }
+
+    // NEXT-EVENT ESTIMATION towards the sun. Without it a thin cirrus takes
+    // thousands of samples to find the sun at all, because the phase function is
+    // sharply forward and the sun is half a degree wide.
+    //
+    // THE SHADOW RAY IS CAST EVEN WHEN THE SUN IS BLACK, deliberately. Skipping it
+    // would make the number of random draws depend on the sun's brightness, so two
+    // renders differing only in exposure would consume different RNG streams and
+    // decorrelate -- and PLAN.md's determinism tripwire is that the same inputs
+    // give the same bits. It is a real cost and the right place to pay it is a
+    // host-side decision not to trace a black sun at all.
+    //
+    // SKIPPED AT THE FIRST EVENT WHEN cameraSegmentSun HAS ALREADY COUNTED IT. That
+    // is a Scene setting, fixed for the frame, so the draw count still does not
+    // depend on the sun.
+    if (nee)
+    {
+        float  shadow = sceneTransmittance(s, bounds, drift, st.psRng,
+                                           p + s.sunDir * s.shadowOffset, s.sunDir,
+                                           st.psSteps);
+        if (shadow > 0.0f)
+        {
+            // `rd` is still the INCOMING direction. The scattering angle is between the
+            // light's direction of travel (-sunDir) and the camera's (-rd), so its
+            // cosine is dot(rd, sunDir) -- which reads like a sign error and is not.
+            float ph0 = phaseAt(matterPhase, dot(st.psDir, s.sunDir));
+
+            // `shadow` is the cloud's own transmittance along the shadow ray;
+            // sunIrradianceAt is the air's, and says why both are needed.
+            st.psRadiance += st.psThroughput * matterAlbedo * ph0 * shadow * sunIrradianceAt(s, p);
+        }
+    }
+
+    // Scatter, and carry on. THIS LOOP IS THE MULTIPLE SCATTERING -- no
+    // approximation and no ambient fudge, just the path continuing until it leaves
+    // or runs out of budget.
+    float  w;
+    float3 newDir = samplePhaseDir(matterPhase, st.psRng, st.psDir, w);
+    st.psThroughput *= matterAlbedo * w;
+
+    st.psOrigin = p;
+    st.psDir    = newDir;
+
+    // ===================================================================
+    // RUSSIAN ROULETTE, AND THE DIVISION IS THE WHOLE THING.
+    //
+    // Kill the path with probability 1-p and multiply the survivors by 1/p: the
+    // expectation is unchanged, so the estimator stays unbiased while the cheap
+    // early bounces are never at risk.
+    //
+    // Taking p from the throughput's largest channel makes this self-tuning. A
+    // conservative medium has throughput 1, so p is 1 and nothing is ever killed
+    // -- which is what the furnace test relies on, and why the furnace measures
+    // the bounce cap in isolation rather than the cap plus roulette.
+    //
+    // The floor of 0.05 stops a nearly-black path from being kept alive by a
+    // vanishing probability and then multiplied by twenty.
+    //
+    // slang.bounce checks this the only way it can be checked: roulette is a FREE
+    // PARAMETER, so turning it off must not move the answer.
+    //
+    // A SURVIVAL CAP FOR DRAFT WAS TRIED HERE AND LOST (build 26): unbiased in linear light,
+    // but OIDN treats its heavily weighted survivors as outliers, so the denoised preview
+    // came out 13 levels dark on a close hero. PROGRESS.md has the numbers.
+    // ===================================================================
+    if (st.psBounce >= s.rrStartBounce)
+    {
+        float p2 = clamp(max(st.psThroughput.x, max(st.psThroughput.y, st.psThroughput.z)),
+                         0.05f, 1.0f);
+        if (randFloat(st.psRng) > p2) return false;
+        st.psThroughput /= p2;
+    }
+    return true;
+}
+
+// The camera ray and the path's whole first bounce: the camera segment's sun, the first
+// collision, the air in front of it, and the scatter. The path leaves with psBounce 1, or
+// ended.
+public PathState pathBegin(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
+                           StructuredBuffer<float2> drift, Rng rng, float3 ro, float3 rd)
+{
+    PathState st;
+    st.psRadiance   = float3(0.0f, 0.0f, 0.0f);
+    st.psThroughput = float3(1.0f, 1.0f, 1.0f);
+    st.psOrigin     = ro;
+    st.psDir        = rd;
+    st.psRng        = rng;
+    st.psBounce     = 0;
+    st.psAlive      = 0;
+    st.psEvents     = 0;
+    st.psCapped     = 0;
+    st.psSteps      = 0;
 
     int budget = min(s.maxBounces, kBounceCeiling);
 
@@ -731,13 +962,22 @@ public TraceResult trace(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
     // event fresh numbers whenever the cloud moved -- see splitRng. The path below
     // therefore draws exactly what it drew before this estimator existed, less the
     // first event's shadow ray.
-    bool sunAlongCamera = s.neeTentativeScale > 0.0f && budget > 0;
+    //
+    // AND THE SAME WALK DECIDES WHERE THE PATH FIRST SCATTERS (build 25), so bounce 0 below
+    // does not walk the camera ray a second time. See cameraSegmentSun.
+    bool   sunAlongCamera = s.neeTentativeScale > 0.0f && budget > 0;
+    int    cameraHit      = 0;
+    float3 cameraHitAt    = float3(0.0f, 0.0f, 0.0f);
+    int    cameraHitLayer = 0;
+    float  cameraResume   = 0.0f;
     if (sunAlongCamera)
     {
         Rng segmentRng  = splitRng(rng, 0x5e6u);
         Rng segmentRng2 = splitRng(rng, 0x5e7u);   // the second layer's walk
-        r.pathRadiance += throughput * cameraSegmentSun(s, ph, bounds, drift, segmentRng,
-                                                        segmentRng2, ro, rd, r.trackingSteps);
+        st.psRadiance += st.psThroughput * cameraSegmentSun(s, ph, bounds, drift, segmentRng,
+                                                            segmentRng2, ro, rd, st.psSteps,
+                                                            cameraHit, cameraHitAt,
+                                                            cameraHitLayer, cameraResume);
     }
 
     // THE AIR IN FRONT OF THE FIRST EVENT, on its own stream for the reason the segment's
@@ -745,175 +985,162 @@ public TraceResult trace(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
     bool airOn  = s.environment.envMode == 1 && s.aerialMode != 0;
     Rng  airRng = splitRng(rng, 0xa1eu);
 
-    for (int bounce = 0; bounce < kBounceCeiling; ++bounce)
+    if (budget <= 0)
     {
-        if (bounce >= budget)
-        {
-            // OUT OF BUDGET, AND THE ENERGY STILL IN `throughput` IS SIMPLY LOST.
-            // That is a real bias, it is reported rather than hidden, and the furnace
-            // test measures it: the shortfall below L must equal exactly this
-            // fraction of paths. When it exceeds that, the loop is leaking somewhere
-            // else and the cap is not the explanation.
-            r.capped = 1;
-            break;
-        }
+        // OUT OF BUDGET, AND THE ENERGY STILL IN `throughput` IS SIMPLY LOST.
+        // That is a real bias, it is reported rather than hidden, and the furnace
+        // test measures it: the shortfall below L must equal exactly this
+        // fraction of paths. When it exceeds that, the loop is leaking somewhere
+        // else and the cap is not the explanation.
+        st.psCapped = 1;
+        return st;
+    }
 
-        float3 p;
-        int    layer;
-        if (!sceneFreeFlight(s, bounds, drift, rng, ro, rd, p, layer, r.trackingSteps))
-        {
-            // The path left the medium. Whatever the environment is in that direction
-            // is what it carries home -- which makes skylight a transport result
-            // rather than an ambient constant.
-            //
-            // `ro` IS WHERE IT IS LEAVING FROM: the camera at bounce 0, and the last
-            // scattering point after that. The sky is asked from there rather than
-            // from the ground, which is what makes the skylight on a high cirrus the
-            // sky that crystal can actually see.
-            //
-            // THE GROUND IT LANDS ON IS IN THE CLOUDS' SHADOW where the maps say so, which
-            // is the ground in view AND the light the ground throws back up at the cloud
-            // bases. Without it the ground under a thick deck was lit as if the sky were
-            // clear, and brightened the deck's own underside.
-            float groundLit = s.airMapOn != 0
-                            ? groundShadow(s.airMapIce, s.airMapCu, ro, rd) : 1.0f;
-            float3 env = environmentRadiance(s.environment, ro, rd, bounce == 0, groundLit);
+    float3 p;
+    int    layer;
+    bool   collided;
+    if (sunAlongCamera && cameraHit != 2)
+    {
+        // FROM THE CAMERA SEGMENT'S OWN WALK: its first accepted point, or none.
+        collided = cameraHit == 1;
+        p        = cameraHitAt;
+        layer    = cameraHitLayer;
+    }
+    else if (sunAlongCamera)
+    {
+        // THE ROULETTE ENDED THAT WALK FIRST: track on from where it stopped. `ro` stays
+        // the eye, because the escape below asks the environment from there.
+        collided = sceneFreeFlight(s, bounds, drift, st.psRng, ro + rd * cameraResume, rd,
+                                   p, layer, st.psSteps);
+    }
+    else
+    {
+        collided = sceneFreeFlight(s, bounds, drift, st.psRng, ro, rd, p, layer, st.psSteps);
+    }
 
-            // A CAMERA RAY THAT ESCAPES already has its airlight, in the sky; only the
-            // clouds' shadow in it is missing. The segment runs to the top of the air,
-            // so its airIn is exactly the airlight inside `env`, and the shadowed part
-            // comes off. Never negative: the ground and the disc are what is left.
-            //
-            // FROM THE MAPS WHEN THERE ARE MAPS, and then the sky's own march is not needed:
-            // the loss is taken straight off it, clamped because the two quadratures can
-            // disagree by a fraction of a percent where the whole ray is in shadow.
-            if (bounce == 0 && airOn && s.aerialMode >= 2)
-            {
-                float u1 = randFloat(airRng);
-                float u2 = randFloat(airRng);
-                if (s.airMapOn != 0)
-                {
-                    env = max(env - airShadowLoss(s.environment.sky, s.airMapIce, s.airMapCu,
-                                                  ro, rd, 1e30f, u2),
-                              float3(0.0f, 0.0f, 0.0f));
-                }
-                else
-                {
-                    AirSegment seg = airSegment(s.environment.sky, ro.y, rd, 1e30f, u1, u2);
-                    float v = airShadow(s, bounds, drift, airRng, seg, ro, rd, r.trackingSteps);
-                    env = env - seg.airIn * (1.0f - v);
-                }
-            }
+    if (!collided)
+    {
+        float3 env = pathEnvironment(s, ro, rd, true);
 
-            r.pathRadiance += throughput * env;
-            break;
-        }
-
-        ++r.scatterEvents;
-
-        // THE FIRST EVENT IS BEHIND THE AIR IN FRONT OF IT. Its airlight is added once,
-        // and its transmittance goes into the throughput BEFORE the next event below, so
-        // the sun at this point and everything the path gathers after it are dimmed by
-        // the same air. See airSegment in SkyLib.slang for why this is exact.
-        if (bounce == 0 && airOn)
+        // A CAMERA RAY THAT ESCAPES already has its airlight, in the sky; only the
+        // clouds' shadow in it is missing. The segment runs to the top of the air,
+        // so its airIn is exactly the airlight inside `env`, and the shadowed part
+        // comes off. Never negative: the ground and the disc are what is left.
+        //
+        // FROM THE MAPS WHEN THERE ARE MAPS, and then the sky's own march is not needed:
+        // the loss is taken straight off it, clamped because the two quadratures can
+        // disagree by a fraction of a percent where the whole ray is in shadow.
+        if (airOn && s.aerialMode >= 2)
         {
             float u1 = randFloat(airRng);
             float u2 = randFloat(airRng);
-            float dist = length(p - ro);
-            AirSegment seg = airSegment(s.environment.sky, ro.y, rd, dist, u1, u2);
-            float3 airIn;
-            if (s.aerialMode >= 2 && s.airMapOn != 0)
+            if (s.airMapOn != 0)
             {
-                airIn = max(seg.airIn - airShadowLoss(s.environment.sky, s.airMapIce,
-                                                      s.airMapCu, ro, rd, dist, u2),
-                            float3(0.0f, 0.0f, 0.0f));
+                env = max(env - airShadowLoss(s.environment.sky, s.airMapIce, s.airMapCu,
+                                              ro, rd, 1e30f, u2),
+                          float3(0.0f, 0.0f, 0.0f));
             }
             else
             {
-                airIn = seg.airIn * airShadow(s, bounds, drift, airRng, seg, ro, rd,
-                                              r.trackingSteps);
-            }
-            r.pathRadiance += throughput * airIn;
-            throughput *= seg.airT;
-        }
-
-        // WHAT THE PATH HIT: ice or water. The phase function and the albedo are the
-        // matter's, not the scene's -- a crystal and a droplet scatter differently.
-        PhaseInput matterPhase = ph;
-        float3     matterAlbedo = s.albedo;
-        if (layer != 0)
-        {
-            matterPhase  = s.phase2;
-            matterAlbedo = s.albedo2;
-        }
-
-        // NEXT-EVENT ESTIMATION towards the sun. Without it a thin cirrus takes
-        // thousands of samples to find the sun at all, because the phase function is
-        // sharply forward and the sun is half a degree wide.
-        //
-        // THE SHADOW RAY IS CAST EVEN WHEN THE SUN IS BLACK, deliberately. Skipping it
-        // would make the number of random draws depend on the sun's brightness, so two
-        // renders differing only in exposure would consume different RNG streams and
-        // decorrelate -- and PLAN.md's determinism tripwire is that the same inputs
-        // give the same bits. It is a real cost and the right place to pay it is a
-        // host-side decision not to trace a black sun at all.
-        //
-        // SKIPPED AT THE FIRST EVENT WHEN cameraSegmentSun HAS ALREADY COUNTED IT. That
-        // is a Scene setting, fixed for the frame, so the draw count still does not
-        // depend on the sun.
-        if (!(bounce == 0 && sunAlongCamera))
-        {
-            float  shadow = sceneTransmittance(s, bounds, drift, rng,
-                                               p + s.sunDir * s.shadowOffset, s.sunDir,
-                                               r.trackingSteps);
-            if (shadow > 0.0f)
-            {
-                // `rd` is still the INCOMING direction. The scattering angle is between the
-                // light's direction of travel (-sunDir) and the camera's (-rd), so its
-                // cosine is dot(rd, sunDir) -- which reads like a sign error and is not.
-                float ph0 = phaseAt(matterPhase, dot(rd, s.sunDir));
-
-                // `shadow` is the cloud's own transmittance along the shadow ray;
-                // sunIrradianceAt is the air's, and says why both are needed.
-                r.pathRadiance += throughput * matterAlbedo * ph0 * shadow * sunIrradianceAt(s, p);
+                AirSegment seg = airSegment(s.environment.sky, ro.y, rd, 1e30f, u1, u2);
+                float v = airShadow(s, bounds, drift, airRng, seg, ro, rd, st.psSteps);
+                env = env - seg.airIn * (1.0f - v);
             }
         }
 
-        // Scatter, and carry on. THIS LOOP IS THE MULTIPLE SCATTERING -- no
-        // approximation and no ambient fudge, just the path continuing until it leaves
-        // or runs out of budget.
-        float  w;
-        float3 newDir = samplePhaseDir(matterPhase, rng, rd, w);
-        throughput *= matterAlbedo * w;
-
-        ro = p;
-        rd = newDir;
-
-        // ===================================================================
-        // RUSSIAN ROULETTE, AND THE DIVISION IS THE WHOLE THING.
-        //
-        // Kill the path with probability 1-p and multiply the survivors by 1/p: the
-        // expectation is unchanged, so the estimator stays unbiased while the cheap
-        // early bounces are never at risk.
-        //
-        // Taking p from the throughput's largest channel makes this self-tuning. A
-        // conservative medium has throughput 1, so p is 1 and nothing is ever killed
-        // -- which is what the furnace test relies on, and why the furnace measures
-        // the bounce cap in isolation rather than the cap plus roulette.
-        //
-        // The floor of 0.05 stops a nearly-black path from being kept alive by a
-        // vanishing probability and then multiplied by twenty.
-        //
-        // slang.bounce checks this the only way it can be checked: roulette is a FREE
-        // PARAMETER, so turning it off must not move the answer.
-        // ===================================================================
-        if (bounce >= s.rrStartBounce)
-        {
-            float p2 = clamp(max(throughput.x, max(throughput.y, throughput.z)), 0.05f, 1.0f);
-            if (randFloat(rng) > p2) break;
-            throughput /= p2;
-        }
+        st.psRadiance += st.psThroughput * env;
+        return st;
     }
 
+    ++st.psEvents;
+
+    // THE FIRST EVENT IS BEHIND THE AIR IN FRONT OF IT. Its airlight is added once,
+    // and its transmittance goes into the throughput BEFORE the next event below, so
+    // the sun at this point and everything the path gathers after it are dimmed by
+    // the same air. See airSegment in SkyLib.slang for why this is exact.
+    if (airOn)
+    {
+        float u1 = randFloat(airRng);
+        float u2 = randFloat(airRng);
+        float dist = length(p - ro);
+        AirSegment seg = airSegment(s.environment.sky, ro.y, rd, dist, u1, u2);
+        float3 airIn;
+        if (s.aerialMode >= 2 && s.airMapOn != 0)
+        {
+            airIn = max(seg.airIn - airShadowLoss(s.environment.sky, s.airMapIce,
+                                                  s.airMapCu, ro, rd, dist, u2),
+                        float3(0.0f, 0.0f, 0.0f));
+        }
+        else
+        {
+            airIn = seg.airIn * airShadow(s, bounds, drift, airRng, seg, ro, rd,
+                                          st.psSteps);
+        }
+        st.psRadiance += st.psThroughput * airIn;
+        st.psThroughput *= seg.airT;
+    }
+
+    // SKIPPED AT THE FIRST EVENT WHEN cameraSegmentSun HAS ALREADY COUNTED IT -- see the
+    // next event in pathScatter.
+    if (pathScatter(s, ph, bounds, drift, st, p, layer, !sunAlongCamera))
+    {
+        st.psBounce = 1;
+        st.psAlive  = 1;
+    }
+    return st;
+}
+
+// One bounce after the first: the free flight from psOrigin, then the escape or the
+// collision. Does nothing to a path that has ended.
+public void pathBounce(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
+                       StructuredBuffer<float2> drift, inout PathState st)
+{
+    if (st.psAlive == 0) return;
+
+    if (st.psBounce >= min(s.maxBounces, kBounceCeiling))
+    {
+        st.psCapped = 1;
+        st.psAlive  = 0;
+        return;
+    }
+
+    float3 p;
+    int    layer;
+    if (!sceneFreeFlight(s, bounds, drift, st.psRng, st.psOrigin, st.psDir, p, layer,
+                         st.psSteps))
+    {
+        st.psRadiance += st.psThroughput * pathEnvironment(s, st.psOrigin, st.psDir, false);
+        st.psAlive = 0;
+        return;
+    }
+
+    ++st.psEvents;
+
+    if (pathScatter(s, ph, bounds, drift, st, p, layer, true))
+        ++st.psBounce;
+    else
+        st.psAlive = 0;
+}
+
+public TraceResult trace(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
+                         StructuredBuffer<float2> drift,
+                         inout Rng rng, float3 ro, float3 rd)
+{
+    // THE WHOLE PATH, as the GPU runs it in pieces: see PathState. kBounceCeiling bounds the
+    // loop for the compiler; pathBounce ends the path at the budget long before.
+    PathState st = pathBegin(s, ph, bounds, drift, rng, ro, rd);
+    for (int i = 1; i < kBounceCeiling && st.psAlive != 0; ++i)
+        pathBounce(s, ph, bounds, drift, st);
+
+    // A path still alive here met the ceiling itself, which the budget is clamped to.
+    if (st.psAlive != 0) st.psCapped = 1;
+
+    rng = st.psRng;
+
+    TraceResult r;
+    r.pathRadiance  = st.psRadiance;
+    r.scatterEvents = st.psEvents;
+    r.capped        = st.psCapped;
+    r.trackingSteps = st.psSteps;
     return r;
 }

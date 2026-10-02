@@ -255,6 +255,13 @@ struct RenderRequest {
     AirMapPlan  airMaps;
     const void* airMapBuffer = nullptr;
 
+    // THE GPU RENDER IN STAGES (build 25): every sample's camera ray and first bounce in one
+    // launch, then one launch per bounce over the paths still alive. FALSE is the single
+    // kernel that traces each pixel's paths start to finish, which survives only so the CLI
+    // can A/B it: the two are the same arithmetic and give the same bits. Not hashed and not
+    // a user parameter, like the knobs above. See PathState in BounceLib.slang.
+    bool stagedGpu = true;
+
     // Linear radiance, four floats per pixel, persisting across the launches of
     // one frame. Null on the CPU reference path, which accumulates in the
     // destination surface directly because it has nowhere else to put it.

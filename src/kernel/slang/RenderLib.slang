@@ -51,3 +51,14 @@ public float3 renderSample(Scene s, PhaseInput ph,
     // the instrumentation to the suites that were written for it.
     return r.pathRadiance;
 }
+
+// THE SAME PATH, BEGUN FOR THE STAGED GPU RENDER (build 25): the seed taken exactly as
+// renderSample takes it, and the path carried on by pathBounce, one launch per bounce. See
+// PathState in BounceLib.slang.
+public PathState beginSample(Scene s, PhaseInput ph,
+                             StructuredBuffer<float> bounds,
+                             StructuredBuffer<float2> drift,
+                             float3 ro, float3 rd, uint seed)
+{
+    return pathBegin(s, ph, bounds, drift, makeRng(seed), ro, rd);
+}

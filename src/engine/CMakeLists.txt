@@ -97,6 +97,10 @@ add_library(plugin_engine STATIC
     # move keeps the field and only clears the accumulator.
     FieldCache.h
     FieldCache.cpp
+
+    # Draft's half-resolution trace scaled back up to the buffer the host asked for
+    # (build 26). Here so the effect and the CLI share it and tests/unit/ can check it.
+    Upscale.h
 )
 
 target_include_directories(plugin_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

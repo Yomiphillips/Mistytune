@@ -106,9 +106,14 @@ MT_DEVICE float radians(float degrees) { return degrees * 0.01745329252f; }
 // with +Y downward, so the vertical screen coordinate is negated exactly once,
 // here, rather than being fixed up at some later stage where it would be negated
 // twice by two people who each thought they were first.
+//
+// `stride` IS DRAFT'S PIXEL STRIDE (build 26): buffer pixel (px, py) is then the stride x
+// stride block of the frame starting at origin + stride * (px, py), and the jitter spans the
+// block. ONE TAKES THE ORIGINAL EXPRESSION, rounding included, so every render that does not
+// ask for a stride is bit-for-bit what it was. See QualityParams::pixelStride.
 MT_DEVICE Vec3 primaryRayDirection(const cloud::ViewParams& view,
                                    int px, int py,
-                                   float jitterX, float jitterY) {
+                                   float jitterX, float jitterY, int stride = 1) {
     const float w = static_cast<float>(view.widthPx);
     const float h = static_cast<float>(view.heightPx);
     if (w <= 0.0f || h <= 0.0f) return vec3(0.0f, 1.0f, 0.0f);
@@ -120,8 +125,13 @@ MT_DEVICE Vec3 primaryRayDirection(const cloud::ViewParams& view,
     // has to be moved into frame coordinates first. Dividing the buffer coordinate by
     // the frame size instead renders the wrong part of the picture at the wrong
     // scale, and looks like a broken field of view rather than a missing offset.
-    const float fx = static_cast<float>(px + view.originX) + 0.5f + jitterX;
-    const float fy = static_cast<float>(py + view.originY) + 0.5f + jitterY;
+    const float sf = static_cast<float>(stride);
+    const float fx = stride > 1
+        ? static_cast<float>(view.originX) + (static_cast<float>(px) + 0.5f + jitterX) * sf
+        : static_cast<float>(px + view.originX) + 0.5f + jitterX;
+    const float fy = stride > 1
+        ? static_cast<float>(view.originY) + (static_cast<float>(py) + 0.5f + jitterY) * sf
+        : static_cast<float>(py + view.originY) + 0.5f + jitterY;
 
     const float ndcX = (fx / w) * 2.0f - 1.0f;
     const float ndcY = (fy / h) * 2.0f - 1.0f;
@@ -930,18 +940,21 @@ MT_DEVICE Vec3 primaryRayOrigin(const cloud::ViewParams& view) {
 // One pixel, start to finish
 // ---------------------------------------------------------------------------
 
-// The whole per-pixel job, shared verbatim between the CUDA kernel and the CPU
-// reference. Neither has a copy of any of this.
+// Draft's pixel stride, clamped: below one is one, and past eight a block is no longer a
+// preview of anything. See QualityParams::pixelStride.
+MT_DEVICE int pixelStrideOf(const RenderRequest& req) {
+    const int s = req.quality.pixelStride;
+    return s < 1 ? 1 : (s > 8 ? 8 : s);
+}
+
+// One sample's camera ray: its direction and its seed. The origin is the same for every
+// sample of every pixel -- primaryRayOrigin -- so the callers lift it out of their loops.
 //
-// WRITES LINEAR RADIANCE INTO THE ACCUMULATOR AND THE TRANSFORMED RESULT INTO THE
-// DESTINATION. Two buffers because the denoiser needs the linear one and the host
-// needs the display one, and because the accumulator has to survive between
-// launches while the destination is handed back to AE every time.
-MT_RENDER void renderPixel(const RenderRequest& req, int px, int py) {
-    if (px < 0 || py < 0 || px >= req.dest.widthPx || py >= req.dest.heightPx) return;
-
-    Vec3 sum = vec3(0.0f, 0.0f, 0.0f);
-
+// A FUNCTION OF ITS OWN SINCE BUILD 25, when the staged GPU render began tracing a launch's
+// samples one stage at a time instead of one pixel at a time. renderPixel calls it exactly
+// as it ran inline, so the CPU reference and both GPU paths trace the same rays.
+MT_DEVICE void pixelSampleRay(const RenderRequest& req, int px, int py, int s,
+                              Vec3& dir, unsigned int& seed) {
     // THE SEED IS KEYED TO THE FRAME PIXEL, NOT THE BUFFER PIXEL, and the difference
     // is the whole determinism claim rather than a detail.
     //
@@ -959,34 +972,31 @@ MT_RENDER void renderPixel(const RenderRequest& req, int px, int py) {
     // sun elevation 20, where a different jitter moves no pixel by a whole level, so
     // it compared byte-identical while the property it names was broken. A test can
     // only catch what its scene can show.
-    const int frameX = px + req.view.originX;
-    const int frameY = py + req.view.originY;
+    //
+    // AT A PIXEL STRIDE THE SEED IS THE BLOCK'S FIRST FRAME PIXEL, so each block keeps its own
+    // stream however the frame is divided.
+    const int stride = pixelStrideOf(req);
+    const int frameX = px * stride + req.view.originX;
+    const int frameY = py * stride + req.view.originY;
 
-    // Loop-invariant, so it is lifted out by hand rather than left to the optimiser
-    // to notice across a call boundary.
-    const Vec3 origin = primaryRayOrigin(req.view);
+    const int sampleIndex = req.firstSample + s;
+    const unsigned int h = hashPixelSample(frameX, frameY, sampleIndex, req.field.seed);
 
-    for (int s = 0; s < req.sampleCount; ++s) {
-        const int sampleIndex = req.firstSample + s;
-        const unsigned int h = hashPixelSample(frameX, frameY, sampleIndex, req.field.seed);
+    // Two decorrelated dimensions from one hash. Blue-noise offsets stable
+    // across frames are a Phase 2 upgrade -- they are the first mitigation to
+    // reach for against denoiser flicker, and they need a texture this
+    // placeholder has no way to carry.
+    const float jx = unitFloat(h) - 0.5f;
+    const float jy = unitFloat(h * 0x9e3779b9u + 0x632be59bu) - 0.5f;
 
-        // Two decorrelated dimensions from one hash. Blue-noise offsets stable
-        // across frames are a Phase 2 upgrade -- they are the first mitigation to
-        // reach for against denoiser flicker, and they need a texture this
-        // placeholder has no way to carry.
-        const float jx = unitFloat(h) - 0.5f;
-        const float jy = unitFloat(h * 0x9e3779b9u + 0x632be59bu) - 0.5f;
+    dir  = primaryRayDirection(req.view, px, py, jx, jy, stride);
+    seed = h;
+}
 
-        const Vec3 dir = primaryRayDirection(req.view, px, py, jx, jy);
-
-        // THE ONE LINE. It used to be `skyRadiance(req.field, dir)` -- an analytic
-        // sky and nothing in front of it, which is what Phase 1 was for. Everything
-        // around it is unchanged: the frame-pixel seeding, the accumulator, the
-        // output transform and the channel order are all still here, and all still
-        // shared between the two backends.
-        sum = sum + mistytuneTrace(req, origin, dir, h);
-    }
-
+// The pixel's finish: this launch's samples, summed in sample order by the caller, into the
+// accumulator, and the linear mean into the destination. Shared with the staged GPU render
+// for the reason pixelSampleRay is.
+MT_DEVICE void finishPixel(const RenderRequest& req, int px, int py, Vec3 sum) {
     // PROGRESSIVE ACCUMULATION, weighted by the counts rather than by a running
     // lerp factor. A lerp with 1/n loses precision as n grows; a running sum
     // divided once does not, and the sum is what the denoiser wants anyway.
@@ -1043,6 +1053,39 @@ MT_RENDER void renderPixel(const RenderRequest& req, int px, int py) {
     } else {
         pix[0] = 1.0f; pix[1] = mean.x; pix[2] = mean.y; pix[3] = mean.z;
     }
+}
+
+
+// The whole per-pixel job, shared verbatim between the CUDA kernel and the CPU
+// reference. Neither has a copy of any of this.
+//
+// WRITES LINEAR RADIANCE INTO THE ACCUMULATOR AND THE TRANSFORMED RESULT INTO THE
+// DESTINATION. Two buffers because the denoiser needs the linear one and the host
+// needs the display one, and because the accumulator has to survive between
+// launches while the destination is handed back to AE every time.
+MT_RENDER void renderPixel(const RenderRequest& req, int px, int py) {
+    if (px < 0 || py < 0 || px >= req.dest.widthPx || py >= req.dest.heightPx) return;
+
+    Vec3 sum = vec3(0.0f, 0.0f, 0.0f);
+
+    // Loop-invariant, so it is lifted out by hand rather than left to the optimiser
+    // to notice across a call boundary.
+    const Vec3 origin = primaryRayOrigin(req.view);
+
+    for (int s = 0; s < req.sampleCount; ++s) {
+        Vec3         dir;
+        unsigned int h;
+        pixelSampleRay(req, px, py, s, dir, h);
+
+        // THE ONE LINE. It used to be `skyRadiance(req.field, dir)` -- an analytic
+        // sky and nothing in front of it, which is what Phase 1 was for. Everything
+        // around it is unchanged: the frame-pixel seeding, the accumulator, the
+        // output transform and the channel order are all still here, and all still
+        // shared between the two backends.
+        sum = sum + mistytuneTrace(req, origin, dir, h);
+    }
+
+    finishPixel(req, px, py, sum);
 }
 
 // ---------------------------------------------------------------------------

@@ -132,6 +132,22 @@ struct MajorantGrid_0
     int32_t enabled_0;
 };
 
+struct LayerShadowMap_0
+{
+    StructuredBuffer<float> smTexels_0;
+    Vector<float, 3>  smSun_0;
+    Vector<float, 2>  smCentre_0;
+    Vector<float, 2>  smAxisU_0;
+    Vector<float, 2>  smLo_0;
+    Vector<float, 2>  smTexel_0;
+    int32_t smDimU_0;
+    int32_t smDimV_0;
+    int32_t smSlices_0;
+    float smBottom_0;
+    float smTop_0;
+    float smStep_0;
+};
+
 struct SkyInput_0
 {
     float planetRadius_0;
@@ -165,22 +181,6 @@ struct PhaseInput_0
     float lobeWeight_0;
 };
 
-struct LayerShadowMap_0
-{
-    StructuredBuffer<float> smTexels_0;
-    Vector<float, 3>  smSun_0;
-    Vector<float, 2>  smCentre_0;
-    Vector<float, 2>  smAxisU_0;
-    Vector<float, 2>  smLo_0;
-    Vector<float, 2>  smTexel_0;
-    int32_t smDimU_0;
-    int32_t smDimV_0;
-    int32_t smSlices_0;
-    float smBottom_0;
-    float smTop_0;
-    float smStep_0;
-};
-
 struct Scene_0
 {
     Medium_0 medium_0;
@@ -202,6 +202,7 @@ struct Scene_0
     int32_t airMapOn_0;
     LayerShadowMap_0 airMapIce_0;
     LayerShadowMap_0 airMapCu_0;
+    float shadowHandoff_0;
 };
 
 struct AirSegment_0
@@ -209,6 +210,20 @@ struct AirSegment_0
     Vector<float, 3>  airIn_0;
     Vector<float, 3>  airT_0;
     float shadowAt_0;
+};
+
+struct PathState_0
+{
+    Vector<float, 3>  psRadiance_0;
+    Vector<float, 3>  psThroughput_0;
+    Vector<float, 3>  psOrigin_0;
+    Vector<float, 3>  psDir_0;
+    Rng_0 psRng_0;
+    int32_t psBounce_0;
+    int32_t psAlive_0;
+    int32_t psEvents_0;
+    int32_t psCapped_0;
+    int32_t psSteps_0;
 };
 
 struct TraceResult_0
@@ -2647,10 +2662,11 @@ static float randFloat_0(Rng_0 * r_5)
     return float((word_0 >> 22U) ^ word_0) * 2.32830643653869629e-10f;
 }
 
-static bool segmentStep_0(Medium_0 * m_4, MajorantGrid_0 * g_9, StructuredBuffer<float> bounds_2, StructuredBuffer<Vector<float, 2> > drift_2, float scale_0, float tEnd_0, Dda_0 * dda_0, float * rate_0, float * t_7, Rng_0 * rng_0, float * uKeep_0, float * uLive_0, int32_t * budget_0, int32_t * steps_0)
+static bool segmentStep_0(Medium_0 * m_4, MajorantGrid_0 * g_9, StructuredBuffer<float> bounds_2, StructuredBuffer<Vector<float, 2> > drift_2, float scale_0, float tEnd_0, Dda_0 * dda_0, float * rate_0, float * t_7, Rng_0 * rng_0, float * uKeep_0, float * uLive_0, float * uHit_0, int32_t * budget_0, int32_t * steps_0)
 {
     *uKeep_0 = 0.0f;
     *uLive_0 = 0.0f;
+    *uHit_0 = 0.0f;
     for(;;)
     {
         if((*budget_0) > int(0))
@@ -2682,9 +2698,11 @@ static bool segmentStep_0(Medium_0 * m_4, MajorantGrid_0 * g_9, StructuredBuffer
         *uKeep_0 = _S255;
         float _S256 = randFloat_0(rng_0);
         *uLive_0 = _S256;
-        float _S257 = *t_7 - (F32_log(((F32_max((1.0f - uStep_0), (1.00000001168609742e-07f)))))) / *rate_0;
-        *t_7 = _S257;
-        if(_S257 >= _S253)
+        float _S257 = randFloat_0(rng_0);
+        *uHit_0 = _S257;
+        float _S258 = *t_7 - (F32_log(((F32_max((1.0f - uStep_0), (1.00000001168609742e-07f)))))) / *rate_0;
+        *t_7 = _S258;
+        if(_S258 >= _S253)
         {
             if(_S253 >= tEnd_0)
             {
@@ -2692,8 +2710,8 @@ static bool segmentStep_0(Medium_0 * m_4, MajorantGrid_0 * g_9, StructuredBuffer
             }
             *t_7 = _S253;
             ddaAdvance_0(dda_0);
-            float _S258 = gridBound_0(m_4, g_9, bounds_2, drift_2, dda_0->cell_0, m_4->majorant_0);
-            *rate_0 = _S258 * scale_0;
+            float _S259 = gridBound_0(m_4, g_9, bounds_2, drift_2, dda_0->cell_0, m_4->majorant_0);
+            *rate_0 = _S259 * scale_0;
             continue;
         }
         return true;
@@ -2704,24 +2722,24 @@ static bool segmentStep_0(Medium_0 * m_4, MajorantGrid_0 * g_9, StructuredBuffer
 static MajorantGrid_0 gridFor_0(Medium_0 * m_5, MajorantGrid_0 * g_10, Vector<float, 3>  p_2)
 {
     MajorantGrid_0 chosen_0 = *g_10;
-    bool _S259;
+    bool _S260;
     if((g_10->enabled_0) == int(2))
     {
-        _S259 = (p_2.y) >= (m_5->slabBottom_0);
+        _S260 = (p_2.y) >= (m_5->slabBottom_0);
     }
     else
     {
-        _S259 = false;
+        _S260 = false;
     }
-    if(_S259)
+    if(_S260)
     {
-        _S259 = (p_2.y) <= (m_5->slabTop_0);
+        _S260 = (p_2.y) <= (m_5->slabTop_0);
     }
     else
     {
-        _S259 = false;
+        _S260 = false;
     }
-    if(_S259)
+    if(_S260)
     {
         (&chosen_0)->enabled_0 = int(0);
     }
@@ -2731,17 +2749,17 @@ static MajorantGrid_0 gridFor_0(Medium_0 * m_5, MajorantGrid_0 * g_10, Vector<fl
 static float orgWaveFactor_0(Organization_0 * o_8, Vector<float, 2>  q_7)
 {
     Vector<float, 2>  unused_0;
-    float _S260 = orgWave_0(o_8, q_7, &unused_0);
-    return _S260;
+    float _S261 = orgWave_0(o_8, q_7, &unused_0);
+    return _S261;
 }
 
 static float cellField_0(GeneratorInput_0 * g_11, Vector<float, 2>  q_8)
 {
-    Vector<float, 2>  _S261 = q_8 - g_11->cellDrift_0;
-    Vector<float, 2>  _S262 = orgPattern_0(&g_11->gnOrg_0, _S261, g_11->cellSize_0 * 2.20000004768371582f);
-    Vector<float, 2>  gf_0 = floor_1(_S262);
-    Vector<int32_t, 2>  _S263 = Vector<int32_t, 2> {(int32_t)_slang_vector_get_element(gf_0, 0), (int32_t)_slang_vector_get_element(gf_0, 1)};
-    Vector<float, 2>  _S264 = orgJitter_0(&g_11->gnOrg_0, 0.80000001192092896f);
+    Vector<float, 2>  _S262 = q_8 - g_11->cellDrift_0;
+    Vector<float, 2>  _S263 = orgPattern_0(&g_11->gnOrg_0, _S262, g_11->cellSize_0 * 2.20000004768371582f);
+    Vector<float, 2>  gf_0 = floor_1(_S263);
+    Vector<int32_t, 2>  _S264 = Vector<int32_t, 2> {(int32_t)_slang_vector_get_element(gf_0, 0), (int32_t)_slang_vector_get_element(gf_0, 1)};
+    Vector<float, 2>  _S265 = orgJitter_0(&g_11->gnOrg_0, 0.80000001192092896f);
     int32_t j_10 = int(-1);
     float acc_2 = 0.0f;
     for(;;)
@@ -2764,29 +2782,29 @@ static float cellField_0(GeneratorInput_0 * g_11, Vector<float, 2>  q_8)
             {
                 break;
             }
-            Vector<int32_t, 2>  o_9 = _S263 + Vector<int32_t, 2> (i_16, j_10);
+            Vector<int32_t, 2>  o_9 = _S264 + Vector<int32_t, 2> (i_16, j_10);
             if((hash22_0(o_9, 2654435769U).x) > (g_11->cellDensity_0))
             {
                 i_16 = i_16 + int(1);
                 continue;
             }
-            Vector<float, 2>  _S265 = Vector<float, 2> {(float)_slang_vector_get_element(o_9, 0), (float)_slang_vector_get_element(o_9, 1)};
-            acc_3 = acc_3 + smoothstep_0(1.0f, 0.05000000074505806f, length_1(_S262 - (_S265 + (Vector<float, 2> )0.5f + (hash22_0(o_9, 0U) - (Vector<float, 2> )0.5f) * _S264)) * 2.20000004768371582f);
+            Vector<float, 2>  _S266 = Vector<float, 2> {(float)_slang_vector_get_element(o_9, 0), (float)_slang_vector_get_element(o_9, 1)};
+            acc_3 = acc_3 + smoothstep_0(1.0f, 0.05000000074505806f, length_1(_S263 - (_S266 + (Vector<float, 2> )0.5f + (hash22_0(o_9, 0U) - (Vector<float, 2> )0.5f) * _S265)) * 2.20000004768371582f);
             i_16 = i_16 + int(1);
         }
         j_10 = j_10 + int(1);
         acc_2 = acc_3;
     }
-    float _S266 = acc_2 * g_11->cellStrength_0;
-    float _S267 = orgWaveFactor_0(&g_11->gnOrg_0, _S261);
-    return _S266 * _S267;
+    float _S267 = acc_2 * g_11->cellStrength_0;
+    float _S268 = orgWaveFactor_0(&g_11->gnOrg_0, _S262);
+    return _S267 * _S268;
 }
 
 static float fbm_0(Vector<float, 3>  p_3, int32_t octaves_1)
 {
     int32_t i_17 = int(0);
     float amp_0 = 0.5f;
-    Vector<float, 3>  _S268 = p_3;
+    Vector<float, 3>  _S269 = p_3;
     float sum_0 = 0.0f;
     float norm_0 = 0.0f;
     for(;;)
@@ -2802,13 +2820,13 @@ static float fbm_0(Vector<float, 3>  p_3, int32_t octaves_1)
         {
             break;
         }
-        float sum_1 = sum_0 + amp_0 * gradientNoise_0(_S268);
+        float sum_1 = sum_0 + amp_0 * gradientNoise_0(_S269);
         float norm_1 = norm_0 + amp_0;
-        Vector<float, 3>  _S269 = _S268 * (Vector<float, 3> )2.01999998092651367f;
+        Vector<float, 3>  _S270 = _S269 * (Vector<float, 3> )2.01999998092651367f;
         float amp_1 = amp_0 * 0.5f;
         i_17 = i_17 + int(1);
         amp_0 = amp_1;
-        _S268 = _S269;
+        _S269 = _S270;
         sum_0 = sum_1;
         norm_0 = norm_1;
     }
@@ -2826,35 +2844,35 @@ static float fbm_0(Vector<float, 3>  p_3, int32_t octaves_1)
 static float iceDensity_0(GeneratorInput_0 * g_12, StructuredBuffer<Vector<float, 2> > disp_5, Vector<float, 3>  p_4)
 {
     float depth_1 = g_12->cellAltitude_0 - p_4.y;
-    bool _S270;
+    bool _S271;
     if(depth_1 < 0.0f)
     {
-        _S270 = true;
+        _S271 = true;
     }
     else
     {
-        _S270 = depth_1 > (g_12->streakLength_0);
+        _S271 = depth_1 > (g_12->streakLength_0);
     }
-    if(_S270)
+    if(_S271)
     {
         return 0.0f;
     }
-    Vector<float, 2>  _S271 = Vector<float, 2> {p_4.x, p_4.z};
-    Vector<float, 2>  _S272 = driftAt_0(g_12, disp_5, depth_1);
-    Vector<float, 2>  source_0 = _S271 - _S272;
-    float _S273 = cellField_0(g_12, source_0);
-    if(_S273 <= 0.00100000004749745f)
+    Vector<float, 2>  _S272 = Vector<float, 2> {p_4.x, p_4.z};
+    Vector<float, 2>  _S273 = driftAt_0(g_12, disp_5, depth_1);
+    Vector<float, 2>  source_0 = _S272 - _S273;
+    float _S274 = cellField_0(g_12, source_0);
+    if(_S274 <= 0.00100000004749745f)
     {
         return 0.0f;
     }
-    return (F32_max((_S273 * (F32_exp((- g_12->sublimation_0 * depth_1 / 1000.0f))) * smoothstep_0(0.0f, 0.07999999821186066f * g_12->streakLength_0, depth_1) * (1.0f - smoothstep_0(0.75f * g_12->streakLength_0, g_12->streakLength_0, depth_1)) * (F32_max((1.0f + g_12->detailAmount_0 * fbm_0(Vector<float, 3> ((source_0 / (Vector<float, 2> )g_12->detailScale_0).x, (source_0 / (Vector<float, 2> )g_12->detailScale_0).y, depth_1 / (F32_max((g_12->fallSpeed_0), (0.00999999977648258f))) * 0.01999999955296516f + g_12->timeSeconds_0 * 0.00999999977648258f), g_12->octaves_0) * 1.79999995231628418f), (0.0f)))), (0.0f))) * g_12->opticalDepth_0 / (F32_max((g_12->streakLength_0), (1.0f)));
+    return (F32_max((_S274 * (F32_exp((- g_12->sublimation_0 * depth_1 / 1000.0f))) * smoothstep_0(0.0f, 0.07999999821186066f * g_12->streakLength_0, depth_1) * (1.0f - smoothstep_0(0.75f * g_12->streakLength_0, g_12->streakLength_0, depth_1)) * (F32_max((1.0f + g_12->detailAmount_0 * fbm_0(Vector<float, 3> ((source_0 / (Vector<float, 2> )g_12->detailScale_0).x, (source_0 / (Vector<float, 2> )g_12->detailScale_0).y, depth_1 / (F32_max((g_12->fallSpeed_0), (0.00999999977648258f))) * 0.01999999955296516f + g_12->timeSeconds_0 * 0.00999999977648258f), g_12->octaves_0) * 1.79999995231628418f), (0.0f)))), (0.0f))) * g_12->opticalDepth_0 / (F32_max((g_12->streakLength_0), (1.0f)));
 }
 
 static float convPouches_0(ConvectionInput_0 * c_34, Vector<float, 2>  q_9)
 {
     Vector<float, 2>  g_13 = q_9 / (Vector<float, 2> )c_34->cvPouchSize_0;
-    Vector<float, 2>  _S274 = floor_1(g_13);
-    Vector<int32_t, 2>  _S275 = Vector<int32_t, 2> {(int32_t)_slang_vector_get_element(_S274, 0), (int32_t)_slang_vector_get_element(_S274, 1)};
+    Vector<float, 2>  _S275 = floor_1(g_13);
+    Vector<int32_t, 2>  _S276 = Vector<int32_t, 2> {(int32_t)_slang_vector_get_element(_S275, 0), (int32_t)_slang_vector_get_element(_S275, 1)};
     float deepest_0 = 0.0f;
     int32_t j_11 = int(-1);
     for(;;)
@@ -2877,9 +2895,9 @@ static float convPouches_0(ConvectionInput_0 * c_34, Vector<float, 2>  q_9)
             {
                 break;
             }
-            Vector<int32_t, 2>  slot_7 = _S275 + Vector<int32_t, 2> (i_18, j_11);
-            Vector<float, 2>  _S276 = Vector<float, 2> {(float)_slang_vector_get_element(slot_7, 0), (float)_slang_vector_get_element(slot_7, 1)};
-            Vector<float, 2>  d_8 = g_13 - (_S276 + (Vector<float, 2> )0.5f + (hash22_0(slot_7, 739982445U) - (Vector<float, 2> )0.5f) * (Vector<float, 2> )0.60000002384185791f);
+            Vector<int32_t, 2>  slot_7 = _S276 + Vector<int32_t, 2> (i_18, j_11);
+            Vector<float, 2>  _S277 = Vector<float, 2> {(float)_slang_vector_get_element(slot_7, 0), (float)_slang_vector_get_element(slot_7, 1)};
+            Vector<float, 2>  d_8 = g_13 - (_S277 + (Vector<float, 2> )0.5f + (hash22_0(slot_7, 739982445U) - (Vector<float, 2> )0.5f) * (Vector<float, 2> )0.60000002384185791f);
             float t2_0 = dot_1(d_8, d_8) / 0.46240001916885376f;
             if(t2_0 >= 1.0f)
             {
@@ -2915,16 +2933,16 @@ static void convMoatRing_0(Vector<float, 2>  xz_0, Vector<float, 2>  at_0, float
     if(f_1 < (*s_9))
     {
         *s_9 = f_1;
-        Vector<float, 2>  _S277;
+        Vector<float, 2>  _S278;
         if(r_6 > 0.00100000004749745f)
         {
-            _S277 = d_9 * (Vector<float, 2> )(6.0f * t_8 * (1.0f - t_8) / (band_2 * r_6));
+            _S278 = d_9 * (Vector<float, 2> )(6.0f * t_8 * (1.0f - t_8) / (band_2 * r_6));
         }
         else
         {
-            _S277 = Vector<float, 2> (0.0f, 0.0f);
+            _S278 = Vector<float, 2> (0.0f, 0.0f);
         }
-        *gs_0 = _S277;
+        *gs_0 = _S278;
     }
     return;
 }
@@ -2949,30 +2967,30 @@ static float convMoat_0(ConvectionInput_0 * c_35, Vector<float, 2>  xz_1, Vector
         {
             break;
         }
-        Vector<float, 4>  _S278 = convTurret_0(c_35, k_7);
-        convMoatRing_0(xz_1, Vector<float, 2> {_S278.x, _S278.y}, _S278.z, &s_10, &gs_1, &slope_2);
+        Vector<float, 4>  _S279 = convTurret_0(c_35, k_7);
+        convMoatRing_0(xz_1, Vector<float, 2> {_S279.x, _S279.y}, _S279.z, &s_10, &gs_1, &slope_2);
         k_7 = k_7 + int(1);
     }
-    float _S279 = c_35->cvMoat_0;
+    float _S280 = c_35->cvMoat_0;
     *grad_5 = gs_1 * (Vector<float, 2> )c_35->cvMoat_0;
-    *slopeAdd_0 = slope_2 * _S279;
-    return 1.0f - _S279 * (1.0f - s_10);
+    *slopeAdd_0 = slope_2 * _S280;
+    return 1.0f - _S280 * (1.0f - s_10);
 }
 
 static float convUpdraftGrad_0(ConvectionInput_0 * c_36, Vector<float, 2>  q_10, Vector<float, 2>  * grad_6)
 {
     if(((&c_36->cvOrg_0)->ogOn_0) == int(0))
     {
-        float _S280 = convUpdraftGradT_2(c_36, q_10, grad_6);
-        return _S280;
+        float _S281 = convUpdraftGradT_2(c_36, q_10, grad_6);
+        return _S281;
     }
     if((c_36->cvLacunarity_0) <= 0.0f)
     {
-        float _S281 = convUpdraftGradT_1(c_36, q_10, grad_6);
-        return _S281;
+        float _S282 = convUpdraftGradT_1(c_36, q_10, grad_6);
+        return _S282;
     }
-    float _S282 = convUpdraftGradT_0(c_36, q_10, grad_6);
-    return _S282;
+    float _S283 = convUpdraftGradT_0(c_36, q_10, grad_6);
+    return _S283;
 }
 
 static float convSurfaceDistance_0(float v_2, float delta_0, float slope_3)
@@ -2984,24 +3002,24 @@ static float convSurfaceDistance_0(float v_2, float delta_0, float slope_3)
         return 0.0f;
     }
     float d_10 = num_0 / den_0;
-    float _S283;
+    float _S284;
     if(v_2 >= 0.0f)
     {
-        _S283 = d_10;
+        _S284 = d_10;
     }
     else
     {
-        _S283 = - d_10;
+        _S284 = - d_10;
     }
-    return _S283;
+    return _S284;
 }
 
 static float convFieldBaseInside_0(ConvectionInput_0 * c_37, float w_3, Vector<float, 2>  slope_4, float cap_3)
 {
-    float _S284 = convTowerHeight_0(c_37, w_3);
-    float v_3 = _S284 - 1.0f;
-    float _S285 = convNeededUpdraft_0(c_37, 1.0f);
-    return convSurfaceDistance_0(v_3, w_3 - _S285, (F32_min((length_1(slope_4)), (cap_3))));
+    float _S285 = convTowerHeight_0(c_37, w_3);
+    float v_3 = _S285 - 1.0f;
+    float _S286 = convNeededUpdraft_0(c_37, 1.0f);
+    return convSurfaceDistance_0(v_3, w_3 - _S286, (F32_min((length_1(slope_4)), (cap_3))));
 }
 
 static float convDomeSurface_0(float top_4, float radius_4, float shape_2, Vector<float, 2>  rel_0, float r_7, float py_0, float above_4, Vector<float, 3>  * x_23)
@@ -3037,9 +3055,9 @@ static float convDomeSurface_0(float top_4, float radius_4, float shape_2, Vecto
         {
             shiftUp_0 = 0.0f;
         }
-        float _S286 = shiftOut_0;
+        float _S287 = shiftOut_0;
         shiftOut_0 = shiftUp_0;
-        shiftUp_0 = _S286;
+        shiftUp_0 = _S287;
         d_11 = d_12;
     }
     Vector<float, 2>  radial_0;
@@ -3058,20 +3076,20 @@ static float convDomeSurface_0(float top_4, float radius_4, float shape_2, Vecto
 
 static float convTowerSurface_0(ConvectionInput_0 * c_38, Vector<float, 2>  rel_1, float r_8, float py_1, float above_5, Vector<float, 3>  * x_24)
 {
-    float _S287 = convDomeSurface_0(c_38->cvHeroTop_0, c_38->cvHeroRadius_0, c_38->cvShape_0, rel_1, r_8, py_1, above_5, x_24);
-    return _S287;
+    float _S288 = convDomeSurface_0(c_38->cvHeroTop_0, c_38->cvHeroRadius_0, c_38->cvShape_0, rel_1, r_8, py_1, above_5, x_24);
+    return _S288;
 }
 
 static float convShapeSurface_0(ConvectionInput_0 * c_39, Vector<float, 2>  plane_0, float py_2, float above_6, Vector<float, 3>  * x_25)
 {
-    float _S288 = plane_0.x;
+    float _S289 = plane_0.x;
     Vector<float, 2>  slopeUY_1;
-    float _S289 = convShapeDistance_0(c_39, _S288, above_6, &slopeUY_1);
-    float _S290 = plane_0.y;
+    float _S290 = convShapeDistance_0(c_39, _S289, above_6, &slopeUY_1);
+    float _S291 = plane_0.y;
     Vector<float, 2>  stepDM_1;
-    float gap_2 = convShapeProfile_0(_S289, (F32_abs((_S290))), c_39->cvShapeRound_0, &stepDM_1);
+    float gap_2 = convShapeProfile_0(_S290, (F32_abs((_S291))), c_39->cvShapeRound_0, &stepDM_1);
     float side_0;
-    if(_S290 >= 0.0f)
+    if(_S291 >= 0.0f)
     {
         side_0 = 1.0f;
     }
@@ -3079,7 +3097,7 @@ static float convShapeSurface_0(ConvectionInput_0 * c_39, Vector<float, 2>  plan
     {
         side_0 = -1.0f;
     }
-    *x_25 = Vector<float, 3> (_S288 + stepDM_1.x * slopeUY_1.x, py_2 + stepDM_1.x * slopeUY_1.y, _S290 + side_0 * stepDM_1.y);
+    *x_25 = Vector<float, 3> (_S289 + stepDM_1.x * slopeUY_1.x, py_2 + stepDM_1.x * slopeUY_1.y, _S291 + side_0 * stepDM_1.y);
     return - gap_2;
 }
 
@@ -3087,50 +3105,50 @@ static bool convHeroSmooth_0(ConvectionInput_0 * c_40, Vector<float, 3>  p_5, fl
 {
     *d_13 = -1.00000001504746622e+30f;
     *x_26 = Vector<float, 3> (0.0f, 0.0f, 0.0f);
-    float _S291 = c_40->cvHeroBillow_0;
+    float _S292 = c_40->cvHeroBillow_0;
     *amount_0 = c_40->cvHeroBillow_0;
-    *lobe_0 = _S291;
+    *lobe_0 = _S292;
     Vector<float, 2>  rel_2 = Vector<float, 2> {p_5.x, p_5.z} - c_40->cvHeroAt_0;
     float r_9 = length_1(rel_2);
-    float _S292 = convHeroReachAll_0(c_40);
-    if(r_9 >= _S292)
+    float _S293 = convHeroReachAll_0(c_40);
+    if(r_9 >= _S293)
     {
         return false;
     }
     if((c_40->cvShapeOn_0) == int(0))
     {
-        float _S293 = convTowerSurface_0(c_40, rel_2, r_9, p_5.y, above_7, x_26);
-        *d_13 = _S293;
+        float _S294 = convTowerSurface_0(c_40, rel_2, r_9, p_5.y, above_7, x_26);
+        *d_13 = _S294;
     }
     else
     {
         Vector<float, 2>  plane_1 = Vector<float, 2> (dot_1(rel_2, c_40->cvShapeAxisU_0), dot_1(rel_2, Vector<float, 2> (- c_40->cvShapeAxisU_0.y, c_40->cvShapeAxisU_0.x)));
-        float _S294 = c_40->cvShapeDecay_0;
+        float _S295 = c_40->cvShapeDecay_0;
         if((c_40->cvShapeDecay_0) >= 1.0f)
         {
-            float _S295 = convTowerSurface_0(c_40, plane_1, r_9, p_5.y, above_7, x_26);
-            *d_13 = _S295;
+            float _S296 = convTowerSurface_0(c_40, plane_1, r_9, p_5.y, above_7, x_26);
+            *d_13 = _S296;
         }
         else
         {
-            float _S296 = p_5.y;
+            float _S297 = p_5.y;
             Vector<float, 3>  xs_0;
-            float _S297 = convShapeSurface_0(c_40, plane_1, _S296, above_7, &xs_0);
-            if(_S294 > 0.0f)
+            float _S298 = convShapeSurface_0(c_40, plane_1, _S297, above_7, &xs_0);
+            if(_S295 > 0.0f)
             {
                 Vector<float, 3>  xt_0;
-                float _S298 = convTowerSurface_0(c_40, plane_1, r_9, _S296, above_7, &xt_0);
-                *d_13 = lerp_0(_S297, _S298, _S294);
-                *x_26 = lerp_2(xs_0, xt_0, (Vector<float, 3> )_S294);
+                float _S299 = convTowerSurface_0(c_40, plane_1, r_9, _S297, above_7, &xt_0);
+                *d_13 = lerp_0(_S298, _S299, _S295);
+                *x_26 = lerp_2(xs_0, xt_0, (Vector<float, 3> )_S295);
             }
             else
             {
-                *d_13 = _S297;
+                *d_13 = _S298;
                 *x_26 = xs_0;
             }
-            float _S299 = c_40->cvShapeBillow_0;
-            *amount_0 = _S291 * lerp_0(c_40->cvShapeBillow_0, 1.0f, _S294);
-            *lobe_0 = _S291 * lerp_0((F32_max((_S299), (0.30000001192092896f))), 1.0f, _S294);
+            float _S300 = c_40->cvShapeBillow_0;
+            *amount_0 = _S292 * lerp_0(c_40->cvShapeBillow_0, 1.0f, _S295);
+            *lobe_0 = _S292 * lerp_0((F32_max((_S300), (0.30000001192092896f))), 1.0f, _S295);
         }
     }
     return true;
@@ -3143,29 +3161,29 @@ static bool convTurretSmooth_0(ConvectionInput_0 * c_41, Vector<float, 4>  t_9, 
     *k_8 = 1.0f;
     Vector<float, 2>  rel_3 = Vector<float, 2> {p_6.x, p_6.z} - Vector<float, 2> {t_9.x, t_9.y};
     float r2_2 = dot_1(rel_3, rel_3);
-    float _S300 = convTurretReach_0(c_41, t_9);
-    if(r2_2 >= (_S300 * _S300))
+    float _S301 = convTurretReach_0(c_41, t_9);
+    if(r2_2 >= (_S301 * _S301))
     {
         return false;
     }
-    float _S301 = t_9.w;
-    if(above_8 >= (_S301 + c_41->cvBillow_0 * c_41->cvHeroBillow_0))
+    float _S302 = t_9.w;
+    if(above_8 >= (_S302 + c_41->cvBillow_0 * c_41->cvHeroBillow_0))
     {
         return false;
     }
     float r_10 = (F32_sqrt((r2_2)));
-    float _S302 = t_9.z;
-    float _S303 = convTurretBillow_0(c_41, _S302);
-    *k_8 = _S303;
+    float _S303 = t_9.z;
+    float _S304 = convTurretBillow_0(c_41, _S303);
+    *k_8 = _S304;
     Vector<float, 3>  own_0;
-    float _S304 = convDomeSurface_0(_S301, _S302, c_41->cvShape_0, rel_3, r_10, p_6.y, above_8, &own_0);
-    *d_14 = _S304;
+    float _S305 = convDomeSurface_0(_S302, _S303, c_41->cvShape_0, rel_3, r_10, p_6.y, above_8, &own_0);
+    *d_14 = _S305;
     Vector<float, 3>  w_4 = own_0 + Vector<float, 3> (t_9.x - c_41->cvHeroAt_0.x, 0.0f, t_9.y - c_41->cvHeroAt_0.y);
     Vector<float, 3>  w_5;
     if((c_41->cvShapeOn_0) != int(0))
     {
-        Vector<float, 2>  _S305 = Vector<float, 2> {w_4.x, w_4.z};
-        w_5 = Vector<float, 3> (dot_1(_S305, c_41->cvShapeAxisU_0), w_4.y, dot_1(_S305, Vector<float, 2> (- c_41->cvShapeAxisU_0.y, c_41->cvShapeAxisU_0.x)));
+        Vector<float, 2>  _S306 = Vector<float, 2> {w_4.x, w_4.z};
+        w_5 = Vector<float, 3> (dot_1(_S306, c_41->cvShapeAxisU_0), w_4.y, dot_1(_S306, Vector<float, 2> (- c_41->cvShapeAxisU_0.y, c_41->cvShapeAxisU_0.x)));
     }
     else
     {
@@ -3185,8 +3203,8 @@ static float convGroupBaseInside_0(ConvectionInput_0 * c_42, Vector<float, 2>  x
         float amount_1;
         float lobe_1;
         Vector<float, 3>  x_28;
-        bool _S306 = convHeroSmooth_0(c_42, p_7, 1.0f, &d_15, &x_28, &amount_1, &lobe_1);
-        if(_S306)
+        bool _S307 = convHeroSmooth_0(c_42, p_7, 1.0f, &d_15, &x_28, &amount_1, &lobe_1);
+        if(_S307)
         {
             best_1 = (F32_max((-1.00000001504746622e+30f), (d_15)));
         }
@@ -3204,23 +3222,23 @@ static float convGroupBaseInside_0(ConvectionInput_0 * c_42, Vector<float, 2>  x
             {
                 break;
             }
-            bool _S307;
+            bool _S308;
             if(!nearGroup_0)
             {
-                _S307 = true;
+                _S308 = true;
             }
             else
             {
-                _S307 = k_9 >= (c_42->cvTurretCount_0);
+                _S308 = k_9 >= (c_42->cvTurretCount_0);
             }
-            if(_S307)
+            if(_S308)
             {
                 break;
             }
-            Vector<float, 4>  _S308 = convTurret_0(c_42, k_9);
+            Vector<float, 4>  _S309 = convTurret_0(c_42, k_9);
             float kt_0;
-            bool _S309 = convTurretSmooth_0(c_42, _S308, p_7, 1.0f, &d_15, &x_28, &kt_0);
-            if(_S309)
+            bool _S310 = convTurretSmooth_0(c_42, _S309, p_7, 1.0f, &d_15, &x_28, &kt_0);
+            if(_S310)
             {
                 best_1 = (F32_max((best_1), (d_15)));
             }
@@ -3253,8 +3271,8 @@ static float convBaseInside_0(ConvectionInput_0 * c_43, Vector<float, 2>  xz_3, 
         float m_6;
         if(moated_0)
         {
-            float _S310 = convMoat_0(c_43, xz_3, &gMoat_0, &capMoat_0);
-            m_6 = _S310;
+            float _S311 = convMoat_0(c_43, xz_3, &gMoat_0, &capMoat_0);
+            m_6 = _S311;
         }
         else
         {
@@ -3263,23 +3281,23 @@ static float convBaseInside_0(ConvectionInput_0 * c_43, Vector<float, 2>  xz_3, 
         if(m_6 > 0.0f)
         {
             Vector<float, 2>  slope_5;
-            float _S311 = convUpdraftGrad_0(c_43, xz_3 - c_43->cvDrift_0, &slope_5);
-            float _S312 = convSlopeCap_0(c_43);
+            float _S312 = convUpdraftGrad_0(c_43, xz_3 - c_43->cvDrift_0, &slope_5);
+            float _S313 = convSlopeCap_0(c_43);
             float cap_4;
             if(moated_0)
             {
-                slope_5 = slope_5 * (Vector<float, 2> )m_6 + gMoat_0 * (Vector<float, 2> )_S311;
-                float cap_5 = _S312 + capMoat_0;
-                best_2 = _S311 * m_6;
+                slope_5 = slope_5 * (Vector<float, 2> )m_6 + gMoat_0 * (Vector<float, 2> )_S312;
+                float cap_5 = _S313 + capMoat_0;
+                best_2 = _S312 * m_6;
                 cap_4 = cap_5;
             }
             else
             {
-                best_2 = _S311;
-                cap_4 = _S312;
+                best_2 = _S312;
+                cap_4 = _S313;
             }
-            float _S313 = convFieldBaseInside_0(c_43, best_2, slope_5, cap_4);
-            best_2 = _S313;
+            float _S314 = convFieldBaseInside_0(c_43, best_2, slope_5, cap_4);
+            best_2 = _S314;
         }
         else
         {
@@ -3290,8 +3308,8 @@ static float convBaseInside_0(ConvectionInput_0 * c_43, Vector<float, 2>  xz_3, 
     {
         best_2 = -1.00000001504746622e+30f;
     }
-    float _S314 = convGroupBaseInside_0(c_43, xz_3, nearGroup_1);
-    return (F32_max((best_2), (_S314)));
+    float _S315 = convGroupBaseInside_0(c_43, xz_3, nearGroup_1);
+    return (F32_max((best_2), (_S315)));
 }
 
 static float convMammaSagOf_0(ConvectionInput_0 * c_44, float pouch_0, float inside_2)
@@ -3305,28 +3323,28 @@ static float convMammaSagOf_0(ConvectionInput_0 * c_44, float pouch_0, float ins
 
 static float convMammaSag_0(ConvectionInput_0 * c_45, Vector<float, 2>  xz_4, bool nearGroup_2, float below_0)
 {
-    float _S315 = convPouches_0(c_45, xz_4 - c_45->cvDrift_0);
-    if((c_45->cvMammaDepth_0 * _S315) <= below_0)
+    float _S316 = convPouches_0(c_45, xz_4 - c_45->cvDrift_0);
+    if((c_45->cvMammaDepth_0 * _S316) <= below_0)
     {
         return 0.0f;
     }
-    float _S316 = convBaseInside_0(c_45, xz_4, nearGroup_2);
-    float _S317 = convMammaSagOf_0(c_45, _S315, _S316);
-    return _S317;
+    float _S317 = convBaseInside_0(c_45, xz_4, nearGroup_2);
+    float _S318 = convMammaSagOf_0(c_45, _S316, _S317);
+    return _S318;
 }
 
 static Vector<float, 3>  convTwist_0(Vector<float, 3>  x_29)
 {
-    float _S318 = x_29.x;
-    float _S319 = x_29.y;
-    float _S320 = x_29.z;
-    return Vector<float, 3> (0.0f * _S318 + 0.80000001192092896f * _S319 + 0.60000002384185791f * _S320, -0.80000001192092896f * _S318 + 0.36000001430511475f * _S319 - 0.47999998927116394f * _S320, -0.60000002384185791f * _S318 - 0.47999998927116394f * _S319 + 0.63999998569488525f * _S320);
+    float _S319 = x_29.x;
+    float _S320 = x_29.y;
+    float _S321 = x_29.z;
+    return Vector<float, 3> (0.0f * _S319 + 0.80000001192092896f * _S320 + 0.60000002384185791f * _S321, -0.80000001192092896f * _S319 + 0.36000001430511475f * _S320 - 0.47999998927116394f * _S321, -0.60000002384185791f * _S319 - 0.47999998927116394f * _S320 + 0.63999998569488525f * _S321);
 }
 
 static float convPuffs_0(Vector<float, 3>  x_30)
 {
     Vector<float, 3>  fl_0 = floor_0(x_30);
-    Vector<int32_t, 3>  _S321 = Vector<int32_t, 3> {(int32_t)_slang_vector_get_element(fl_0, 0), (int32_t)_slang_vector_get_element(fl_0, 1), (int32_t)_slang_vector_get_element(fl_0, 2)};
+    Vector<int32_t, 3>  _S322 = Vector<int32_t, 3> {(int32_t)_slang_vector_get_element(fl_0, 0), (int32_t)_slang_vector_get_element(fl_0, 1), (int32_t)_slang_vector_get_element(fl_0, 2)};
     Vector<float, 3>  f_2 = x_30 - fl_0;
     int32_t dz_0;
     if((f_2.x) < 0.5f)
@@ -3355,7 +3373,7 @@ static float convPuffs_0(Vector<float, 3>  x_30)
     {
         dx_0 = int(0);
     }
-    Vector<int32_t, 3>  _S322 = Vector<int32_t, 3> (dz_0, dy_0, dx_0);
+    Vector<int32_t, 3>  _S323 = Vector<int32_t, 3> (dz_0, dy_0, dx_0);
     float nearest_0 = 1.0e+09f;
     dz_0 = int(0);
     for(;;)
@@ -3388,12 +3406,12 @@ static float convPuffs_0(Vector<float, 3>  x_30)
                 {
                     break;
                 }
-                Vector<int32_t, 3>  off_0 = _S322 + Vector<int32_t, 3> (dx_0, dy_0, dz_0);
-                Vector<float, 3>  _S323 = Vector<float, 3> {(float)_slang_vector_get_element(off_0, 0), (float)_slang_vector_get_element(off_0, 1), (float)_slang_vector_get_element(off_0, 2)};
-                Vector<float, 3>  d_16 = _S323 + (Vector<float, 3> )0.5f + (Vector<float, 3> )0.25f * hash33_0(_S321 + off_0) - f_2;
-                float _S324 = (F32_min((nearest_1), (dot_0(d_16, d_16))));
+                Vector<int32_t, 3>  off_0 = _S323 + Vector<int32_t, 3> (dx_0, dy_0, dz_0);
+                Vector<float, 3>  _S324 = Vector<float, 3> {(float)_slang_vector_get_element(off_0, 0), (float)_slang_vector_get_element(off_0, 1), (float)_slang_vector_get_element(off_0, 2)};
+                Vector<float, 3>  d_16 = _S324 + (Vector<float, 3> )0.5f + (Vector<float, 3> )0.25f * hash33_0(_S322 + off_0) - f_2;
+                float _S325 = (F32_min((nearest_1), (dot_0(d_16, d_16))));
                 int32_t dx_1 = dx_0 + int(1);
-                nearest_1 = _S324;
+                nearest_1 = _S325;
                 dx_0 = dx_1;
             }
             int32_t dy_1 = dy_0 + int(1);
@@ -3407,9 +3425,9 @@ static float convPuffs_0(Vector<float, 3>  x_30)
 
 static float convBillow_0(ConvectionInput_0 * c_46, Vector<float, 3>  p_8, float scale_1)
 {
-    Vector<float, 3>  _S325 = Vector<float, 3> (p_8.x, p_8.y - c_46->cvRise_0, p_8.z) / (Vector<float, 3> )scale_1;
+    Vector<float, 3>  _S326 = Vector<float, 3> (p_8.x, p_8.y - c_46->cvRise_0, p_8.z) / (Vector<float, 3> )scale_1;
     int32_t i_19 = int(0);
-    Vector<float, 3>  x_31 = _S325;
+    Vector<float, 3>  x_31 = _S326;
     float amp_2 = 0.60000002384185791f;
     float sum_2 = 0.0f;
     float norm_2 = 0.0f;
@@ -3451,17 +3469,17 @@ static float convBillow_0(ConvectionInput_0 * c_46, Vector<float, 3>  p_8, float
 
 static float convInside_0(ConvectionInput_0 * c_47, float d_17, float lift_2, Vector<float, 3>  x_34, float scale_2)
 {
-    float _S326 = d_17 + lift_2;
-    if(_S326 <= 0.0f)
+    float _S327 = d_17 + lift_2;
+    if(_S327 <= 0.0f)
     {
-        return _S326;
+        return _S327;
     }
     if((d_17 - lift_2) >= 12.0f)
     {
         return 12.0f;
     }
-    float _S327 = convBillow_0(c_47, x_34, scale_2);
-    return d_17 + lift_2 * _S327;
+    float _S328 = convBillow_0(c_47, x_34, scale_2);
+    return d_17 + lift_2 * _S328;
 }
 
 static float convCapGrain_0(ConvectionInput_0 * c_48, Vector<float, 2>  rel_4, float scale_3)
@@ -3473,24 +3491,24 @@ static float convCapDensity_0(ConvectionInput_0 * c_49, Vector<float, 3>  p_9, f
 {
     Vector<float, 2>  rel_5 = Vector<float, 2> {p_9.x, p_9.z} - c_49->cvHeroAt_0;
     float r2_3 = dot_1(rel_5, rel_5);
-    float _S328 = c_49->cvHeroRadius_0;
-    float _S329 = c_49->cvPileusThick_0;
+    float _S329 = c_49->cvHeroRadius_0;
+    float _S330 = c_49->cvPileusThick_0;
     float best_3;
     if((c_49->cvPileusThick_0) > 0.0f)
     {
-        float rp_1 = 0.60000002384185791f * _S328;
-        float _S330 = rp_1 * rp_1;
-        if(r2_3 < _S330)
+        float rp_1 = 0.60000002384185791f * _S329;
+        float _S331 = rp_1 * rp_1;
+        if(r2_3 < _S331)
         {
-            float lens_0 = 1.0f - r2_3 / _S330;
-            float _S331 = c_49->cvPileusGap_0;
-            float _S332 = convHeroHeight_0(c_49, (F32_sqrt((r2_3))) * 0.60000002384185791f);
-            float most_0 = 0.5f * _S329 * lens_0;
-            float _S333 = (F32_abs((above_9 - (_S331 + _S332))));
-            if(_S333 < most_0)
+            float lens_0 = 1.0f - r2_3 / _S331;
+            float _S332 = c_49->cvPileusGap_0;
+            float _S333 = convHeroHeight_0(c_49, (F32_sqrt((r2_3))) * 0.60000002384185791f);
+            float most_0 = 0.5f * _S330 * lens_0;
+            float _S334 = (F32_abs((above_9 - (_S332 + _S333))));
+            if(_S334 < most_0)
             {
-                float _S334 = convCapGrain_0(c_49, rel_5, 900.0f);
-                float s_11 = most_0 * _S334 - _S333;
+                float _S335 = convCapGrain_0(c_49, rel_5, 900.0f);
+                float s_11 = most_0 * _S335 - _S334;
                 if(s_11 > 0.0f)
                 {
                     best_3 = (F32_max((0.0f), (0.44999998807907104f * smoothstep_0(0.0f, 15.0f, s_11))));
@@ -3514,10 +3532,10 @@ static float convCapDensity_0(ConvectionInput_0 * c_49, Vector<float, 3>  p_9, f
     {
         best_3 = 0.0f;
     }
-    float _S335 = c_49->cvVelumThick_0;
+    float _S336 = c_49->cvVelumThick_0;
     if((c_49->cvVelumThick_0) > 0.0f)
     {
-        float ext_1 = 1.89999997615814209f * _S328;
+        float ext_1 = 1.89999997615814209f * _S329;
         if(r2_3 < (ext_1 * ext_1))
         {
             float r_11 = (F32_sqrt((r2_3)));
@@ -3530,14 +3548,14 @@ static float convCapDensity_0(ConvectionInput_0 * c_49, Vector<float, 3>  p_9, f
             {
                 dir_0 = Vector<float, 2> (1.0f, 0.0f);
             }
-            float edge_1 = _S328 + (ext_1 - _S328) * saturate_0(0.875f + 0.08330000191926956f * gradientNoise_0(Vector<float, 3> (1.70000004768371582f * dir_0.x + c_49->cvHeroSeed_0.x * 0.00100000004749745f, 2.29999995231628418f, 1.70000004768371582f * dir_0.y + c_49->cvHeroSeed_0.z * 0.00100000004749745f)));
-            float _S336 = 0.5f * _S335;
-            float most_1 = _S336 * (1.0f - smoothstep_0(_S328 + 0.40000000596046448f * (edge_1 - _S328), edge_1, r_11));
-            float _S337 = (F32_abs((above_9 - (c_49->cvVelumHeight_0 + _S336 * (1.0f - smoothstep_0(_S328, 2.0f * _S328, r_11))))));
-            if(_S337 < most_1)
+            float edge_1 = _S329 + (ext_1 - _S329) * saturate_0(0.875f + 0.08330000191926956f * gradientNoise_0(Vector<float, 3> (1.70000004768371582f * dir_0.x + c_49->cvHeroSeed_0.x * 0.00100000004749745f, 2.29999995231628418f, 1.70000004768371582f * dir_0.y + c_49->cvHeroSeed_0.z * 0.00100000004749745f)));
+            float _S337 = 0.5f * _S336;
+            float most_1 = _S337 * (1.0f - smoothstep_0(_S329 + 0.40000000596046448f * (edge_1 - _S329), edge_1, r_11));
+            float _S338 = (F32_abs((above_9 - (c_49->cvVelumHeight_0 + _S337 * (1.0f - smoothstep_0(_S329, 2.0f * _S329, r_11))))));
+            if(_S338 < most_1)
             {
-                float _S338 = convCapGrain_0(c_49, rel_5, 2500.0f);
-                float s_12 = most_1 * _S338 - _S337;
+                float _S339 = convCapGrain_0(c_49, rel_5, 2500.0f);
+                float s_12 = most_1 * _S339 - _S338;
                 if(s_12 > 0.0f)
                 {
                     best_3 = (F32_max((best_3), (0.2199999988079071f * smoothstep_0(0.0f, 15.0f, s_12))));
@@ -3569,7 +3587,7 @@ static void convGroupFold_0(float d_18, Vector<float, 3>  x_35, float lift_3, fl
 
 static float convGroupInside_0(ConvectionInput_0 * c_50, Vector<float, 3>  p_10, float above_10, bool nearGroup_3)
 {
-    bool _S339;
+    bool _S340;
     float gMax_1 = -1.00000001504746622e+30f;
     float gSum_1 = 0.0f;
     float gLift_1 = 0.0f;
@@ -3592,47 +3610,47 @@ static float convGroupInside_0(ConvectionInput_0 * c_50, Vector<float, 3>  p_10,
         }
         if(!nearGroup_3)
         {
-            _S339 = true;
+            _S340 = true;
         }
         else
         {
-            _S339 = k_10 >= (c_50->cvTurretCount_0);
+            _S340 = k_10 >= (c_50->cvTurretCount_0);
         }
-        if(_S339)
+        if(_S340)
         {
             break;
         }
-        Vector<float, 4>  _S340 = convTurret_0(c_50, k_10);
+        Vector<float, 4>  _S341 = convTurret_0(c_50, k_10);
         float kt_1;
-        bool _S341 = convTurretSmooth_0(c_50, _S340, p_10, above_10, &d_19, &x_36, &kt_1);
-        if(_S341)
+        bool _S342 = convTurretSmooth_0(c_50, _S341, p_10, above_10, &d_19, &x_36, &kt_1);
+        if(_S342)
         {
-            float _S342 = convLift_0(c_50, above_10, kt_1);
-            convGroupFold_0(d_19, x_36, _S342, kt_1, &gMax_1, &gSum_1, &gX_1, &gLift_1, &gLobe_1);
+            float _S343 = convLift_0(c_50, above_10, kt_1);
+            convGroupFold_0(d_19, x_36, _S343, kt_1, &gMax_1, &gSum_1, &gX_1, &gLift_1, &gLobe_1);
             anyTurret_0 = true;
         }
         k_10 = k_10 + int(1);
     }
-    bool _S343 = convHeroSmooth_0(c_50, p_10, above_10, &d_19, &x_36, &amount_2, &lobe_3);
+    bool _S344 = convHeroSmooth_0(c_50, p_10, above_10, &d_19, &x_36, &amount_2, &lobe_3);
     float heroLift_0;
-    if(_S343)
+    if(_S344)
     {
-        float _S344 = convLift_0(c_50, above_10, amount_2);
-        heroLift_0 = _S344;
+        float _S345 = convLift_0(c_50, above_10, amount_2);
+        heroLift_0 = _S345;
     }
     else
     {
         heroLift_0 = 0.0f;
     }
-    if(!_S343)
+    if(!_S344)
     {
-        _S339 = !anyTurret_0;
+        _S340 = !anyTurret_0;
     }
     else
     {
-        _S339 = false;
+        _S340 = false;
     }
-    if(_S339)
+    if(_S340)
     {
         return -1.00000001504746622e+30f;
     }
@@ -3648,18 +3666,18 @@ static float convGroupInside_0(ConvectionInput_0 * c_50, Vector<float, 3>  p_10,
     }
     else
     {
-        if(_S343)
+        if(_S344)
         {
             convGroupFold_0(d_19, x_36, heroLift_0, lobe_3, &gMax_1, &gSum_1, &gX_1, &gLift_1, &gLobe_1);
         }
-        Vector<float, 3>  _S345 = gX_1 / (Vector<float, 3> )gSum_1;
-        float _S346 = gLobe_1 / gSum_1;
+        Vector<float, 3>  _S346 = gX_1 / (Vector<float, 3> )gSum_1;
+        float _S347 = gLobe_1 / gSum_1;
         lift_4 = gLift_1 / gSum_1;
-        at_2 = _S345;
-        lobeAt_0 = _S346;
+        at_2 = _S346;
+        lobeAt_0 = _S347;
     }
-    float _S347 = convInside_0(c_50, gMax_1, lift_4, at_2 + c_50->cvHeroSeed_0, c_50->cvBillowScale_0 * lobeAt_0);
-    return _S347;
+    float _S348 = convInside_0(c_50, gMax_1, lift_4, at_2 + c_50->cvHeroSeed_0, c_50->cvBillowScale_0 * lobeAt_0);
+    return _S348;
 }
 
 static float convHeroInside_0(ConvectionInput_0 * c_51, Vector<float, 3>  p_11, float above_11)
@@ -3668,21 +3686,21 @@ static float convHeroInside_0(ConvectionInput_0 * c_51, Vector<float, 3>  p_11, 
     float amount_3;
     float lobe_4;
     Vector<float, 3>  x_37;
-    bool _S348 = convHeroSmooth_0(c_51, p_11, above_11, &d_20, &x_37, &amount_3, &lobe_4);
-    if(!_S348)
+    bool _S349 = convHeroSmooth_0(c_51, p_11, above_11, &d_20, &x_37, &amount_3, &lobe_4);
+    if(!_S349)
     {
         return -1.00000001504746622e+30f;
     }
-    float _S349 = convLift_0(c_51, above_11, amount_3);
-    float _S350 = convInside_0(c_51, d_20, _S349, x_37 + c_51->cvHeroSeed_0, c_51->cvBillowScale_0 * lobe_4);
-    return _S350;
+    float _S350 = convLift_0(c_51, above_11, amount_3);
+    float _S351 = convInside_0(c_51, d_20, _S350, x_37 + c_51->cvHeroSeed_0, c_51->cvBillowScale_0 * lobe_4);
+    return _S351;
 }
 
 static float convectionDensity_0(ConvectionInput_0 * c_52, Vector<float, 3>  p_12)
 {
-    float _S351 = p_12.y;
-    float above_12 = _S351 - c_52->cvBase_0;
-    float _S352 = c_52->cvMammaDepth_0;
+    float _S352 = p_12.y;
+    float above_12 = _S352 - c_52->cvBase_0;
+    float _S353 = c_52->cvMammaDepth_0;
     bool rampBand_0;
     if(above_12 < (- c_52->cvMammaDepth_0))
     {
@@ -3690,18 +3708,18 @@ static float convectionDensity_0(ConvectionInput_0 * c_52, Vector<float, 3>  p_1
     }
     else
     {
-        float _S353 = convCeiling_0(c_52);
-        rampBand_0 = above_12 > _S353;
+        float _S354 = convCeiling_0(c_52);
+        rampBand_0 = above_12 > _S354;
     }
     if(rampBand_0)
     {
         return 0.0f;
     }
-    Vector<float, 2>  _S354 = Vector<float, 2> {p_12.x, p_12.z};
-    Vector<float, 2>  fromHero_0 = _S354 - c_52->cvHeroAt_0;
+    Vector<float, 2>  _S355 = Vector<float, 2> {p_12.x, p_12.z};
+    Vector<float, 2>  fromHero_0 = _S355 - c_52->cvHeroAt_0;
     bool nearGroup_4 = (dot_1(fromHero_0, fromHero_0)) < (c_52->cvGroupReach_0 * c_52->cvGroupReach_0);
-    bool _S355 = _S352 > 0.0f;
-    if(_S355)
+    bool _S356 = _S353 > 0.0f;
+    if(_S356)
     {
         rampBand_0 = above_12 < 0.0f;
     }
@@ -3711,16 +3729,16 @@ static float convectionDensity_0(ConvectionInput_0 * c_52, Vector<float, 3>  p_1
     }
     if(rampBand_0)
     {
-        float _S356 = convMammaSag_0(c_52, _S354, nearGroup_4, - above_12);
-        float hang_0 = _S356 + above_12;
+        float _S357 = convMammaSag_0(c_52, _S355, nearGroup_4, - above_12);
+        float hang_0 = _S357 + above_12;
         if(hang_0 <= 0.0f)
         {
             return 0.0f;
         }
         return c_52->cvSigma_0 * (F32_sqrt((saturate_0(hang_0 / 40.0f)))) * smoothstep_0(0.0f, 12.0f, hang_0);
     }
-    float _S357 = convLift_0(c_52, above_12, 1.0f - 0.60000002384185791f * c_52->cvLacunarity_0);
-    if(_S355)
+    float _S358 = convLift_0(c_52, above_12, 1.0f - 0.60000002384185791f * c_52->cvLacunarity_0);
+    if(_S356)
     {
         rampBand_0 = above_12 < 40.0f;
     }
@@ -3736,8 +3754,8 @@ static float convectionDensity_0(ConvectionInput_0 * c_52, Vector<float, 3>  p_1
     if((c_52->cvHeroAlone_0) == int(0))
     {
         float capMoat_1 = 0.0f;
-        Vector<float, 2>  _S358 = Vector<float, 2> (0.0f, 0.0f);
-        Vector<float, 2>  gMoat_1 = _S358;
+        Vector<float, 2>  _S359 = Vector<float, 2> (0.0f, 0.0f);
+        Vector<float, 2>  gMoat_1 = _S359;
         if((c_52->cvMoat_0) > 0.0f)
         {
             moated_1 = nearGroup_4;
@@ -3748,8 +3766,8 @@ static float convectionDensity_0(ConvectionInput_0 * c_52, Vector<float, 3>  p_1
         }
         if(moated_1)
         {
-            float _S359 = convMoat_0(c_52, _S354, &gMoat_1, &capMoat_1);
-            capDensity_0 = _S359;
+            float _S360 = convMoat_0(c_52, _S355, &gMoat_1, &capMoat_1);
+            capDensity_0 = _S360;
         }
         else
         {
@@ -3757,38 +3775,38 @@ static float convectionDensity_0(ConvectionInput_0 * c_52, Vector<float, 3>  p_1
         }
         if(capDensity_0 > 0.0f)
         {
-            Vector<float, 2>  q_11 = _S354 - c_52->cvDrift_0;
+            Vector<float, 2>  q_11 = _S355 - c_52->cvDrift_0;
             Vector<float, 2>  slope_6;
-            float _S360 = convUpdraftGrad_0(c_52, q_11, &slope_6);
-            float _S361 = convSlopeCap_0(c_52);
+            float _S361 = convUpdraftGrad_0(c_52, q_11, &slope_6);
+            float _S362 = convSlopeCap_0(c_52);
             float cap_6;
             if(moated_1)
             {
-                slope_6 = slope_6 * (Vector<float, 2> )capDensity_0 + gMoat_1 * (Vector<float, 2> )_S360;
-                float cap_7 = _S361 + capMoat_1;
-                sag_0 = _S360 * capDensity_0;
+                slope_6 = slope_6 * (Vector<float, 2> )capDensity_0 + gMoat_1 * (Vector<float, 2> )_S361;
+                float cap_7 = _S362 + capMoat_1;
+                sag_0 = _S361 * capDensity_0;
                 cap_6 = cap_7;
             }
             else
             {
-                sag_0 = _S360;
-                cap_6 = _S361;
+                sag_0 = _S361;
+                cap_6 = _S362;
             }
             if(rampBand_0)
             {
-                float _S362 = convFieldBaseInside_0(c_52, sag_0, slope_6, cap_6);
-                baseField_0 = _S362;
+                float _S363 = convFieldBaseInside_0(c_52, sag_0, slope_6, cap_6);
+                baseField_0 = _S363;
             }
             else
             {
                 baseField_0 = -1.00000001504746622e+30f;
             }
-            float _S363 = convTowerHeight_0(c_52, sag_0);
-            float v_5 = _S363 - above_12;
-            float _S364 = convNeededUpdraft_0(c_52, above_12);
-            float delta_1 = sag_0 - _S364;
+            float _S364 = convTowerHeight_0(c_52, sag_0);
+            float v_5 = _S364 - above_12;
+            float _S365 = convNeededUpdraft_0(c_52, above_12);
+            float delta_1 = sag_0 - _S365;
             float d_21 = convSurfaceDistance_0(v_5, delta_1, (F32_min((length_1(slope_6)), (cap_6))));
-            if((d_21 + _S357) > 0.0f)
+            if((d_21 + _S358) > 0.0f)
             {
                 if((F32_abs((v_5))) > 9.99999997475242708e-07f)
                 {
@@ -3805,10 +3823,10 @@ static float convectionDensity_0(ConvectionInput_0 * c_52, Vector<float, 3>  p_1
                 }
                 else
                 {
-                    shiftAcross_0 = _S358;
+                    shiftAcross_0 = _S359;
                 }
-                float _S365 = convInside_0(c_52, d_21, _S357, Vector<float, 3> (q_11.x + shiftAcross_0.x, _S351 + inside_3, q_11.y + shiftAcross_0.y), c_52->cvBillowScale_0);
-                inside_3 = _S365;
+                float _S366 = convInside_0(c_52, d_21, _S358, Vector<float, 3> (q_11.x + shiftAcross_0.x, _S352 + inside_3, q_11.y + shiftAcross_0.y), c_52->cvBillowScale_0);
+                inside_3 = _S366;
             }
             else
             {
@@ -3826,8 +3844,8 @@ static float convectionDensity_0(ConvectionInput_0 * c_52, Vector<float, 3>  p_1
         inside_3 = -1.00000001504746622e+30f;
         baseField_0 = -1.00000001504746622e+30f;
     }
-    bool _S366 = (c_52->cvHeroTop_0) > 0.0f;
-    if(_S366)
+    bool _S367 = (c_52->cvHeroTop_0) > 0.0f;
+    if(_S367)
     {
         if((c_52->cvPileusThick_0) > 0.0f)
         {
@@ -3844,14 +3862,14 @@ static float convectionDensity_0(ConvectionInput_0 * c_52, Vector<float, 3>  p_1
     }
     if(moated_1)
     {
-        float _S367 = convCapDensity_0(c_52, p_12, above_12);
-        capDensity_0 = _S367;
+        float _S368 = convCapDensity_0(c_52, p_12, above_12);
+        capDensity_0 = _S368;
     }
     else
     {
         capDensity_0 = 0.0f;
     }
-    if(_S366)
+    if(_S367)
     {
         moated_1 = inside_3 < 12.0f;
     }
@@ -3863,13 +3881,13 @@ static float convectionDensity_0(ConvectionInput_0 * c_52, Vector<float, 3>  p_1
     {
         if((c_52->cvTurretCount_0) > int(0))
         {
-            float _S368 = convGroupInside_0(c_52, p_12, above_12, nearGroup_4);
-            inside_3 = (F32_max((inside_3), (_S368)));
+            float _S369 = convGroupInside_0(c_52, p_12, above_12, nearGroup_4);
+            inside_3 = (F32_max((inside_3), (_S369)));
         }
         else
         {
-            float _S369 = convHeroInside_0(c_52, p_12, above_12);
-            inside_3 = (F32_max((inside_3), (_S369)));
+            float _S370 = convHeroInside_0(c_52, p_12, above_12);
+            inside_3 = (F32_max((inside_3), (_S370)));
         }
     }
     if(inside_3 <= 0.0f)
@@ -3878,12 +3896,12 @@ static float convectionDensity_0(ConvectionInput_0 * c_52, Vector<float, 3>  p_1
     }
     if(rampBand_0)
     {
-        float _S370 = convPouches_0(c_52, _S354 - c_52->cvDrift_0);
-        if(_S370 > 0.0f)
+        float _S371 = convPouches_0(c_52, _S355 - c_52->cvDrift_0);
+        if(_S371 > 0.0f)
         {
-            float _S371 = convGroupBaseInside_0(c_52, _S354, nearGroup_4);
-            float _S372 = convMammaSagOf_0(c_52, _S370, (F32_max((baseField_0), (_S371))));
-            sag_0 = _S372;
+            float _S372 = convGroupBaseInside_0(c_52, _S355, nearGroup_4);
+            float _S373 = convMammaSagOf_0(c_52, _S371, (F32_max((baseField_0), (_S372))));
+            sag_0 = _S373;
         }
         else
         {
@@ -3899,45 +3917,45 @@ static float convectionDensity_0(ConvectionInput_0 * c_52, Vector<float, 3>  p_1
 
 static float densityAt_0(Medium_0 * m_7, StructuredBuffer<Vector<float, 2> > disp_6, Vector<float, 3>  p_13)
 {
-    float _S373 = p_13.y;
-    bool _S374;
-    if(_S373 < (m_7->slabBottom_0))
+    float _S374 = p_13.y;
+    bool _S375;
+    if(_S374 < (m_7->slabBottom_0))
     {
-        _S374 = true;
+        _S375 = true;
     }
     else
     {
-        _S374 = _S373 > (m_7->slabTop_0);
+        _S375 = _S374 > (m_7->slabTop_0);
     }
-    if(_S374)
+    if(_S375)
     {
         return 0.0f;
     }
     if((m_7->clipOn_0) != int(0))
     {
-        Vector<float, 2>  _S375 = Vector<float, 2> {p_13.x, p_13.z};
-        if(any_0(_S375 < (m_7->clipLo_0)))
+        Vector<float, 2>  _S376 = Vector<float, 2> {p_13.x, p_13.z};
+        if(any_0(_S376 < (m_7->clipLo_0)))
         {
-            _S374 = true;
+            _S375 = true;
         }
         else
         {
-            _S374 = any_0(_S375 > (m_7->clipHi_0));
+            _S375 = any_0(_S376 > (m_7->clipHi_0));
         }
     }
     else
     {
-        _S374 = false;
+        _S375 = false;
     }
-    if(_S374)
+    if(_S375)
     {
         return 0.0f;
     }
-    float _S376 = m_7->fadeRadius_0;
+    float _S377 = m_7->fadeRadius_0;
     float fade_0;
     if((m_7->fadeRadius_0) > 0.0f)
     {
-        float fade_1 = saturate_0((_S376 - length_1(Vector<float, 2> {p_13.x, p_13.z} - m_7->fadeAt_0)) / (F32_max((m_7->fadeWidth_0), (1.0f))));
+        float fade_1 = saturate_0((_S377 - length_1(Vector<float, 2> {p_13.x, p_13.z} - m_7->fadeAt_0)) / (F32_max((m_7->fadeWidth_0), (1.0f))));
         if(fade_1 <= 0.0f)
         {
             return 0.0f;
@@ -3948,43 +3966,170 @@ static float densityAt_0(Medium_0 * m_7, StructuredBuffer<Vector<float, 2> > dis
     {
         fade_0 = 1.0f;
     }
-    int32_t _S377 = m_7->mode_0;
+    int32_t _S378 = m_7->mode_0;
     if((m_7->mode_0) == int(0))
     {
         return m_7->density_0 * fade_0;
     }
-    if(_S377 == int(2))
+    if(_S378 == int(2))
     {
-        float _S378 = iceDensity_0(&m_7->gen_0, disp_6, p_13);
-        return _S378 * fade_0;
-    }
-    if(_S377 == int(3))
-    {
-        float _S379 = convectionDensity_0(&m_7->conv_0, p_13);
+        float _S379 = iceDensity_0(&m_7->gen_0, disp_6, p_13);
         return _S379 * fade_0;
+    }
+    if(_S378 == int(3))
+    {
+        float _S380 = convectionDensity_0(&m_7->conv_0, p_13);
+        return _S380 * fade_0;
     }
     Vector<float, 3>  d_22 = (p_13 - m_7->coreCentre_0) / (Vector<float, 3> )(F32_max((m_7->coreRadius_0), (9.99999997475242708e-07f)));
     return (m_7->density_0 + m_7->coreDensity_0 * (F32_exp((- dot_0(d_22, d_22))))) * fade_0;
 }
 
-static float transmittance_0(Medium_0 * m_8, MajorantGrid_0 * g_14, StructuredBuffer<float> bounds_3, StructuredBuffer<Vector<float, 2> > disp_7, Rng_0 * rng_1, Vector<float, 3>  p_14, Vector<float, 3>  dir_1, int32_t * steps_1)
+static Vector<float, 2>  airMapAxisV_0(LayerShadowMap_0 * m_8)
 {
-    float t0_2;
-    float t1_2;
-    bool _S380 = slabRange_0(m_8, p_14, dir_1, &t0_2, &t1_2);
-    if(!_S380)
+    return Vector<float, 2> (- m_8->smAxisU_0.y, m_8->smAxisU_0.x);
+}
+
+static float clampf_0(float v_6, float lo_11, float hi_10)
+{
+    float _S381;
+    if(v_6 < lo_11)
+    {
+        _S381 = lo_11;
+    }
+    else
+    {
+        if(v_6 > hi_10)
+        {
+            _S381 = hi_10;
+        }
+        else
+        {
+            _S381 = v_6;
+        }
+    }
+    return _S381;
+}
+
+static float airMapTexel_0(LayerShadowMap_0 * m_9, int32_t iu_0, int32_t iv_0, int32_t k_11)
+{
+    return m_9->smTexels_0.Load((k_11 * m_9->smDimV_0 + iv_0) * m_9->smDimU_0 + iu_0);
+}
+
+static float layerMapTransmittance_0(LayerShadowMap_0 * m_10, Vector<float, 3>  p_14)
+{
+    int32_t _S382 = m_10->smDimU_0;
+    int32_t _S383 = m_10->smDimV_0;
+    int32_t _S384 = m_10->smSlices_0;
+    uint32_t want_0 = uint32_t(m_10->smDimU_0 * m_10->smDimV_0 * m_10->smSlices_0);
+    bool _S385;
+    if(want_0 == 0U)
+    {
+        _S385 = true;
+    }
+    else
+    {
+        _S385 = uint32_t(StructuredBuffer_getCount_0(m_10->smTexels_0)) < want_0;
+    }
+    if(_S385)
     {
         return 1.0f;
     }
-    float _S381 = (F32_max((t0_2), (0.0f)));
-    t0_2 = _S381;
-    Dda_0 _S382 = ddaInit_0(g_14, p_14, dir_1, _S381);
-    Dda_0 dda_1 = _S382;
-    float _S383 = m_8->majorant_0;
-    float _S384 = gridBound_0(m_8, g_14, bounds_3, disp_7, (&dda_1)->cell_0, m_8->majorant_0);
-    float localMaj_0 = _S384;
+    float _S386 = p_14.y;
+    float _S387 = m_10->smTop_0;
+    if(_S386 >= (m_10->smTop_0))
+    {
+        return 1.0f;
+    }
+    Vector<float, 3>  _S388 = m_10->smSun_0;
+    float _S389 = m_10->smBottom_0;
+    Vector<float, 2>  q_12 = Vector<float, 2> {p_14.x, p_14.z} + Vector<float, 2> {_S388.x, _S388.z} * (Vector<float, 2> )((m_10->smBottom_0 - _S386) / m_10->smSun_0.y) - m_10->smCentre_0;
+    Vector<float, 2>  _S390 = m_10->smLo_0;
+    Vector<float, 2>  _S391 = m_10->smTexel_0;
+    float fu_0 = (dot_1(q_12, m_10->smAxisU_0) - m_10->smLo_0.x) / m_10->smTexel_0.x - 0.5f;
+    Vector<float, 2>  _S392 = airMapAxisV_0(m_10);
+    float fv_0 = (dot_1(q_12, _S392) - _S390.y) / _S391.y - 0.5f;
+    if(fu_0 >= -0.5f)
+    {
+        _S385 = fv_0 >= -0.5f;
+    }
+    else
+    {
+        _S385 = false;
+    }
+    if(_S385)
+    {
+        _S385 = fu_0 <= (float(_S382) - 0.5f);
+    }
+    else
+    {
+        _S385 = false;
+    }
+    if(_S385)
+    {
+        _S385 = fv_0 <= (float(_S383) - 0.5f);
+    }
+    else
+    {
+        _S385 = false;
+    }
+    if(!_S385)
+    {
+        return 1.0f;
+    }
+    int32_t _S393 = _S382 - int(1);
+    float fu_1 = clampf_0(fu_0, 0.0f, float(_S393));
+    int32_t _S394 = _S383 - int(1);
+    float fv_1 = clampf_0(fv_0, 0.0f, float(_S394));
+    int32_t u0_0 = int32_t(fu_1);
+    int32_t v0_0 = int32_t(fv_1);
+    int32_t _S395 = (I32_min((u0_0 + int(1)), (_S393)));
+    int32_t _S396 = (I32_min((v0_0 + int(1)), (_S394)));
+    float tu_0 = fu_1 - float(u0_0);
+    float tv_0 = fv_1 - float(v0_0);
+    int32_t _S397 = _S384 - int(1);
+    float fk_0 = clampf_0((_S386 - _S389) / (F32_max((_S387 - _S389), (1.0f))), 0.0f, 1.0f) * float(_S397);
+    int32_t _S398 = (I32_min((int32_t(fk_0)), (_S397)));
+    int32_t _S399 = (I32_min((_S398 + int(1)), (_S397)));
+    float tk_0 = fk_0 - float(_S398);
+    float _S400 = airMapTexel_0(m_10, u0_0, v0_0, _S398);
+    float _S401 = 1.0f - tu_0;
+    float _S402 = _S400 * _S401;
+    float _S403 = airMapTexel_0(m_10, _S395, v0_0, _S398);
+    float a0_0 = _S402 + _S403 * tu_0;
+    float _S404 = airMapTexel_0(m_10, u0_0, _S396, _S398);
+    float _S405 = _S404 * _S401;
+    float _S406 = airMapTexel_0(m_10, _S395, _S396, _S398);
+    float b0_0 = _S405 + _S406 * tu_0;
+    float _S407 = airMapTexel_0(m_10, u0_0, v0_0, _S399);
+    float _S408 = _S407 * _S401;
+    float _S409 = airMapTexel_0(m_10, _S395, v0_0, _S399);
+    float a1_0 = _S408 + _S409 * tu_0;
+    float _S410 = airMapTexel_0(m_10, u0_0, _S396, _S399);
+    float _S411 = _S410 * _S401;
+    float _S412 = airMapTexel_0(m_10, _S395, _S396, _S399);
+    float _S413 = 1.0f - tv_0;
+    return (a0_0 * _S413 + b0_0 * tv_0) * (1.0f - tk_0) + (a1_0 * _S413 + (_S411 + _S412 * tu_0) * tv_0) * tk_0;
+}
+
+static float transmittance_0(Medium_0 * m_11, MajorantGrid_0 * g_14, StructuredBuffer<float> bounds_3, StructuredBuffer<Vector<float, 2> > disp_7, Rng_0 * rng_1, Vector<float, 3>  p_15, Vector<float, 3>  dir_1, int32_t * steps_1)
+{
+    float t0_2;
+    float t1_2;
+    bool _S414 = slabRange_0(m_11, p_15, dir_1, &t0_2, &t1_2);
+    if(!_S414)
+    {
+        return 1.0f;
+    }
+    float _S415 = (F32_max((t0_2), (0.0f)));
+    t0_2 = _S415;
+    Dda_0 _S416 = ddaInit_0(g_14, p_15, dir_1, _S415);
+    Dda_0 dda_1 = _S416;
+    float _S417 = m_11->majorant_0;
+    float _S418 = gridBound_0(m_11, g_14, bounds_3, disp_7, (&dda_1)->cell_0, m_11->majorant_0);
+    float localMaj_0 = _S418;
     int32_t i_20 = int(0);
-    float t_10 = _S381;
+    float t_10 = _S415;
     float tr_0 = 1.0f;
     for(;;)
     {
@@ -3996,44 +4141,44 @@ static float transmittance_0(Medium_0 * m_8, MajorantGrid_0 * g_14, StructuredBu
             break;
         }
         *steps_1 = *steps_1 + int(1);
-        Dda_0 _S385 = dda_1;
-        float _S386 = ddaExit_0(&_S385);
-        float _S387 = (F32_min((_S386), (t1_2)));
+        Dda_0 _S419 = dda_1;
+        float _S420 = ddaExit_0(&_S419);
+        float _S421 = (F32_min((_S420), (t1_2)));
         if(localMaj_0 <= 0.0f)
         {
-            if(_S387 >= t1_2)
+            if(_S421 >= t1_2)
             {
                 break;
             }
             ddaAdvance_0(&dda_1);
-            float _S388 = gridBound_0(m_8, g_14, bounds_3, disp_7, (&dda_1)->cell_0, _S383);
-            localMaj_0 = _S388;
-            t_10 = _S387;
+            float _S422 = gridBound_0(m_11, g_14, bounds_3, disp_7, (&dda_1)->cell_0, _S417);
+            localMaj_0 = _S422;
+            t_10 = _S421;
             i_20 = i_20 + int(1);
             continue;
         }
-        float _S389 = randFloat_0(rng_1);
-        float t_11 = t_10 - (F32_log(((F32_max((1.0f - _S389), (1.00000001168609742e-07f)))))) / localMaj_0;
-        if(t_11 >= _S387)
+        float _S423 = randFloat_0(rng_1);
+        float t_11 = t_10 - (F32_log(((F32_max((1.0f - _S423), (1.00000001168609742e-07f)))))) / localMaj_0;
+        if(t_11 >= _S421)
         {
-            if(_S387 >= t1_2)
+            if(_S421 >= t1_2)
             {
                 break;
             }
             ddaAdvance_0(&dda_1);
-            float _S390 = gridBound_0(m_8, g_14, bounds_3, disp_7, (&dda_1)->cell_0, _S383);
-            localMaj_0 = _S390;
-            t_10 = _S387;
+            float _S424 = gridBound_0(m_11, g_14, bounds_3, disp_7, (&dda_1)->cell_0, _S417);
+            localMaj_0 = _S424;
+            t_10 = _S421;
             i_20 = i_20 + int(1);
             continue;
         }
-        float _S391 = densityAt_0(m_8, disp_7, p_14 + dir_1 * (Vector<float, 3> )t_11);
-        float tr_1 = tr_0 * (F32_max((0.0f), (1.0f - _S391 / localMaj_0)));
+        float _S425 = densityAt_0(m_11, disp_7, p_15 + dir_1 * (Vector<float, 3> )t_11);
+        float tr_1 = tr_0 * (F32_max((0.0f), (1.0f - _S425 / localMaj_0)));
         float tr_2;
         if(tr_1 < 0.00999999977648258f)
         {
-            float _S392 = randFloat_0(rng_1);
-            if(_S392 > 0.5f)
+            float _S426 = randFloat_0(rng_1);
+            if(_S426 > 0.5f)
             {
                 return 0.0f;
             }
@@ -4050,88 +4195,275 @@ static float transmittance_0(Medium_0 * m_8, MajorantGrid_0 * g_14, StructuredBu
     return tr_0;
 }
 
-static float sceneTransmittance_0(Scene_0 * s_13, StructuredBuffer<float> bounds_4, StructuredBuffer<Vector<float, 2> > drift_3, Rng_0 * rng_2, Vector<float, 3>  p_15, Vector<float, 3>  dir_2, int32_t * steps_2)
+static float transmittanceHandoff_0(Medium_0 * m_12, MajorantGrid_0 * g_15, StructuredBuffer<float> bounds_4, StructuredBuffer<Vector<float, 2> > disp_8, LayerShadowMap_0 * map_1, float handoff_0, Rng_0 * rng_2, Vector<float, 3>  p_16, Vector<float, 3>  dir_2, int32_t * steps_2)
 {
-    float _S393 = transmittance_0(&s_13->medium_0, &s_13->grid_0, bounds_4, drift_3, rng_2, p_15, dir_2, steps_2);
-    bool _S394;
-    if((s_13->layer2On_0) != int(0))
+    float t0_3;
+    float t1_3;
+    bool _S427 = slabRange_0(m_12, p_16, dir_2, &t0_3, &t1_3);
+    if(!_S427)
     {
-        _S394 = _S393 > 0.0f;
+        return 1.0f;
     }
-    else
+    float _S428 = (F32_max((t0_3), (0.0f)));
+    t0_3 = _S428;
+    float _S429 = map_1->smBottom_0;
+    float _S430 = (map_1->smTop_0 - map_1->smBottom_0) / float((I32_max((map_1->smSlices_0 - int(1)), (int(1)))));
+    Dda_0 _S431 = ddaInit_0(g_15, p_16, dir_2, _S428);
+    Dda_0 dda_2 = _S431;
+    float _S432 = m_12->majorant_0;
+    float _S433 = gridBound_0(m_12, g_15, bounds_4, disp_8, (&dda_2)->cell_0, m_12->majorant_0);
+    float tEnd_1 = t1_3;
+    float localMaj_1 = _S433;
+    bool toPlane_0 = false;
+    float clearFrom_0 = _S428;
+    int32_t i_21 = int(0);
+    float t_12 = _S428;
+    float tr_3 = 1.0f;
+    for(;;)
     {
-        _S394 = false;
+        if(i_21 < int(4096))
+        {
+        }
+        else
+        {
+            break;
+        }
+        *steps_2 = *steps_2 + int(1);
+        Dda_0 _S434 = dda_2;
+        float _S435 = ddaExit_0(&_S434);
+        float _S436 = (F32_min((_S435), (tEnd_1)));
+        float tEnd_2;
+        bool toPlane_1;
+        if(localMaj_1 <= 0.0f)
+        {
+            if(_S436 >= tEnd_1)
+            {
+                break;
+            }
+            ddaAdvance_0(&dda_2);
+            float _S437 = gridBound_0(m_12, g_15, bounds_4, disp_8, (&dda_2)->cell_0, _S432);
+            tEnd_2 = tEnd_1;
+            localMaj_1 = _S437;
+            toPlane_1 = toPlane_0;
+            t_12 = _S436;
+            int32_t i_22 = i_21 + int(1);
+            tEnd_1 = tEnd_2;
+            toPlane_0 = toPlane_1;
+            i_21 = i_22;
+            continue;
+        }
+        float _S438 = randFloat_0(rng_2);
+        float t_13 = t_12 - (F32_log(((F32_max((1.0f - _S438), (1.00000001168609742e-07f)))))) / localMaj_1;
+        if(t_13 >= _S436)
+        {
+            if(_S436 >= tEnd_1)
+            {
+                break;
+            }
+            ddaAdvance_0(&dda_2);
+            float _S439 = gridBound_0(m_12, g_15, bounds_4, disp_8, (&dda_2)->cell_0, _S432);
+            tEnd_2 = tEnd_1;
+            localMaj_1 = _S439;
+            toPlane_1 = toPlane_0;
+            t_12 = _S436;
+            int32_t i_22 = i_21 + int(1);
+            tEnd_1 = tEnd_2;
+            toPlane_0 = toPlane_1;
+            i_21 = i_22;
+            continue;
+        }
+        Vector<float, 3>  x_38 = p_16 + dir_2 * (Vector<float, 3> )t_13;
+        float _S440 = densityAt_0(m_12, disp_8, x_38);
+        float clearFrom_1;
+        float tr_4;
+        if(_S440 > 0.0f)
+        {
+            float tr_5 = tr_3 * (F32_max((0.0f), (1.0f - _S440 / localMaj_1)));
+            float _S441 = t1_3;
+            if(tr_5 < 0.00999999977648258f)
+            {
+                float _S442 = randFloat_0(rng_2);
+                if(_S442 > 0.5f)
+                {
+                    return 0.0f;
+                }
+                tEnd_2 = tr_5 * 2.0f;
+            }
+            else
+            {
+                tEnd_2 = tr_5;
+            }
+            float _S443 = tEnd_2;
+            tEnd_2 = _S441;
+            toPlane_1 = false;
+            clearFrom_1 = t_13;
+            tr_4 = _S443;
+        }
+        else
+        {
+            bool _S444;
+            if(!toPlane_0)
+            {
+                _S444 = (t_13 - clearFrom_0) >= handoff_0;
+            }
+            else
+            {
+                _S444 = false;
+            }
+            if(_S444)
+            {
+                float _S445 = x_38.y;
+                float tPlane_0 = t_13 + (F32_max((_S429 + (F32_ceil(((_S445 - _S429) / _S430))) * _S430 - _S445), (0.0f))) / (F32_max((dir_2.y), (9.99999997475242708e-07f)));
+                if(tPlane_0 < t1_3)
+                {
+                    tEnd_2 = tPlane_0;
+                    toPlane_1 = true;
+                }
+                else
+                {
+                    tEnd_2 = tEnd_1;
+                    toPlane_1 = toPlane_0;
+                }
+            }
+            else
+            {
+                tEnd_2 = tEnd_1;
+                toPlane_1 = toPlane_0;
+            }
+            clearFrom_1 = clearFrom_0;
+            tr_4 = tr_3;
+        }
+        clearFrom_0 = clearFrom_1;
+        t_12 = t_13;
+        tr_3 = tr_4;
+        int32_t i_22 = i_21 + int(1);
+        tEnd_1 = tEnd_2;
+        toPlane_0 = toPlane_1;
+        i_21 = i_22;
     }
-    float tr_3;
-    if(_S394)
+    if(toPlane_0)
     {
-        MajorantGrid_0 _S395 = gridFor_0(&s_13->medium2_0, &s_13->grid2_0, p_15);
-        MajorantGrid_0 _S396 = _S395;
-        float _S397 = transmittance_0(&s_13->medium2_0, &_S396, bounds_4, drift_3, rng_2, p_15, dir_2, steps_2);
-        tr_3 = _S393 * _S397;
-    }
-    else
-    {
-        tr_3 = _S393;
+        float _S446 = layerMapTransmittance_0(map_1, p_16 + dir_2 * (Vector<float, 3> )tEnd_1);
+        return tr_3 * _S446;
     }
     return tr_3;
 }
 
-static float hg_0(float cosT_0, float g_15)
+static float sceneTransmittance_0(Scene_0 * s_13, StructuredBuffer<float> bounds_5, StructuredBuffer<Vector<float, 2> > drift_3, Rng_0 * rng_3, Vector<float, 3>  p_17, Vector<float, 3>  dir_3, int32_t * steps_3)
 {
-    float _S398 = g_15 * g_15;
-    float d_23 = 1.0f + _S398 - 2.0f * g_15 * cosT_0;
-    return (1.0f - _S398) / (12.56637096405029297f * d_23 * (F32_sqrt(((F32_max((d_23), (9.99999997475242708e-07f)))))));
+    float _S447 = s_13->shadowHandoff_0;
+    bool handoff_1;
+    if((s_13->shadowHandoff_0) > 0.0f)
+    {
+        handoff_1 = (s_13->airMapOn_0) != int(0);
+    }
+    else
+    {
+        handoff_1 = false;
+    }
+    bool _S448;
+    if(handoff_1)
+    {
+        _S448 = (p_17.y) < ((&s_13->medium_0)->slabBottom_0);
+    }
+    else
+    {
+        _S448 = false;
+    }
+    float tr_6;
+    if(_S448)
+    {
+        float _S449 = layerMapTransmittance_0(&s_13->airMapIce_0, p_17);
+        tr_6 = _S449;
+    }
+    else
+    {
+        float _S450 = transmittance_0(&s_13->medium_0, &s_13->grid_0, bounds_5, drift_3, rng_3, p_17, dir_3, steps_3);
+        tr_6 = _S450;
+    }
+    if((s_13->layer2On_0) != int(0))
+    {
+        _S448 = tr_6 > 0.0f;
+    }
+    else
+    {
+        _S448 = false;
+    }
+    if(_S448)
+    {
+        MajorantGrid_0 _S451 = gridFor_0(&s_13->medium2_0, &s_13->grid2_0, p_17);
+        if(handoff_1)
+        {
+            float _S452 = _S447 * (F32_max(((&s_13->airMapCu_0)->smTexel_0.x), ((&s_13->airMapCu_0)->smTexel_0.y)));
+            MajorantGrid_0 _S453 = _S451;
+            float _S454 = transmittanceHandoff_0(&s_13->medium2_0, &_S453, bounds_5, drift_3, &s_13->airMapCu_0, _S452, rng_3, p_17, dir_3, steps_3);
+            tr_6 = tr_6 * _S454;
+        }
+        else
+        {
+            MajorantGrid_0 _S455 = _S451;
+            float _S456 = transmittance_0(&s_13->medium2_0, &_S455, bounds_5, drift_3, rng_3, p_17, dir_3, steps_3);
+            tr_6 = tr_6 * _S456;
+        }
+    }
+    return tr_6;
+}
+
+static float hg_0(float cosT_0, float g_16)
+{
+    float _S457 = g_16 * g_16;
+    float d_23 = 1.0f + _S457 - 2.0f * g_16 * cosT_0;
+    return (1.0f - _S457) / (12.56637096405029297f * d_23 * (F32_sqrt(((F32_max((d_23), (9.99999997475242708e-07f)))))));
 }
 
 static float phaseIce_0(float cosT_1)
 {
-    float t_12 = ((F32_acos((clamp_0(cosT_1, -1.0f, 1.0f)))) - 0.38400000333786011f) / 0.03500000014901161f;
-    return lerp_0(0.07957746833562851f, hg_0(cosT_1, 0.85000002384185791f), 0.72000002861022949f) + (F32_exp((- t_12 * t_12))) * 0.34999999403953552f;
+    float t_14 = ((F32_acos((clamp_0(cosT_1, -1.0f, 1.0f)))) - 0.38400000333786011f) / 0.03500000014901161f;
+    return lerp_0(0.07957746833562851f, hg_0(cosT_1, 0.85000002384185791f), 0.72000002861022949f) + (F32_exp((- t_14 * t_14))) * 0.34999999403953552f;
 }
 
-static float draine_0(float cosT_2, float g_16, float a_5)
+static float draine_0(float cosT_2, float g_17, float a_5)
 {
-    float _S399 = g_16 * g_16;
-    float _S400 = 2.0f * g_16;
-    float d_24 = 1.0f + _S399 - _S400 * cosT_2;
-    return (1.0f - _S399) / (12.56637096405029297f * d_24 * (F32_sqrt(((F32_max((d_24), (9.99999997475242708e-07f))))))) * (1.0f + a_5 * cosT_2 * cosT_2) / (1.0f + a_5 * (1.0f + _S400 * g_16) / 3.0f);
+    float _S458 = g_17 * g_17;
+    float _S459 = 2.0f * g_17;
+    float d_24 = 1.0f + _S458 - _S459 * cosT_2;
+    return (1.0f - _S458) / (12.56637096405029297f * d_24 * (F32_sqrt(((F32_max((d_24), (9.99999997475242708e-07f))))))) * (1.0f + a_5 * cosT_2 * cosT_2) / (1.0f + a_5 * (1.0f + _S459 * g_17) / 3.0f);
 }
 
-static float phaseLiquid_0(PhaseInput_0 * p_16, float cosT_3)
+static float phaseLiquid_0(PhaseInput_0 * p_18, float cosT_3)
 {
-    return (1.0f - p_16->draineW_0) * hg_0(cosT_3, p_16->hgG_0) + p_16->draineW_0 * draine_0(cosT_3, p_16->draineG_0, p_16->draineAlpha_0);
+    return (1.0f - p_18->draineW_0) * hg_0(cosT_3, p_18->hgG_0) + p_18->draineW_0 * draine_0(cosT_3, p_18->draineG_0, p_18->draineAlpha_0);
 }
 
-static float phaseAt_0(PhaseInput_0 * p_17, float cosT_4)
+static float phaseAt_0(PhaseInput_0 * p_19, float cosT_4)
 {
-    float _S401;
-    if((p_17->useIce_0) != int(0))
+    float _S460;
+    if((p_19->useIce_0) != int(0))
     {
-        _S401 = phaseIce_0(cosT_4);
+        _S460 = phaseIce_0(cosT_4);
     }
     else
     {
-        float _S402 = phaseLiquid_0(p_17, cosT_4);
-        _S401 = _S402;
+        float _S461 = phaseLiquid_0(p_19, cosT_4);
+        _S460 = _S461;
     }
-    return _S401;
+    return _S460;
 }
 
-static float phaseCamera_0(PhaseInput_0 * p_18, float cosT_5)
+static float phaseCamera_0(PhaseInput_0 * p_20, float cosT_5)
 {
-    float _S403 = phaseAt_0(p_18, cosT_5);
-    float _S404 = p_18->lobeWeight_0;
-    float v_6;
-    if((p_18->lobeWeight_0) > 0.0f)
+    float _S462 = phaseAt_0(p_20, cosT_5);
+    float _S463 = p_20->lobeWeight_0;
+    float v_7;
+    if((p_20->lobeWeight_0) > 0.0f)
     {
-        v_6 = _S403 + _S404 * hg_0(cosT_5, p_18->lobeG_0);
+        v_7 = _S462 + _S463 * hg_0(cosT_5, p_20->lobeG_0);
     }
     else
     {
-        v_6 = _S403;
+        v_7 = _S462;
     }
-    return v_6;
+    return v_7;
 }
 
 static float shellC_0(float altitude_0, float planetRadius_1, float shellHeight_0)
@@ -4170,38 +4502,38 @@ static float mieCoefficient_0(float turbidity_1)
     return 3.99600003220257349e-06f * (turbidity_1 / 2.20000004768371582f);
 }
 
-static float altitudeFromQ_0(float q_12, float planetRadius_2)
+static float altitudeFromQ_0(float q_13, float planetRadius_2)
 {
-    float rr_0 = planetRadius_2 * planetRadius_2 + q_12;
-    float _S405;
+    float rr_0 = planetRadius_2 * planetRadius_2 + q_13;
+    float _S464;
     if(rr_0 > 0.0f)
     {
-        _S405 = rr_0;
+        _S464 = rr_0;
     }
     else
     {
-        _S405 = 0.0f;
+        _S464 = 0.0f;
     }
-    return q_12 / (planetRadius_2 + (F32_sqrt((_S405))));
+    return q_13 / (planetRadius_2 + (F32_sqrt((_S464))));
 }
 
-static Vector<float, 3>  airTransmittance_0(SkyInput_0 * p_19, float originAltitude_0, Vector<float, 3>  rayDir_0, float dist_1)
+static Vector<float, 3>  airTransmittance_0(SkyInput_0 * p_21, float originAltitude_0, Vector<float, 3>  rayDir_0, float dist_1)
 {
-    float _S406 = p_19->planetRadius_0;
+    float _S465 = p_21->planetRadius_0;
     float planetRadius_3;
-    if((p_19->planetRadius_0) > 1000.0f)
+    if((p_21->planetRadius_0) > 1000.0f)
     {
-        planetRadius_3 = _S406;
+        planetRadius_3 = _S465;
     }
     else
     {
         planetRadius_3 = 1000.0f;
     }
-    float _S407 = p_19->scaleHeight_0;
+    float _S466 = p_21->scaleHeight_0;
     float scaleHeight_1;
-    if((p_19->scaleHeight_0) > 1.0f)
+    if((p_21->scaleHeight_0) > 1.0f)
     {
-        scaleHeight_1 = _S407;
+        scaleHeight_1 = _S466;
     }
     else
     {
@@ -4220,16 +4552,16 @@ static Vector<float, 3>  airTransmittance_0(SkyInput_0 * p_19, float originAltit
     float b_6 = (planetRadius_3 + observerAltitude_0) * rayDir_0.y;
     float cGround_0 = shellC_0(observerAltitude_0, planetRadius_3, 0.0f);
     float tTop_0 = shellExit_0(b_6, shellC_0(observerAltitude_0, planetRadius_3, atmosphereHeight_0));
-    bool _S408;
+    bool _S467;
     if(tTop_0 <= 0.0f)
     {
-        _S408 = true;
+        _S467 = true;
     }
     else
     {
-        _S408 = !(dist_1 > 0.0f);
+        _S467 = !(dist_1 > 0.0f);
     }
-    if(_S408)
+    if(_S467)
     {
         return Vector<float, 3> (1.0f, 1.0f, 1.0f);
     }
@@ -4248,28 +4580,28 @@ static Vector<float, 3>  airTransmittance_0(SkyInput_0 * p_19, float originAltit
         tMax_1 = dist_1;
     }
     Vector<float, 3>  betaR_0 = rayleighCoefficients_0();
-    float betaMExt_0 = mieCoefficient_0(p_19->turbidity_0) * 1.11000001430511475f;
+    float betaMExt_0 = mieCoefficient_0(p_21->turbidity_0) * 1.11000001430511475f;
     float tPrev_0 = 0.0f;
-    int32_t i_21 = int(0);
+    int32_t i_23 = int(0);
     float depthR_0 = 0.0f;
     float depthM_0 = 0.0f;
     for(;;)
     {
-        if(i_21 < int(24))
+        if(i_23 < int(24))
         {
         }
         else
         {
             break;
         }
-        int32_t _S409 = i_21 + int(1);
-        float tNext_0 = tMax_1 * float(_S409 * _S409) * 0.00173611112404615f;
+        int32_t _S468 = i_23 + int(1);
+        float tNext_0 = tMax_1 * float(_S468 * _S468) * 0.00173611112404615f;
         float dt_0 = tNext_0 - tPrev_0;
         float tMid_0 = (tPrev_0 + tNext_0) * 0.5f;
         if(dt_0 <= 0.0f)
         {
             tPrev_0 = tNext_0;
-            i_21 = _S409;
+            i_23 = _S468;
             continue;
         }
         float h_5 = altitudeFromQ_0(cGround_0 + 2.0f * tMid_0 * b_6 + tMid_0 * tMid_0, planetRadius_3);
@@ -4282,20 +4614,20 @@ static Vector<float, 3>  airTransmittance_0(SkyInput_0 * p_19, float originAltit
         {
             hc_0 = h_5;
         }
-        float _S410 = - hc_0;
-        float depthM_1 = depthM_0 + (F32_exp((_S410 / 1200.0f))) * dt_0;
-        depthR_0 = depthR_0 + (F32_exp((_S410 / scaleHeight_1))) * dt_0;
+        float _S469 = - hc_0;
+        float depthM_1 = depthM_0 + (F32_exp((_S469 / 1200.0f))) * dt_0;
+        depthR_0 = depthR_0 + (F32_exp((_S469 / scaleHeight_1))) * dt_0;
         depthM_0 = depthM_1;
         tPrev_0 = tNext_0;
-        i_21 = _S409;
+        i_23 = _S468;
     }
-    float _S411 = betaMExt_0 * depthM_0;
-    return Vector<float, 3> ((F32_exp((- (betaR_0.x * depthR_0 + _S411)))), (F32_exp((- (betaR_0.y * depthR_0 + _S411)))), (F32_exp((- (betaR_0.z * depthR_0 + _S411)))));
+    float _S470 = betaMExt_0 * depthM_0;
+    return Vector<float, 3> ((F32_exp((- (betaR_0.x * depthR_0 + _S470)))), (F32_exp((- (betaR_0.y * depthR_0 + _S470)))), (F32_exp((- (betaR_0.z * depthR_0 + _S470)))));
 }
 
-static float sunIrradianceTop_0(SkyInput_0 * p_20)
+static float sunIrradianceTop_0(SkyInput_0 * p_22)
 {
-    return 20.0f * p_20->sunIntensity_0;
+    return 20.0f * p_22->sunIntensity_0;
 }
 
 static float toRadians_0(float degrees_0)
@@ -4303,20 +4635,20 @@ static float toRadians_0(float degrees_0)
     return degrees_0 * 0.01745329238474369f;
 }
 
-static Vector<float, 3>  normalizeExact_0(Vector<float, 3>  v_7)
+static Vector<float, 3>  normalizeExact_0(Vector<float, 3>  v_8)
 {
-    float len2_0 = dot_0(v_7, v_7);
+    float len2_0 = dot_0(v_8, v_8);
     if(len2_0 <= 0.0f)
     {
         return Vector<float, 3> (0.0f, 1.0f, 0.0f);
     }
-    return v_7 * (Vector<float, 3> )(1.0f / (F32_sqrt((len2_0))));
+    return v_8 * (Vector<float, 3> )(1.0f / (F32_sqrt((len2_0))));
 }
 
-static Vector<float, 3>  sunDirection_0(SkyInput_0 * p_21)
+static Vector<float, 3>  sunDirection_0(SkyInput_0 * p_23)
 {
-    float az_0 = toRadians_0(p_21->sunAzimuth_0);
-    float el_0 = toRadians_0(p_21->sunElevation_0);
+    float az_0 = toRadians_0(p_23->sunAzimuth_0);
+    float el_0 = toRadians_0(p_23->sunElevation_0);
     float cosEl_0 = (F32_cos((el_0)));
     return normalizeExact_0(Vector<float, 3> ((F32_sin((az_0))) * cosEl_0, (F32_sin((el_0))), (F32_cos((az_0))) * cosEl_0));
 }
@@ -4324,51 +4656,30 @@ static Vector<float, 3>  sunDirection_0(SkyInput_0 * p_21)
 static float lutMuFor_0(Vector<float, 3>  geocentric_0, Vector<float, 3>  sun_0)
 {
     float len_1 = length_0(geocentric_0);
-    float _S412;
+    float _S471;
     if(len_1 > 1.0f)
     {
-        _S412 = dot_0(geocentric_0, sun_0) / len_1;
+        _S471 = dot_0(geocentric_0, sun_0) / len_1;
     }
     else
     {
-        _S412 = dot_0(geocentric_0, sun_0);
+        _S471 = dot_0(geocentric_0, sun_0);
     }
-    return _S412;
+    return _S471;
 }
 
-static float clampf_0(float v_8, float lo_11, float hi_10)
+static Vector<float, 3>  sampleTransmittanceLut_0(SkyInput_0 * p_24, float altitude_1, float mu_0)
 {
-    float _S413;
-    if(v_8 < lo_11)
-    {
-        _S413 = lo_11;
-    }
-    else
-    {
-        if(v_8 > hi_10)
-        {
-            _S413 = hi_10;
-        }
-        else
-        {
-            _S413 = v_8;
-        }
-    }
-    return _S413;
-}
-
-static Vector<float, 3>  sampleTransmittanceLut_0(SkyInput_0 * p_22, float altitude_1, float mu_0)
-{
-    StructuredBuffer<float> _S414 = p_22->transmittanceLut_0;
-    if(uint32_t(StructuredBuffer_getCount_0(p_22->transmittanceLut_0)) < 49152U)
+    StructuredBuffer<float> _S472 = p_24->transmittanceLut_0;
+    if(uint32_t(StructuredBuffer_getCount_0(p_24->transmittanceLut_0)) < 49152U)
     {
         return Vector<float, 3> (1.0f, 1.0f, 1.0f);
     }
-    float _S415 = p_22->scaleHeight_0;
+    float _S473 = p_24->scaleHeight_0;
     float scaleHeight_2;
-    if((p_22->scaleHeight_0) > 1.0f)
+    if((p_24->scaleHeight_0) > 1.0f)
     {
-        scaleHeight_2 = _S415;
+        scaleHeight_2 = _S473;
     }
     else
     {
@@ -4435,14 +4746,14 @@ static Vector<float, 3>  sampleTransmittanceLut_0(SkyInput_0 * p_22, float altit
     {
         y1_1 = y1_0;
     }
-    float _S416 = fx_1 - float(x0_1);
-    float _S417 = fy_1 - float(y0_1);
-    int32_t _S418 = y0_1 * int(256);
-    int32_t _S419 = (_S418 + x0_1) * int(3);
-    int32_t _S420 = (_S418 + x1_1) * int(3);
-    int32_t _S421 = y1_1 * int(256);
-    int32_t _S422 = (_S421 + x0_1) * int(3);
-    int32_t _S423 = (_S421 + x1_1) * int(3);
+    float _S474 = fx_1 - float(x0_1);
+    float _S475 = fy_1 - float(y0_1);
+    int32_t _S476 = y0_1 * int(256);
+    int32_t _S477 = (_S476 + x0_1) * int(3);
+    int32_t _S478 = (_S476 + x1_1) * int(3);
+    int32_t _S479 = y1_1 * int(256);
+    int32_t _S480 = (_S479 + x0_1) * int(3);
+    int32_t _S481 = (_S479 + x1_1) * int(3);
     Vector<float, 3>  out_0 = Vector<float, 3> (0.0f, 0.0f, 0.0f);
     int32_t c_55 = int(0);
     for(;;)
@@ -4454,8 +4765,8 @@ static Vector<float, 3>  sampleTransmittanceLut_0(SkyInput_0 * p_22, float altit
         {
             break;
         }
-        float _S424 = 1.0f - _S416;
-        float r_12 = (_S414.Load(_S419 + c_55) * _S424 + _S414.Load(_S420 + c_55) * _S416) * (1.0f - _S417) + (_S414.Load(_S422 + c_55) * _S424 + _S414.Load(_S423 + c_55) * _S416) * _S417;
+        float _S482 = 1.0f - _S474;
+        float r_12 = (_S472.Load(_S477 + c_55) * _S482 + _S472.Load(_S478 + c_55) * _S474) * (1.0f - _S475) + (_S472.Load(_S480 + c_55) * _S482 + _S472.Load(_S481 + c_55) * _S474) * _S475;
         if(c_55 == int(0))
         {
             out_0.x = r_12;
@@ -4476,128 +4787,135 @@ static Vector<float, 3>  sampleTransmittanceLut_0(SkyInput_0 * p_22, float altit
     return out_0;
 }
 
-static Vector<float, 3>  sunTransmittanceAt_0(SkyInput_0 * p_23, Vector<float, 3>  worldPos_0)
+static Vector<float, 3>  sunTransmittanceAt_0(SkyInput_0 * p_25, Vector<float, 3>  worldPos_0)
 {
-    Vector<float, 3>  _S425 = sunDirection_0(p_23);
-    float _S426 = p_23->planetRadius_0;
+    Vector<float, 3>  _S483 = sunDirection_0(p_25);
+    float _S484 = p_25->planetRadius_0;
     float planetRadius_4;
-    if((p_23->planetRadius_0) > 1000.0f)
+    if((p_25->planetRadius_0) > 1000.0f)
     {
-        planetRadius_4 = _S426;
+        planetRadius_4 = _S484;
     }
     else
     {
         planetRadius_4 = 1000.0f;
     }
-    float _S427 = worldPos_0.y;
+    float _S485 = worldPos_0.y;
     float altitude_2;
-    if(_S427 > 0.0f)
+    if(_S485 > 0.0f)
     {
-        altitude_2 = _S427;
+        altitude_2 = _S485;
     }
     else
     {
         altitude_2 = 0.0f;
     }
-    Vector<float, 3>  _S428 = sampleTransmittanceLut_0(p_23, altitude_2, lutMuFor_0(Vector<float, 3> (worldPos_0.x, planetRadius_4 + _S427, worldPos_0.z), _S425));
-    return _S428;
+    Vector<float, 3>  _S486 = sampleTransmittanceLut_0(p_25, altitude_2, lutMuFor_0(Vector<float, 3> (worldPos_0.x, planetRadius_4 + _S485, worldPos_0.z), _S483));
+    return _S486;
 }
 
-static Vector<float, 3>  sunIrradianceAt_0(Scene_0 * s_14, Vector<float, 3>  p_24)
+static Vector<float, 3>  sunIrradianceAt_0(Scene_0 * s_14, Vector<float, 3>  p_26)
 {
     if(((&s_14->environment_0)->envMode_0) == int(1))
     {
-        float _S429 = sunIrradianceTop_0(&(&s_14->environment_0)->sky_0);
-        Vector<float, 3>  _S430 = sunTransmittanceAt_0(&(&s_14->environment_0)->sky_0, p_24);
-        return (Vector<float, 3> )_S429 * _S430;
+        float _S487 = sunIrradianceTop_0(&(&s_14->environment_0)->sky_0);
+        Vector<float, 3>  _S488 = sunTransmittanceAt_0(&(&s_14->environment_0)->sky_0, p_26);
+        return (Vector<float, 3> )_S487 * _S488;
     }
     return s_14->sunIrradiance_0;
 }
 
-static Vector<float, 3>  cameraSegmentSun_0(Scene_0 * s_15, PhaseInput_0 * ph_0, StructuredBuffer<float> bounds_5, StructuredBuffer<Vector<float, 2> > drift_4, Rng_0 * rng_3, Rng_0 * rng2_0, Vector<float, 3>  ro_2, Vector<float, 3>  rd_2, int32_t * steps_3)
+static Vector<float, 3>  cameraSegmentSun_0(Scene_0 * s_15, PhaseInput_0 * ph_0, StructuredBuffer<float> bounds_6, StructuredBuffer<Vector<float, 2> > drift_4, Rng_0 * rng_4, Rng_0 * rng2_0, Vector<float, 3>  ro_2, Vector<float, 3>  rd_2, int32_t * steps_4, int32_t * hit_0, Vector<float, 3>  * hitAt_0, int32_t * hitLayer_0, float * tResume_0)
 {
+    bool rouletted_0;
     float ph0_0;
     float kept_0;
     float keptT_0;
     Vector<float, 3>  keptAt_0;
     int32_t keptLayer_0;
-    Rng_0 _S431 = *rng2_0;
-    Vector<float, 3>  none_0 = Vector<float, 3> (0.0f, 0.0f, 0.0f);
-    float _S432 = (F32_max((s_15->neeTentativeScale_0), (1.0f)));
+    Rng_0 _S489 = *rng2_0;
+    *hit_0 = int(0);
+    Vector<float, 3>  _S490 = Vector<float, 3> (0.0f, 0.0f, 0.0f);
+    *hitAt_0 = _S490;
+    *hitLayer_0 = int(0);
+    *tResume_0 = 0.0f;
+    float _S491 = (F32_max((s_15->neeTentativeScale_0), (1.0f)));
     float tA_0;
     float endA_0;
-    bool _S433 = slabRange_0(&s_15->medium_0, ro_2, rd_2, &tA_0, &endA_0);
-    float _S434 = (F32_max((tA_0), (0.0f)));
-    tA_0 = _S434;
-    Dda_0 _S435 = ddaInit_0(&s_15->grid_0, ro_2, rd_2, _S434);
-    Dda_0 ddaA_0 = _S435;
-    float _S436 = gridBound_0(&s_15->medium_0, &s_15->grid_0, bounds_5, drift_4, (&ddaA_0)->cell_0, (&s_15->medium_0)->majorant_0);
-    float rateA_0 = _S436 * _S432;
+    bool _S492 = slabRange_0(&s_15->medium_0, ro_2, rd_2, &tA_0, &endA_0);
+    float _S493 = (F32_max((tA_0), (0.0f)));
+    tA_0 = _S493;
+    Dda_0 _S494 = ddaInit_0(&s_15->grid_0, ro_2, rd_2, _S493);
+    Dda_0 ddaA_0 = _S494;
+    float _S495 = gridBound_0(&s_15->medium_0, &s_15->grid_0, bounds_6, drift_4, (&ddaA_0)->cell_0, (&s_15->medium_0)->majorant_0);
+    float rateA_0 = _S495 * _S491;
     int32_t budgetA_0 = int(4096);
     float keepA_0 = 0.0f;
     float rouletteA_0 = 0.0f;
+    float coinA_0 = 0.0f;
     bool haveA_0;
-    if(_S433)
+    if(_S492)
     {
-        bool _S437 = segmentStep_0(&s_15->medium_0, &s_15->grid_0, bounds_5, drift_4, _S432, endA_0, &ddaA_0, &rateA_0, &tA_0, rng_3, &keepA_0, &rouletteA_0, &budgetA_0, steps_3);
-        haveA_0 = _S437;
+        bool _S496 = segmentStep_0(&s_15->medium_0, &s_15->grid_0, bounds_6, drift_4, _S491, endA_0, &ddaA_0, &rateA_0, &tA_0, rng_4, &keepA_0, &rouletteA_0, &coinA_0, &budgetA_0, steps_4);
+        haveA_0 = _S496;
     }
     else
     {
-        haveA_0 = _S433;
+        haveA_0 = _S492;
     }
     float tB_0 = 0.0f;
     float endB_0 = 0.0f;
     bool haveB_0;
     if((s_15->layer2On_0) != int(0))
     {
-        bool _S438 = slabRange_0(&s_15->medium2_0, ro_2, rd_2, &tB_0, &endB_0);
-        haveB_0 = _S438;
+        bool _S497 = slabRange_0(&s_15->medium2_0, ro_2, rd_2, &tB_0, &endB_0);
+        haveB_0 = _S497;
     }
     else
     {
         haveB_0 = false;
     }
-    float _S439 = (F32_max((tB_0), (0.0f)));
-    tB_0 = _S439;
-    MajorantGrid_0 _S440 = gridFor_0(&s_15->medium2_0, &s_15->grid2_0, ro_2);
-    MajorantGrid_0 _S441 = _S440;
-    Dda_0 _S442 = ddaInit_0(&_S441, ro_2, rd_2, _S439);
-    Dda_0 ddaB_0 = _S442;
-    MajorantGrid_0 _S443 = _S440;
-    float _S444 = gridBound_0(&s_15->medium2_0, &_S443, bounds_5, drift_4, (&ddaB_0)->cell_0, (&s_15->medium2_0)->majorant_0);
-    float rateB_0 = _S444 * _S432;
+    float _S498 = (F32_max((tB_0), (0.0f)));
+    tB_0 = _S498;
+    MajorantGrid_0 _S499 = gridFor_0(&s_15->medium2_0, &s_15->grid2_0, ro_2);
+    MajorantGrid_0 _S500 = _S499;
+    Dda_0 _S501 = ddaInit_0(&_S500, ro_2, rd_2, _S498);
+    Dda_0 ddaB_0 = _S501;
+    MajorantGrid_0 _S502 = _S499;
+    float _S503 = gridBound_0(&s_15->medium2_0, &_S502, bounds_6, drift_4, (&ddaB_0)->cell_0, (&s_15->medium2_0)->majorant_0);
+    float rateB_0 = _S503 * _S491;
     int32_t budgetB_0 = int(4096);
     float keepB_0 = 0.0f;
     float rouletteB_0 = 0.0f;
+    float coinB_0 = 0.0f;
     if(haveB_0)
     {
-        MajorantGrid_0 _S445 = _S440;
-        bool _S446 = segmentStep_0(&s_15->medium2_0, &_S445, bounds_5, drift_4, _S432, endB_0, &ddaB_0, &rateB_0, &tB_0, &_S431, &keepB_0, &rouletteB_0, &budgetB_0, steps_3);
-        haveB_0 = _S446;
+        MajorantGrid_0 _S504 = _S499;
+        bool _S505 = segmentStep_0(&s_15->medium2_0, &_S504, bounds_6, drift_4, _S491, endB_0, &ddaB_0, &rateB_0, &tB_0, &_S489, &keepB_0, &rouletteB_0, &coinB_0, &budgetB_0, steps_4);
+        haveB_0 = _S505;
     }
     float kept_1 = 0.0f;
-    Vector<float, 3>  keptAt_1 = none_0;
+    Vector<float, 3>  keptAt_1 = _S490;
     int32_t keptLayer_1 = int(0);
     float keptT_1 = 0.0f;
-    float tr_4 = 1.0f;
+    float tr_7 = 1.0f;
     float total_0 = 0.0f;
     for(;;)
     {
-        bool _S447;
         if(haveA_0)
         {
-            _S447 = true;
+            rouletted_0 = true;
         }
         else
         {
-            _S447 = haveB_0;
+            rouletted_0 = haveB_0;
         }
-        if(_S447)
+        if(rouletted_0)
         {
         }
         else
         {
+            rouletted_0 = false;
             kept_0 = kept_1;
             keptAt_0 = keptAt_1;
             keptLayer_0 = keptLayer_1;
@@ -4655,22 +4973,55 @@ static Vector<float, 3>  cameraSegmentSun_0(Scene_0 * s_15, PhaseInput_0 * ph_0,
         {
             uLive_1 = rouletteB_0;
         }
-        Vector<float, 3>  p_25 = ro_2 + rd_2 * (Vector<float, 3> )ph0_0;
-        float sigma_0;
+        float uHit_1;
         if(takeA_0)
         {
-            float _S448 = densityAt_0(&s_15->medium_0, drift_4, p_25);
-            sigma_0 = _S448;
+            uHit_1 = coinA_0;
         }
         else
         {
-            float _S449 = densityAt_0(&s_15->medium2_0, drift_4, p_25);
-            sigma_0 = _S449;
+            uHit_1 = coinB_0;
+        }
+        Vector<float, 3>  p_27 = ro_2 + rd_2 * (Vector<float, 3> )ph0_0;
+        *tResume_0 = ph0_0;
+        float sigma_0;
+        if(takeA_0)
+        {
+            float _S506 = densityAt_0(&s_15->medium_0, drift_4, p_27);
+            sigma_0 = _S506;
+        }
+        else
+        {
+            float _S507 = densityAt_0(&s_15->medium2_0, drift_4, p_27);
+            sigma_0 = _S507;
         }
         if(sigma_0 > 0.0f)
         {
             float w_6 = sigma_0 / rate_1;
-            float b_7 = tr_4 * w_6;
+            bool _S508;
+            if((*hit_0) == int(0))
+            {
+                _S508 = uHit_1 < w_6;
+            }
+            else
+            {
+                _S508 = false;
+            }
+            if(_S508)
+            {
+                *hit_0 = int(1);
+                *hitAt_0 = p_27;
+                if(takeA_0)
+                {
+                    keptLayer_0 = int(0);
+                }
+                else
+                {
+                    keptLayer_0 = int(1);
+                }
+                *hitLayer_0 = keptLayer_0;
+            }
+            float b_7 = tr_7 * w_6;
             float total_1;
             if(b_7 > 0.0f)
             {
@@ -4686,7 +5037,7 @@ static Vector<float, 3>  cameraSegmentSun_0(Scene_0 * s_15, PhaseInput_0 * ph_0,
                         keptLayer_0 = int(1);
                     }
                     kept_0 = b_7;
-                    keptAt_0 = p_25;
+                    keptAt_0 = p_27;
                     keptT_0 = ph0_0;
                 }
                 else
@@ -4706,22 +5057,23 @@ static Vector<float, 3>  cameraSegmentSun_0(Scene_0 * s_15, PhaseInput_0 * ph_0,
                 keptT_0 = keptT_1;
                 total_1 = total_0;
             }
-            float tr_5 = tr_4 * (F32_max((0.0f), (1.0f - w_6)));
-            float tr_6;
-            if(tr_5 < 0.00999999977648258f)
+            float tr_8 = tr_7 * (F32_max((0.0f), (1.0f - w_6)));
+            float tr_9;
+            if(tr_8 < 0.00999999977648258f)
             {
                 if(uLive_1 > 0.5f)
                 {
+                    rouletted_0 = true;
                     total_0 = total_1;
                     break;
                 }
-                tr_6 = tr_5 * 2.0f;
+                tr_9 = tr_8 * 2.0f;
             }
             else
             {
-                tr_6 = tr_5;
+                tr_9 = tr_8;
             }
-            tr_4 = tr_6;
+            tr_7 = tr_9;
             total_0 = total_1;
         }
         else
@@ -4733,19 +5085,46 @@ static Vector<float, 3>  cameraSegmentSun_0(Scene_0 * s_15, PhaseInput_0 * ph_0,
         }
         if(takeA_0)
         {
-            bool _S450 = segmentStep_0(&s_15->medium_0, &s_15->grid_0, bounds_5, drift_4, _S432, endA_0, &ddaA_0, &rateA_0, &tA_0, rng_3, &keepA_0, &rouletteA_0, &budgetA_0, steps_3);
-            haveA_0 = _S450;
+            bool _S509 = segmentStep_0(&s_15->medium_0, &s_15->grid_0, bounds_6, drift_4, _S491, endA_0, &ddaA_0, &rateA_0, &tA_0, rng_4, &keepA_0, &rouletteA_0, &coinA_0, &budgetA_0, steps_4);
+            haveA_0 = _S509;
         }
         else
         {
-            MajorantGrid_0 _S451 = _S440;
-            bool _S452 = segmentStep_0(&s_15->medium2_0, &_S451, bounds_5, drift_4, _S432, endB_0, &ddaB_0, &rateB_0, &tB_0, &_S431, &keepB_0, &rouletteB_0, &budgetB_0, steps_3);
-            haveB_0 = _S452;
+            MajorantGrid_0 _S510 = _S499;
+            bool _S511 = segmentStep_0(&s_15->medium2_0, &_S510, bounds_6, drift_4, _S491, endB_0, &ddaB_0, &rateB_0, &tB_0, &_S489, &keepB_0, &rouletteB_0, &coinB_0, &budgetB_0, steps_4);
+            haveB_0 = _S511;
         }
         kept_1 = kept_0;
         keptAt_1 = keptAt_0;
         keptLayer_1 = keptLayer_0;
         keptT_1 = keptT_0;
+    }
+    if((*hit_0) == int(0))
+    {
+        if(rouletted_0)
+        {
+            haveA_0 = true;
+        }
+        else
+        {
+            haveA_0 = budgetA_0 <= int(0);
+        }
+        if(haveA_0)
+        {
+            haveA_0 = true;
+        }
+        else
+        {
+            haveA_0 = budgetB_0 <= int(0);
+        }
+    }
+    else
+    {
+        haveA_0 = false;
+    }
+    if(haveA_0)
+    {
+        *hit_0 = int(2);
     }
     if(!(total_0 > 0.0f))
     {
@@ -4757,25 +5136,25 @@ static Vector<float, 3>  cameraSegmentSun_0(Scene_0 * s_15, PhaseInput_0 * ph_0,
     }
     if(haveA_0)
     {
-        return none_0;
+        return _S490;
     }
-    Vector<float, 3>  _S453 = s_15->sunDir_0;
-    float _S454 = sceneTransmittance_0(s_15, bounds_5, drift_4, rng_3, keptAt_0 + s_15->sunDir_0 * (Vector<float, 3> )s_15->shadowOffset_0, s_15->sunDir_0, steps_3);
-    Vector<float, 3>  _S455 = s_15->albedo_0;
+    Vector<float, 3>  _S512 = s_15->sunDir_0;
+    float _S513 = sceneTransmittance_0(s_15, bounds_6, drift_4, rng_4, keptAt_0 + s_15->sunDir_0 * (Vector<float, 3> )s_15->shadowOffset_0, s_15->sunDir_0, steps_4);
+    Vector<float, 3>  _S514 = s_15->albedo_0;
     Vector<float, 3>  matterAlbedo_0;
     if(keptLayer_0 == int(0))
     {
-        float _S456 = phaseCamera_0(ph_0, dot_0(rd_2, _S453));
-        matterAlbedo_0 = _S455;
-        ph0_0 = _S456;
+        float _S515 = phaseCamera_0(ph_0, dot_0(rd_2, _S512));
+        matterAlbedo_0 = _S514;
+        ph0_0 = _S515;
     }
     else
     {
-        float _S457 = phaseCamera_0(&s_15->phase2_0, dot_0(rd_2, _S453));
+        float _S516 = phaseCamera_0(&s_15->phase2_0, dot_0(rd_2, _S512));
         matterAlbedo_0 = s_15->albedo2_0;
-        ph0_0 = _S457;
+        ph0_0 = _S516;
     }
-    Vector<float, 3>  _S458 = Vector<float, 3> (1.0f, 1.0f, 1.0f);
+    Vector<float, 3>  _S517 = Vector<float, 3> (1.0f, 1.0f, 1.0f);
     if(((&s_15->environment_0)->envMode_0) == int(1))
     {
         haveA_0 = (s_15->aerialMode_0) != int(0);
@@ -4787,130 +5166,130 @@ static Vector<float, 3>  cameraSegmentSun_0(Scene_0 * s_15, PhaseInput_0 * ph_0,
     Vector<float, 3>  air_0;
     if(haveA_0)
     {
-        Vector<float, 3>  _S459 = airTransmittance_0(&(&s_15->environment_0)->sky_0, ro_2.y, rd_2, keptT_0);
-        air_0 = _S459;
+        Vector<float, 3>  _S518 = airTransmittance_0(&(&s_15->environment_0)->sky_0, ro_2.y, rd_2, keptT_0);
+        air_0 = _S518;
     }
     else
     {
-        air_0 = _S458;
+        air_0 = _S517;
     }
-    Vector<float, 3>  _S460 = (Vector<float, 3> )total_0 * matterAlbedo_0 * (Vector<float, 3> )ph0_0 * (Vector<float, 3> )_S454;
-    Vector<float, 3>  _S461 = sunIrradianceAt_0(s_15, keptAt_0);
-    return _S460 * _S461 * air_0;
+    Vector<float, 3>  _S519 = (Vector<float, 3> )total_0 * matterAlbedo_0 * (Vector<float, 3> )ph0_0 * (Vector<float, 3> )_S513;
+    Vector<float, 3>  _S520 = sunIrradianceAt_0(s_15, keptAt_0);
+    return _S519 * _S520 * air_0;
 }
 
-static bool sampleFreeFlightUpTo_0(Medium_0 * m_9, MajorantGrid_0 * g_17, StructuredBuffer<float> bounds_6, StructuredBuffer<Vector<float, 2> > disp_8, Rng_0 * rng_4, Vector<float, 3>  ro_3, Vector<float, 3>  rd_3, float tLimit_0, Vector<float, 3>  * scatterPoint_0, float * distance_0, int32_t * steps_4)
+static bool sampleFreeFlightUpTo_0(Medium_0 * m_13, MajorantGrid_0 * g_18, StructuredBuffer<float> bounds_7, StructuredBuffer<Vector<float, 2> > disp_9, Rng_0 * rng_5, Vector<float, 3>  ro_3, Vector<float, 3>  rd_3, float tLimit_0, Vector<float, 3>  * scatterPoint_0, float * distance_0, int32_t * steps_5)
 {
     *scatterPoint_0 = Vector<float, 3> (0.0f, 0.0f, 0.0f);
     *distance_0 = 0.0f;
-    float t0_3;
-    float t1_3;
-    bool _S462 = slabRange_0(m_9, ro_3, rd_3, &t0_3, &t1_3);
-    if(!_S462)
+    float t0_4;
+    float t1_4;
+    bool _S521 = slabRange_0(m_13, ro_3, rd_3, &t0_4, &t1_4);
+    if(!_S521)
     {
         return false;
     }
-    float _S463 = (F32_min((t1_3), (tLimit_0)));
-    t1_3 = _S463;
-    if(!(_S463 > t0_3))
+    float _S522 = (F32_min((t1_4), (tLimit_0)));
+    t1_4 = _S522;
+    if(!(_S522 > t0_4))
     {
         return false;
     }
-    float _S464 = (F32_max((t0_3), (0.0f)));
-    Dda_0 _S465 = ddaInit_0(g_17, ro_3, rd_3, _S464);
-    Dda_0 dda_2 = _S465;
-    float _S466 = m_9->majorant_0;
-    float _S467 = gridBound_0(m_9, g_17, bounds_6, disp_8, (&dda_2)->cell_0, m_9->majorant_0);
-    float localMaj_1 = _S467;
-    int32_t i_22 = int(0);
-    float t_13 = _S464;
+    float _S523 = (F32_max((t0_4), (0.0f)));
+    Dda_0 _S524 = ddaInit_0(g_18, ro_3, rd_3, _S523);
+    Dda_0 dda_3 = _S524;
+    float _S525 = m_13->majorant_0;
+    float _S526 = gridBound_0(m_13, g_18, bounds_7, disp_9, (&dda_3)->cell_0, m_13->majorant_0);
+    float localMaj_2 = _S526;
+    int32_t i_24 = int(0);
+    float t_15 = _S523;
     for(;;)
     {
-        if(i_22 < int(4096))
+        if(i_24 < int(4096))
         {
         }
         else
         {
             break;
         }
-        *steps_4 = *steps_4 + int(1);
-        Dda_0 _S468 = dda_2;
-        float _S469 = ddaExit_0(&_S468);
-        float _S470 = (F32_min((_S469), (t1_3)));
-        if(localMaj_1 <= 0.0f)
+        *steps_5 = *steps_5 + int(1);
+        Dda_0 _S527 = dda_3;
+        float _S528 = ddaExit_0(&_S527);
+        float _S529 = (F32_min((_S528), (t1_4)));
+        if(localMaj_2 <= 0.0f)
         {
-            if(_S470 >= t1_3)
+            if(_S529 >= t1_4)
             {
                 return false;
             }
-            ddaAdvance_0(&dda_2);
-            float _S471 = gridBound_0(m_9, g_17, bounds_6, disp_8, (&dda_2)->cell_0, _S466);
-            localMaj_1 = _S471;
-            t_13 = _S470;
-            i_22 = i_22 + int(1);
+            ddaAdvance_0(&dda_3);
+            float _S530 = gridBound_0(m_13, g_18, bounds_7, disp_9, (&dda_3)->cell_0, _S525);
+            localMaj_2 = _S530;
+            t_15 = _S529;
+            i_24 = i_24 + int(1);
             continue;
         }
-        float _S472 = randFloat_0(rng_4);
-        float t_14 = t_13 - (F32_log(((F32_max((1.0f - _S472), (1.00000001168609742e-07f)))))) / localMaj_1;
-        if(t_14 >= _S470)
+        float _S531 = randFloat_0(rng_5);
+        float t_16 = t_15 - (F32_log(((F32_max((1.0f - _S531), (1.00000001168609742e-07f)))))) / localMaj_2;
+        if(t_16 >= _S529)
         {
-            if(_S470 >= t1_3)
+            if(_S529 >= t1_4)
             {
                 return false;
             }
-            ddaAdvance_0(&dda_2);
-            float _S473 = gridBound_0(m_9, g_17, bounds_6, disp_8, (&dda_2)->cell_0, _S466);
-            localMaj_1 = _S473;
-            t_13 = _S470;
-            i_22 = i_22 + int(1);
+            ddaAdvance_0(&dda_3);
+            float _S532 = gridBound_0(m_13, g_18, bounds_7, disp_9, (&dda_3)->cell_0, _S525);
+            localMaj_2 = _S532;
+            t_15 = _S529;
+            i_24 = i_24 + int(1);
             continue;
         }
-        Vector<float, 3>  p_26 = ro_3 + rd_3 * (Vector<float, 3> )t_14;
-        float _S474 = randFloat_0(rng_4);
-        float _S475 = densityAt_0(m_9, disp_8, p_26);
-        if(_S474 < (_S475 / localMaj_1))
+        Vector<float, 3>  p_28 = ro_3 + rd_3 * (Vector<float, 3> )t_16;
+        float _S533 = randFloat_0(rng_5);
+        float _S534 = densityAt_0(m_13, disp_9, p_28);
+        if(_S533 < (_S534 / localMaj_2))
         {
-            *scatterPoint_0 = p_26;
-            *distance_0 = t_14;
+            *scatterPoint_0 = p_28;
+            *distance_0 = t_16;
             return true;
         }
-        t_13 = t_14;
-        i_22 = i_22 + int(1);
+        t_15 = t_16;
+        i_24 = i_24 + int(1);
     }
     return false;
 }
 
-static bool sampleFreeFlight_0(Medium_0 * m_10, MajorantGrid_0 * g_18, StructuredBuffer<float> bounds_7, StructuredBuffer<Vector<float, 2> > disp_9, Rng_0 * rng_5, Vector<float, 3>  ro_4, Vector<float, 3>  rd_4, Vector<float, 3>  * scatterPoint_1, float * distance_1, int32_t * steps_5)
+static bool sampleFreeFlight_0(Medium_0 * m_14, MajorantGrid_0 * g_19, StructuredBuffer<float> bounds_8, StructuredBuffer<Vector<float, 2> > disp_10, Rng_0 * rng_6, Vector<float, 3>  ro_4, Vector<float, 3>  rd_4, Vector<float, 3>  * scatterPoint_1, float * distance_1, int32_t * steps_6)
 {
-    bool _S476 = sampleFreeFlightUpTo_0(m_10, g_18, bounds_7, disp_9, rng_5, ro_4, rd_4, 1.00000001504746622e+30f, scatterPoint_1, distance_1, steps_5);
-    return _S476;
+    bool _S535 = sampleFreeFlightUpTo_0(m_14, g_19, bounds_8, disp_10, rng_6, ro_4, rd_4, 1.00000001504746622e+30f, scatterPoint_1, distance_1, steps_6);
+    return _S535;
 }
 
-static bool sceneFreeFlight_0(Scene_0 * s_16, StructuredBuffer<float> bounds_8, StructuredBuffer<Vector<float, 2> > drift_5, Rng_0 * rng_6, Vector<float, 3>  ro_5, Vector<float, 3>  rd_5, Vector<float, 3>  * scatterAt_0, int32_t * layer_0, int32_t * steps_6)
+static bool sceneFreeFlight_0(Scene_0 * s_16, StructuredBuffer<float> bounds_9, StructuredBuffer<Vector<float, 2> > drift_5, Rng_0 * rng_7, Vector<float, 3>  ro_5, Vector<float, 3>  rd_5, Vector<float, 3>  * scatterAt_0, int32_t * layer_0, int32_t * steps_7)
 {
     *layer_0 = int(0);
     float dist_2;
     if((s_16->layer2On_0) == int(0))
     {
-        bool _S477 = sampleFreeFlight_0(&s_16->medium_0, &s_16->grid_0, bounds_8, drift_5, rng_6, ro_5, rd_5, scatterAt_0, &dist_2, steps_6);
-        return _S477;
+        bool _S536 = sampleFreeFlight_0(&s_16->medium_0, &s_16->grid_0, bounds_9, drift_5, rng_7, ro_5, rd_5, scatterAt_0, &dist_2, steps_7);
+        return _S536;
     }
-    float a0_0;
-    float a1_0;
-    bool _S478 = slabRange_0(&s_16->medium_0, ro_5, rd_5, &a0_0, &a1_0);
-    float b0_0;
+    float a0_1;
+    float a1_1;
+    bool _S537 = slabRange_0(&s_16->medium_0, ro_5, rd_5, &a0_1, &a1_1);
+    float b0_1;
     float b1_0;
-    bool _S479 = slabRange_0(&s_16->medium2_0, ro_5, rd_5, &b0_0, &b1_0);
+    bool _S538 = slabRange_0(&s_16->medium2_0, ro_5, rd_5, &b0_1, &b1_0);
     bool secondFirst_0;
-    if(_S479)
+    if(_S538)
     {
-        if(!_S478)
+        if(!_S537)
         {
             secondFirst_0 = true;
         }
         else
         {
-            secondFirst_0 = (F32_max((b0_0), (0.0f))) < (F32_max((a0_0), (0.0f)));
+            secondFirst_0 = (F32_max((b0_1), (0.0f))) < (F32_max((a0_1), (0.0f)));
         }
     }
     else
@@ -4921,28 +5300,28 @@ static bool sceneFreeFlight_0(Scene_0 * s_16, StructuredBuffer<float> bounds_8, 
     Vector<float, 3>  pFar_0;
     float dNear_1;
     float dFar_0;
-    MajorantGrid_0 _S480 = gridFor_0(&s_16->medium2_0, &s_16->grid2_0, ro_5);
-    float _S481;
+    MajorantGrid_0 _S539 = gridFor_0(&s_16->medium2_0, &s_16->grid2_0, ro_5);
+    float _S540;
     if(secondFirst_0)
     {
-        MajorantGrid_0 _S482 = _S480;
-        bool _S483 = sampleFreeFlight_0(&s_16->medium2_0, &_S482, bounds_8, drift_5, rng_6, ro_5, rd_5, &pNear_0, &dNear_1, steps_6);
-        if(_S483)
+        MajorantGrid_0 _S541 = _S539;
+        bool _S542 = sampleFreeFlight_0(&s_16->medium2_0, &_S541, bounds_9, drift_5, rng_7, ro_5, rd_5, &pNear_0, &dNear_1, steps_7);
+        if(_S542)
         {
-            _S481 = dNear_1;
+            _S540 = dNear_1;
         }
         else
         {
-            _S481 = 1.00000001504746622e+30f;
+            _S540 = 1.00000001504746622e+30f;
         }
-        bool _S484 = sampleFreeFlightUpTo_0(&s_16->medium_0, &s_16->grid_0, bounds_8, drift_5, rng_6, ro_5, rd_5, _S481, &pFar_0, &dFar_0, steps_6);
-        if(_S484)
+        bool _S543 = sampleFreeFlightUpTo_0(&s_16->medium_0, &s_16->grid_0, bounds_9, drift_5, rng_7, ro_5, rd_5, _S540, &pFar_0, &dFar_0, steps_7);
+        if(_S543)
         {
             *scatterAt_0 = pFar_0;
             *layer_0 = int(0);
             return true;
         }
-        if(_S483)
+        if(_S542)
         {
             *scatterAt_0 = pNear_0;
             *layer_0 = int(1);
@@ -4951,24 +5330,24 @@ static bool sceneFreeFlight_0(Scene_0 * s_16, StructuredBuffer<float> bounds_8, 
     }
     else
     {
-        bool _S485 = sampleFreeFlight_0(&s_16->medium_0, &s_16->grid_0, bounds_8, drift_5, rng_6, ro_5, rd_5, &pNear_0, &dNear_1, steps_6);
-        if(_S485)
+        bool _S544 = sampleFreeFlight_0(&s_16->medium_0, &s_16->grid_0, bounds_9, drift_5, rng_7, ro_5, rd_5, &pNear_0, &dNear_1, steps_7);
+        if(_S544)
         {
-            _S481 = dNear_1;
+            _S540 = dNear_1;
         }
         else
         {
-            _S481 = 1.00000001504746622e+30f;
+            _S540 = 1.00000001504746622e+30f;
         }
-        MajorantGrid_0 _S486 = _S480;
-        bool _S487 = sampleFreeFlightUpTo_0(&s_16->medium2_0, &_S486, bounds_8, drift_5, rng_6, ro_5, rd_5, _S481, &pFar_0, &dFar_0, steps_6);
-        if(_S487)
+        MajorantGrid_0 _S545 = _S539;
+        bool _S546 = sampleFreeFlightUpTo_0(&s_16->medium2_0, &_S545, bounds_9, drift_5, rng_7, ro_5, rd_5, _S540, &pFar_0, &dFar_0, steps_7);
+        if(_S546)
         {
             *scatterAt_0 = pFar_0;
             *layer_0 = int(1);
             return true;
         }
-        if(_S485)
+        if(_S544)
         {
             *scatterAt_0 = pNear_0;
             *layer_0 = int(0);
@@ -4979,154 +5358,48 @@ static bool sceneFreeFlight_0(Scene_0 * s_16, StructuredBuffer<float> bounds_8, 
     return false;
 }
 
-static Vector<float, 2>  airMapAxisV_0(LayerShadowMap_0 * m_11)
+static float groundShadow_0(LayerShadowMap_0 * mapA_0, LayerShadowMap_0 * mapB_0, Vector<float, 3>  origin_1, Vector<float, 3>  dir_4)
 {
-    return Vector<float, 2> (- m_11->smAxisU_0.y, m_11->smAxisU_0.x);
-}
-
-static float airMapTexel_0(LayerShadowMap_0 * m_12, int32_t iu_0, int32_t iv_0, int32_t k_11)
-{
-    return m_12->smTexels_0.Load((k_11 * m_12->smDimV_0 + iv_0) * m_12->smDimU_0 + iu_0);
-}
-
-static float layerMapTransmittance_0(LayerShadowMap_0 * m_13, Vector<float, 3>  p_27)
-{
-    int32_t _S488 = m_13->smDimU_0;
-    int32_t _S489 = m_13->smDimV_0;
-    int32_t _S490 = m_13->smSlices_0;
-    uint32_t want_0 = uint32_t(m_13->smDimU_0 * m_13->smDimV_0 * m_13->smSlices_0);
-    bool _S491;
-    if(want_0 == 0U)
+    float _S547 = dir_4.y;
+    bool _S548;
+    if(!(_S547 < 0.0f))
     {
-        _S491 = true;
+        _S548 = true;
     }
     else
     {
-        _S491 = uint32_t(StructuredBuffer_getCount_0(m_13->smTexels_0)) < want_0;
+        _S548 = !((origin_1.y) > 0.0f);
     }
-    if(_S491)
+    if(_S548)
     {
         return 1.0f;
     }
-    float _S492 = p_27.y;
-    float _S493 = m_13->smTop_0;
-    if(_S492 >= (m_13->smTop_0))
-    {
-        return 1.0f;
-    }
-    Vector<float, 3>  _S494 = m_13->smSun_0;
-    float _S495 = m_13->smBottom_0;
-    Vector<float, 2>  q_13 = Vector<float, 2> {p_27.x, p_27.z} + Vector<float, 2> {_S494.x, _S494.z} * (Vector<float, 2> )((m_13->smBottom_0 - _S492) / m_13->smSun_0.y) - m_13->smCentre_0;
-    Vector<float, 2>  _S496 = m_13->smLo_0;
-    Vector<float, 2>  _S497 = m_13->smTexel_0;
-    float fu_0 = (dot_1(q_13, m_13->smAxisU_0) - m_13->smLo_0.x) / m_13->smTexel_0.x - 0.5f;
-    Vector<float, 2>  _S498 = airMapAxisV_0(m_13);
-    float fv_0 = (dot_1(q_13, _S498) - _S496.y) / _S497.y - 0.5f;
-    if(fu_0 >= -0.5f)
-    {
-        _S491 = fv_0 >= -0.5f;
-    }
-    else
-    {
-        _S491 = false;
-    }
-    if(_S491)
-    {
-        _S491 = fu_0 <= (float(_S488) - 0.5f);
-    }
-    else
-    {
-        _S491 = false;
-    }
-    if(_S491)
-    {
-        _S491 = fv_0 <= (float(_S489) - 0.5f);
-    }
-    else
-    {
-        _S491 = false;
-    }
-    if(!_S491)
-    {
-        return 1.0f;
-    }
-    int32_t _S499 = _S488 - int(1);
-    float fu_1 = clampf_0(fu_0, 0.0f, float(_S499));
-    int32_t _S500 = _S489 - int(1);
-    float fv_1 = clampf_0(fv_0, 0.0f, float(_S500));
-    int32_t u0_0 = int32_t(fu_1);
-    int32_t v0_0 = int32_t(fv_1);
-    int32_t _S501 = (I32_min((u0_0 + int(1)), (_S499)));
-    int32_t _S502 = (I32_min((v0_0 + int(1)), (_S500)));
-    float tu_0 = fu_1 - float(u0_0);
-    float tv_0 = fv_1 - float(v0_0);
-    int32_t _S503 = _S490 - int(1);
-    float fk_0 = clampf_0((_S492 - _S495) / (F32_max((_S493 - _S495), (1.0f))), 0.0f, 1.0f) * float(_S503);
-    int32_t _S504 = (I32_min((int32_t(fk_0)), (_S503)));
-    int32_t _S505 = (I32_min((_S504 + int(1)), (_S503)));
-    float tk_0 = fk_0 - float(_S504);
-    float _S506 = airMapTexel_0(m_13, u0_0, v0_0, _S504);
-    float _S507 = 1.0f - tu_0;
-    float _S508 = _S506 * _S507;
-    float _S509 = airMapTexel_0(m_13, _S501, v0_0, _S504);
-    float a0_1 = _S508 + _S509 * tu_0;
-    float _S510 = airMapTexel_0(m_13, u0_0, _S502, _S504);
-    float _S511 = _S510 * _S507;
-    float _S512 = airMapTexel_0(m_13, _S501, _S502, _S504);
-    float b0_1 = _S511 + _S512 * tu_0;
-    float _S513 = airMapTexel_0(m_13, u0_0, v0_0, _S505);
-    float _S514 = _S513 * _S507;
-    float _S515 = airMapTexel_0(m_13, _S501, v0_0, _S505);
-    float a1_1 = _S514 + _S515 * tu_0;
-    float _S516 = airMapTexel_0(m_13, u0_0, _S502, _S505);
-    float _S517 = _S516 * _S507;
-    float _S518 = airMapTexel_0(m_13, _S501, _S502, _S505);
-    float _S519 = 1.0f - tv_0;
-    return (a0_1 * _S519 + b0_1 * tv_0) * (1.0f - tk_0) + (a1_1 * _S519 + (_S517 + _S518 * tu_0) * tv_0) * tk_0;
-}
-
-static float groundShadow_0(LayerShadowMap_0 * mapA_0, LayerShadowMap_0 * mapB_0, Vector<float, 3>  origin_1, Vector<float, 3>  dir_3)
-{
-    float _S520 = dir_3.y;
-    bool _S521;
-    if(!(_S520 < 0.0f))
-    {
-        _S521 = true;
-    }
-    else
-    {
-        _S521 = !((origin_1.y) > 0.0f);
-    }
-    if(_S521)
-    {
-        return 1.0f;
-    }
-    Vector<float, 3>  ground_0 = origin_1 + dir_3 * (Vector<float, 3> )(origin_1.y / - _S520);
+    Vector<float, 3>  ground_0 = origin_1 + dir_4 * (Vector<float, 3> )(origin_1.y / - _S547);
     ground_0.y = 0.0f;
-    float _S522 = layerMapTransmittance_0(mapA_0, ground_0);
-    float _S523 = layerMapTransmittance_0(mapB_0, ground_0);
-    return _S522 * _S523;
+    float _S549 = layerMapTransmittance_0(mapA_0, ground_0);
+    float _S550 = layerMapTransmittance_0(mapB_0, ground_0);
+    return _S549 * _S550;
 }
 
-static Vector<float, 3>  skyRadiance_0(SkyInput_0 * p_28, float originAltitude_1, Vector<float, 3>  rayDir_1, bool includeSunDisc_0, float groundLit_0)
+static Vector<float, 3>  skyRadiance_0(SkyInput_0 * p_29, float originAltitude_1, Vector<float, 3>  rayDir_1, bool includeSunDisc_0, float groundLit_0)
 {
     float hc_1;
-    Vector<float, 3>  _S524 = sunDirection_0(p_28);
-    float _S525 = p_28->planetRadius_0;
+    Vector<float, 3>  _S551 = sunDirection_0(p_29);
+    float _S552 = p_29->planetRadius_0;
     float planetRadius_5;
-    if((p_28->planetRadius_0) > 1000.0f)
+    if((p_29->planetRadius_0) > 1000.0f)
     {
-        planetRadius_5 = _S525;
+        planetRadius_5 = _S552;
     }
     else
     {
         planetRadius_5 = 1000.0f;
     }
-    float _S526 = p_28->scaleHeight_0;
+    float _S553 = p_29->scaleHeight_0;
     float scaleHeight_3;
-    if((p_28->scaleHeight_0) > 1.0f)
+    if((p_29->scaleHeight_0) > 1.0f)
     {
-        scaleHeight_3 = _S526;
+        scaleHeight_3 = _S553;
     }
     else
     {
@@ -5142,9 +5415,9 @@ static Vector<float, 3>  skyRadiance_0(SkyInput_0 * p_28, float originAltitude_1
     {
         observerAltitude_1 = 0.0f;
     }
-    float _S527 = planetRadius_5 + observerAltitude_1;
-    float _S528 = rayDir_1.y;
-    float b_8 = _S527 * _S528;
+    float _S554 = planetRadius_5 + observerAltitude_1;
+    float _S555 = rayDir_1.y;
+    float b_8 = _S554 * _S555;
     float cGround_1 = shellC_0(observerAltitude_1, planetRadius_5, 0.0f);
     float tTop_1 = shellExit_0(b_8, shellC_0(observerAltitude_1, planetRadius_5, atmosphereHeight_1));
     if(tTop_1 <= 0.0f)
@@ -5162,15 +5435,15 @@ static Vector<float, 3>  skyRadiance_0(SkyInput_0 * p_28, float originAltitude_1
         observerAltitude_1 = tTop_1;
     }
     Vector<float, 3>  betaR_1 = rayleighCoefficients_0();
-    float betaM_0 = mieCoefficient_0(p_28->turbidity_0);
+    float betaM_0 = mieCoefficient_0(p_29->turbidity_0);
     float betaMExt_1 = betaM_0 * 1.11000001430511475f;
-    float cosTheta_0 = clampf_0(dot_0(rayDir_1, _S524), -1.0f, 1.0f);
+    float cosTheta_0 = clampf_0(dot_0(rayDir_1, _S551), -1.0f, 1.0f);
     float phaseR_0 = 0.05968309938907623f * (1.0f + cosTheta_0 * cosTheta_0);
-    float g_19 = clampf_0(p_28->mieAnisotropy_0, -0.94999998807907104f, 0.94999998807907104f);
-    float _S529 = g_19 * g_19;
-    float hgDenom_0 = 1.0f + _S529 - 2.0f * g_19 * cosTheta_0;
-    float _S530 = 1.0f - _S529;
-    float _S531 = 12.56637096405029297f * hgDenom_0;
+    float g_20 = clampf_0(p_29->mieAnisotropy_0, -0.94999998807907104f, 0.94999998807907104f);
+    float _S556 = g_20 * g_20;
+    float hgDenom_0 = 1.0f + _S556 - 2.0f * g_20 * cosTheta_0;
+    float _S557 = 1.0f - _S556;
+    float _S558 = 12.56637096405029297f * hgDenom_0;
     float tPrev_1;
     if(hgDenom_0 > 9.99999997475242708e-07f)
     {
@@ -5180,31 +5453,31 @@ static Vector<float, 3>  skyRadiance_0(SkyInput_0 * p_28, float originAltitude_1
     {
         tPrev_1 = 9.99999997475242708e-07f;
     }
-    float phaseM_0 = _S530 / (_S531 * (F32_sqrt((tPrev_1))));
-    Vector<float, 3>  _S532 = Vector<float, 3> (0.0f, 0.0f, 0.0f);
+    float phaseM_0 = _S557 / (_S558 * (F32_sqrt((tPrev_1))));
+    Vector<float, 3>  _S559 = Vector<float, 3> (0.0f, 0.0f, 0.0f);
     tPrev_1 = 0.0f;
-    Vector<float, 3>  sumR_0 = _S532;
-    Vector<float, 3>  sumM_0 = _S532;
-    int32_t i_23 = int(0);
+    Vector<float, 3>  sumR_0 = _S559;
+    Vector<float, 3>  sumM_0 = _S559;
+    int32_t i_25 = int(0);
     float depthR_1 = 0.0f;
     float depthM_2 = 0.0f;
     for(;;)
     {
-        if(i_23 < int(24))
+        if(i_25 < int(24))
         {
         }
         else
         {
             break;
         }
-        int32_t _S533 = i_23 + int(1);
-        float tNext_1 = observerAltitude_1 * float(_S533 * _S533) * 0.00173611112404615f;
+        int32_t _S560 = i_25 + int(1);
+        float tNext_1 = observerAltitude_1 * float(_S560 * _S560) * 0.00173611112404615f;
         float dt_1 = tNext_1 - tPrev_1;
         float tMid_1 = (tPrev_1 + tNext_1) * 0.5f;
         if(dt_1 <= 0.0f)
         {
             tPrev_1 = tNext_1;
-            i_23 = _S533;
+            i_25 = _S560;
             continue;
         }
         float h_6 = altitudeFromQ_0(cGround_1 + 2.0f * tMid_1 * b_8 + tMid_1 * tMid_1, planetRadius_5);
@@ -5216,56 +5489,56 @@ static Vector<float, 3>  skyRadiance_0(SkyInput_0 * p_28, float originAltitude_1
         {
             hc_1 = h_6;
         }
-        float _S534 = - hc_1;
-        float dR_0 = (F32_exp((_S534 / scaleHeight_3))) * dt_1;
-        float dM_0 = (F32_exp((_S534 / 1200.0f))) * dt_1;
+        float _S561 = - hc_1;
+        float dR_0 = (F32_exp((_S561 / scaleHeight_3))) * dt_1;
+        float dM_0 = (F32_exp((_S561 / 1200.0f))) * dt_1;
         float midR_0 = depthR_1 + 0.5f * dR_0;
         float midM_0 = depthM_2 + 0.5f * dM_0;
         float depthR_2 = depthR_1 + dR_0;
         float depthM_3 = depthM_2 + dM_0;
-        Vector<float, 3>  _S535 = sampleTransmittanceLut_0(p_28, hc_1, lutMuFor_0(Vector<float, 3> (rayDir_1.x * tMid_1, _S527 + _S528 * tMid_1, rayDir_1.z * tMid_1), _S524));
-        float _S536 = betaMExt_1 * midM_0;
-        Vector<float, 3>  transmittance_1 = Vector<float, 3> ((F32_exp((- (betaR_1.x * midR_0 + _S536)))), (F32_exp((- (betaR_1.y * midR_0 + _S536)))), (F32_exp((- (betaR_1.z * midR_0 + _S536))))) * _S535;
-        Vector<float, 3>  _S537 = sumM_0 + transmittance_1 * (Vector<float, 3> )dM_0;
+        Vector<float, 3>  _S562 = sampleTransmittanceLut_0(p_29, hc_1, lutMuFor_0(Vector<float, 3> (rayDir_1.x * tMid_1, _S554 + _S555 * tMid_1, rayDir_1.z * tMid_1), _S551));
+        float _S563 = betaMExt_1 * midM_0;
+        Vector<float, 3>  transmittance_1 = Vector<float, 3> ((F32_exp((- (betaR_1.x * midR_0 + _S563)))), (F32_exp((- (betaR_1.y * midR_0 + _S563)))), (F32_exp((- (betaR_1.z * midR_0 + _S563))))) * _S562;
+        Vector<float, 3>  _S564 = sumM_0 + transmittance_1 * (Vector<float, 3> )dM_0;
         sumR_0 = sumR_0 + transmittance_1 * (Vector<float, 3> )dR_0;
-        sumM_0 = _S537;
+        sumM_0 = _S564;
         depthR_1 = depthR_2;
         depthM_2 = depthM_3;
         tPrev_1 = tNext_1;
-        i_23 = _S533;
+        i_25 = _S560;
     }
-    float _S538 = sunIrradianceTop_0(p_28);
-    Vector<float, 3>  radiance_0 = (sumR_0 * betaR_1 * (Vector<float, 3> )phaseR_0 + sumM_0 * (Vector<float, 3> )(betaM_0 * phaseM_0)) * (Vector<float, 3> )_S538;
+    float _S565 = sunIrradianceTop_0(p_29);
+    Vector<float, 3>  radiance_0 = (sumR_0 * betaR_1 * (Vector<float, 3> )phaseR_0 + sumM_0 * (Vector<float, 3> )(betaM_0 * phaseM_0)) * (Vector<float, 3> )_S565;
     Vector<float, 3>  radiance_1;
     if(hitsGround_0)
     {
-        Vector<float, 3>  groundPoint_0 = Vector<float, 3> (rayDir_1.x * tGround_1, _S527 + _S528 * tGround_1, rayDir_1.z * tGround_1);
-        float nDotL_0 = clampf_0(dot_0(normalizeExact_0(groundPoint_0), _S524), 0.0f, 1.0f);
-        Vector<float, 3>  _S539 = sampleTransmittanceLut_0(p_28, 0.0f, lutMuFor_0(groundPoint_0, _S524));
-        float _S540 = betaMExt_1 * depthM_2;
-        Vector<float, 3>  viewT_0 = Vector<float, 3> ((F32_exp((- (betaR_1.x * depthR_1 + _S540)))), (F32_exp((- (betaR_1.y * depthR_1 + _S540)))), (F32_exp((- (betaR_1.z * depthR_1 + _S540)))));
-        radiance_1 = radiance_0 + viewT_0 * _S539 * (Vector<float, 3> )(p_28->groundAlbedo_0 * nDotL_0 * 0.31830987334251404f * _S538 * groundLit_0) + viewT_0 * p_28->groundSkyLight_0;
+        Vector<float, 3>  groundPoint_0 = Vector<float, 3> (rayDir_1.x * tGround_1, _S554 + _S555 * tGround_1, rayDir_1.z * tGround_1);
+        float nDotL_0 = clampf_0(dot_0(normalizeExact_0(groundPoint_0), _S551), 0.0f, 1.0f);
+        Vector<float, 3>  _S566 = sampleTransmittanceLut_0(p_29, 0.0f, lutMuFor_0(groundPoint_0, _S551));
+        float _S567 = betaMExt_1 * depthM_2;
+        Vector<float, 3>  viewT_0 = Vector<float, 3> ((F32_exp((- (betaR_1.x * depthR_1 + _S567)))), (F32_exp((- (betaR_1.y * depthR_1 + _S567)))), (F32_exp((- (betaR_1.z * depthR_1 + _S567)))));
+        radiance_1 = radiance_0 + viewT_0 * _S566 * (Vector<float, 3> )(p_29->groundAlbedo_0 * nDotL_0 * 0.31830987334251404f * _S565 * groundLit_0) + viewT_0 * p_29->groundSkyLight_0;
     }
     else
     {
         radiance_1 = radiance_0;
     }
-    bool _S541;
+    bool _S568;
     if(!hitsGround_0)
     {
-        _S541 = includeSunDisc_0;
+        _S568 = includeSunDisc_0;
     }
     else
     {
-        _S541 = false;
+        _S568 = false;
     }
-    if(_S541)
+    if(_S568)
     {
-        float cosRadius_0 = (F32_cos((toRadians_0(p_28->sunAngularRadius_0))));
+        float cosRadius_0 = (F32_cos((toRadians_0(p_29->sunAngularRadius_0))));
         if(cosTheta_0 > cosRadius_0)
         {
-            float _S542 = betaMExt_1 * depthM_2;
-            Vector<float, 3>  viewT_1 = Vector<float, 3> ((F32_exp((- (betaR_1.x * depthR_1 + _S542)))), (F32_exp((- (betaR_1.y * depthR_1 + _S542)))), (F32_exp((- (betaR_1.z * depthR_1 + _S542)))));
+            float _S569 = betaMExt_1 * depthM_2;
+            Vector<float, 3>  viewT_1 = Vector<float, 3> ((F32_exp((- (betaR_1.x * depthR_1 + _S569)))), (F32_exp((- (betaR_1.y * depthR_1 + _S569)))), (F32_exp((- (betaR_1.z * depthR_1 + _S569)))));
             float solidAngle_0 = 6.28318548202514648f * (1.0f - cosRadius_0);
             if(solidAngle_0 > 9.99999971718068537e-10f)
             {
@@ -5275,163 +5548,179 @@ static Vector<float, 3>  skyRadiance_0(SkyInput_0 * p_28, float originAltitude_1
             {
                 hc_1 = 9.99999971718068537e-10f;
             }
-            radiance_1 = radiance_1 + viewT_1 * (Vector<float, 3> )(_S538 / hc_1);
+            radiance_1 = radiance_1 + viewT_1 * (Vector<float, 3> )(_S565 / hc_1);
         }
     }
     return radiance_1;
 }
 
-static Vector<float, 3>  environmentRadiance_0(Environment_0 * e_0, Vector<float, 3>  origin_2, Vector<float, 3>  dir_4, bool includeSunDisc_1, float groundLit_1)
+static Vector<float, 3>  environmentRadiance_0(Environment_0 * e_0, Vector<float, 3>  origin_2, Vector<float, 3>  dir_5, bool includeSunDisc_1, float groundLit_1)
 {
     if((e_0->envMode_0) == int(1))
     {
-        Vector<float, 3>  _S543 = skyRadiance_0(&e_0->sky_0, origin_2.y, dir_4, includeSunDisc_1, groundLit_1);
-        return _S543;
+        Vector<float, 3>  _S570 = skyRadiance_0(&e_0->sky_0, origin_2.y, dir_5, includeSunDisc_1, groundLit_1);
+        return _S570;
     }
     return e_0->uniformRadiance_0;
 }
 
-static bool layerMapRange_0(LayerShadowMap_0 * m_14, Vector<float, 3>  ro_6, Vector<float, 3>  rd_6, float * t0_4, float * t1_4)
+static Vector<float, 3>  pathEnvironment_0(Scene_0 * s_17, Vector<float, 3>  ro_6, Vector<float, 3>  rd_6, bool first_0)
 {
-    *t0_4 = 0.0f;
-    *t1_4 = 1.00000001504746622e+30f;
-    int32_t _S544 = m_14->smDimU_0;
-    int32_t _S545 = m_14->smDimV_0;
-    uint32_t want_1 = uint32_t(m_14->smDimU_0 * m_14->smDimV_0 * m_14->smSlices_0);
-    bool _S546;
-    if(want_1 == 0U)
+    float groundLit_2;
+    if((s_17->airMapOn_0) != int(0))
     {
-        _S546 = true;
+        float _S571 = groundShadow_0(&s_17->airMapIce_0, &s_17->airMapCu_0, ro_6, rd_6);
+        groundLit_2 = _S571;
     }
     else
     {
-        _S546 = uint32_t(StructuredBuffer_getCount_0(m_14->smTexels_0)) < want_1;
+        groundLit_2 = 1.0f;
     }
-    if(_S546)
+    Vector<float, 3>  _S572 = environmentRadiance_0(&s_17->environment_0, ro_6, rd_6, first_0, groundLit_2);
+    return _S572;
+}
+
+static bool layerMapRange_0(LayerShadowMap_0 * m_15, Vector<float, 3>  ro_7, Vector<float, 3>  rd_7, float * t0_5, float * t1_5)
+{
+    *t0_5 = 0.0f;
+    *t1_5 = 1.00000001504746622e+30f;
+    int32_t _S573 = m_15->smDimU_0;
+    int32_t _S574 = m_15->smDimV_0;
+    uint32_t want_1 = uint32_t(m_15->smDimU_0 * m_15->smDimV_0 * m_15->smSlices_0);
+    bool _S575;
+    if(want_1 == 0U)
+    {
+        _S575 = true;
+    }
+    else
+    {
+        _S575 = uint32_t(StructuredBuffer_getCount_0(m_15->smTexels_0)) < want_1;
+    }
+    if(_S575)
     {
         return false;
     }
-    float _S547 = rd_6.y;
-    if((F32_abs((_S547))) < 9.99999971718068537e-10f)
+    float _S576 = rd_7.y;
+    if((F32_abs((_S576))) < 9.99999971718068537e-10f)
     {
-        if((ro_6.y) >= (m_14->smTop_0))
+        if((ro_7.y) >= (m_15->smTop_0))
         {
             return false;
         }
     }
     else
     {
-        float tt_0 = (m_14->smTop_0 - ro_6.y) / _S547;
-        if(_S547 > 0.0f)
+        float tt_0 = (m_15->smTop_0 - ro_7.y) / _S576;
+        if(_S576 > 0.0f)
         {
-            *t1_4 = (F32_min((*t1_4), (tt_0)));
+            *t1_5 = (F32_min((*t1_5), (tt_0)));
         }
         else
         {
-            *t0_4 = (F32_max((*t0_4), (tt_0)));
+            *t0_5 = (F32_max((*t0_5), (tt_0)));
         }
     }
-    Vector<float, 3>  _S548 = m_14->smSun_0;
-    Vector<float, 2>  _S549 = Vector<float, 2> {_S548.x, _S548.z};
-    float _S550 = m_14->smSun_0.y;
-    Vector<float, 2>  q0_3 = Vector<float, 2> {ro_6.x, ro_6.z} + _S549 * (Vector<float, 2> )((m_14->smBottom_0 - ro_6.y) / _S550) - m_14->smCentre_0;
-    Vector<float, 2>  dq_0 = Vector<float, 2> {rd_6.x, rd_6.z} - _S549 * (Vector<float, 2> )(_S547 / _S550);
-    Vector<float, 2>  _S551 = airMapAxisV_0(m_14);
-    float _S552 = m_14->smLo_0.x;
-    float _S553 = m_14->smLo_0.y;
-    float vHi_0 = _S553 + float(_S545) * m_14->smTexel_0.y;
-    bool _S554 = clipAxis_0(dot_1(q0_3, m_14->smAxisU_0), dot_1(dq_0, m_14->smAxisU_0), _S552, _S552 + float(_S544) * m_14->smTexel_0.x, t0_4, t1_4);
-    if(!_S554)
+    Vector<float, 3>  _S577 = m_15->smSun_0;
+    Vector<float, 2>  _S578 = Vector<float, 2> {_S577.x, _S577.z};
+    float _S579 = m_15->smSun_0.y;
+    Vector<float, 2>  q0_3 = Vector<float, 2> {ro_7.x, ro_7.z} + _S578 * (Vector<float, 2> )((m_15->smBottom_0 - ro_7.y) / _S579) - m_15->smCentre_0;
+    Vector<float, 2>  dq_0 = Vector<float, 2> {rd_7.x, rd_7.z} - _S578 * (Vector<float, 2> )(_S576 / _S579);
+    Vector<float, 2>  _S580 = airMapAxisV_0(m_15);
+    float _S581 = m_15->smLo_0.x;
+    float _S582 = m_15->smLo_0.y;
+    float vHi_0 = _S582 + float(_S574) * m_15->smTexel_0.y;
+    bool _S583 = clipAxis_0(dot_1(q0_3, m_15->smAxisU_0), dot_1(dq_0, m_15->smAxisU_0), _S581, _S581 + float(_S573) * m_15->smTexel_0.x, t0_5, t1_5);
+    if(!_S583)
     {
         return false;
     }
-    bool _S555 = clipAxis_0(dot_1(q0_3, _S551), dot_1(dq_0, _S551), _S553, vHi_0, t0_4, t1_4);
-    if(!_S555)
+    bool _S584 = clipAxis_0(dot_1(q0_3, _S580), dot_1(dq_0, _S580), _S582, vHi_0, t0_5, t1_5);
+    if(!_S584)
     {
         return false;
     }
-    return (*t1_4) > (*t0_4);
+    return (*t1_5) > (*t0_5);
 }
 
-static Vector<float, 3>  airShadowLoss_0(SkyInput_0 * p_29, LayerShadowMap_0 * mapA_1, LayerShadowMap_0 * mapB_1, Vector<float, 3>  ro_7, Vector<float, 3>  rd_7, float dist_3, float jitter_1)
+static Vector<float, 3>  airShadowLoss_0(SkyInput_0 * p_30, LayerShadowMap_0 * mapA_1, LayerShadowMap_0 * mapB_1, Vector<float, 3>  ro_8, Vector<float, 3>  rd_8, float dist_3, float jitter_1)
 {
-    Vector<float, 3>  none_1 = Vector<float, 3> (0.0f, 0.0f, 0.0f);
+    Vector<float, 3>  none_0 = Vector<float, 3> (0.0f, 0.0f, 0.0f);
     float r0_0;
     float r1_0;
-    bool _S556 = layerMapRange_0(mapA_1, ro_7, rd_7, &r0_0, &r1_0);
+    bool _S585 = layerMapRange_0(mapA_1, ro_8, rd_8, &r0_0, &r1_0);
     float tA_1;
     float tB_1;
-    if(_S556)
+    if(_S585)
     {
-        float _S557 = (F32_max((-1.00000001504746622e+30f), (r1_0)));
+        float _S586 = (F32_max((-1.00000001504746622e+30f), (r1_0)));
         tA_1 = (F32_min((1.00000001504746622e+30f), (r0_0)));
-        tB_1 = _S557;
+        tB_1 = _S586;
     }
     else
     {
         tA_1 = 1.00000001504746622e+30f;
         tB_1 = -1.00000001504746622e+30f;
     }
-    bool _S558 = layerMapRange_0(mapB_1, ro_7, rd_7, &r0_0, &r1_0);
-    if(_S558)
+    bool _S587 = layerMapRange_0(mapB_1, ro_8, rd_8, &r0_0, &r1_0);
+    if(_S587)
     {
-        float _S559 = (F32_min((tA_1), (r0_0)));
+        float _S588 = (F32_min((tA_1), (r0_0)));
         tB_1 = (F32_max((tB_1), (r1_0)));
-        tA_1 = _S559;
+        tA_1 = _S588;
     }
     if(!(tB_1 > tA_1))
     {
-        return none_1;
+        return none_0;
     }
-    Vector<float, 3>  _S560 = sunDirection_0(p_29);
-    float _S561 = p_29->planetRadius_0;
+    Vector<float, 3>  _S589 = sunDirection_0(p_30);
+    float _S590 = p_30->planetRadius_0;
     float planetRadius_6;
-    if((p_29->planetRadius_0) > 1000.0f)
+    if((p_30->planetRadius_0) > 1000.0f)
     {
-        planetRadius_6 = _S561;
+        planetRadius_6 = _S590;
     }
     else
     {
         planetRadius_6 = 1000.0f;
     }
-    float _S562 = p_29->scaleHeight_0;
+    float _S591 = p_30->scaleHeight_0;
     float scaleHeight_4;
-    if((p_29->scaleHeight_0) > 1.0f)
+    if((p_30->scaleHeight_0) > 1.0f)
     {
-        scaleHeight_4 = _S562;
+        scaleHeight_4 = _S591;
     }
     else
     {
         scaleHeight_4 = 1.0f;
     }
     float atmosphereHeight_2 = scaleHeight_4 * 8.0f;
-    float _S563 = ro_7.y;
+    float _S592 = ro_8.y;
     float observerAltitude_2;
-    if(_S563 > 0.0f)
+    if(_S592 > 0.0f)
     {
-        observerAltitude_2 = _S563;
+        observerAltitude_2 = _S592;
     }
     else
     {
         observerAltitude_2 = 0.0f;
     }
-    float _S564 = planetRadius_6 + observerAltitude_2;
-    float _S565 = rd_7.y;
-    float b_9 = _S564 * _S565;
+    float _S593 = planetRadius_6 + observerAltitude_2;
+    float _S594 = rd_8.y;
+    float b_9 = _S593 * _S594;
     float cGround_2 = shellC_0(observerAltitude_2, planetRadius_6, 0.0f);
     float tTop_2 = shellExit_0(b_9, shellC_0(observerAltitude_2, planetRadius_6, atmosphereHeight_2));
-    bool _S566;
+    bool _S595;
     if(tTop_2 <= 0.0f)
     {
-        _S566 = true;
+        _S595 = true;
     }
     else
     {
-        _S566 = !(dist_3 > 0.0f);
+        _S595 = !(dist_3 > 0.0f);
     }
-    if(_S566)
+    if(_S595)
     {
-        return none_1;
+        return none_0;
     }
     float tGround_2 = shellEnter_0(b_9, cGround_2);
     float tMax_2;
@@ -5447,22 +5736,22 @@ static Vector<float, 3>  airShadowLoss_0(SkyInput_0 * p_29, LayerShadowMap_0 * m
     {
         tMax_2 = dist_3;
     }
-    float _S567 = (F32_max((tA_1), (0.0f)));
-    float _S568 = (F32_min((tB_1), (tMax_2)));
-    if(!(_S568 > _S567))
+    float _S596 = (F32_max((tA_1), (0.0f)));
+    float _S597 = (F32_min((tB_1), (tMax_2)));
+    if(!(_S597 > _S596))
     {
-        return none_1;
+        return none_0;
     }
     Vector<float, 3>  betaR_2 = rayleighCoefficients_0();
-    float betaM_1 = mieCoefficient_0(p_29->turbidity_0);
-    float _S569 = betaM_1 * 1.11000001430511475f;
-    float cosTheta_1 = clampf_0(dot_0(rd_7, _S560), -1.0f, 1.0f);
+    float betaM_1 = mieCoefficient_0(p_30->turbidity_0);
+    float _S598 = betaM_1 * 1.11000001430511475f;
+    float cosTheta_1 = clampf_0(dot_0(rd_8, _S589), -1.0f, 1.0f);
     float phaseR_1 = 0.05968309938907623f * (1.0f + cosTheta_1 * cosTheta_1);
-    float g_20 = clampf_0(p_29->mieAnisotropy_0, -0.94999998807907104f, 0.94999998807907104f);
-    float _S570 = g_20 * g_20;
-    float hgDenom_1 = 1.0f + _S570 - 2.0f * g_20 * cosTheta_1;
-    float _S571 = 1.0f - _S570;
-    float _S572 = 12.56637096405029297f * hgDenom_1;
+    float g_21 = clampf_0(p_30->mieAnisotropy_0, -0.94999998807907104f, 0.94999998807907104f);
+    float _S599 = g_21 * g_21;
+    float hgDenom_1 = 1.0f + _S599 - 2.0f * g_21 * cosTheta_1;
+    float _S600 = 1.0f - _S599;
+    float _S601 = 12.56637096405029297f * hgDenom_1;
     if(hgDenom_1 > 9.99999997475242708e-07f)
     {
         tA_1 = hgDenom_1;
@@ -5471,27 +5760,27 @@ static Vector<float, 3>  airShadowLoss_0(SkyInput_0 * p_29, LayerShadowMap_0 * m
     {
         tA_1 = 9.99999997475242708e-07f;
     }
-    float phaseM_1 = _S571 / (_S572 * (F32_sqrt((tA_1))));
+    float phaseM_1 = _S600 / (_S601 * (F32_sqrt((tA_1))));
     float depthR_3;
     float depthM_4;
     float hc_2;
-    int32_t i_24;
-    if(_S567 > 0.0f)
+    int32_t i_26;
+    if(_S596 > 0.0f)
     {
-        float _S573 = _S567 / 8.0f;
-        i_24 = int(0);
+        float _S602 = _S596 / 8.0f;
+        i_26 = int(0);
         depthR_3 = 0.0f;
         depthM_4 = 0.0f;
         for(;;)
         {
-            if(i_24 < int(8))
+            if(i_26 < int(8))
             {
             }
             else
             {
                 break;
             }
-            float tm_0 = (float(i_24) + 0.5f) * _S573;
+            float tm_0 = (float(i_26) + 0.5f) * _S602;
             float h_7 = altitudeFromQ_0(cGround_2 + 2.0f * tm_0 * b_9 + tm_0 * tm_0, planetRadius_6);
             if(h_7 < 0.0f)
             {
@@ -5501,10 +5790,10 @@ static Vector<float, 3>  airShadowLoss_0(SkyInput_0 * p_29, LayerShadowMap_0 * m
             {
                 hc_2 = h_7;
             }
-            float _S574 = - hc_2;
-            float depthR_4 = depthR_3 + (F32_exp((_S574 / scaleHeight_4))) * _S573;
-            float depthM_5 = depthM_4 + (F32_exp((_S574 / 1200.0f))) * _S573;
-            i_24 = i_24 + int(1);
+            float _S603 = - hc_2;
+            float depthR_4 = depthR_3 + (F32_exp((_S603 / scaleHeight_4))) * _S602;
+            float depthM_5 = depthM_4 + (F32_exp((_S603 / 1200.0f))) * _S602;
+            i_26 = i_26 + int(1);
             depthR_3 = depthR_4;
             depthM_4 = depthM_5;
         }
@@ -5514,24 +5803,24 @@ static Vector<float, 3>  airShadowLoss_0(SkyInput_0 * p_29, LayerShadowMap_0 * m
         depthR_3 = 0.0f;
         depthM_4 = 0.0f;
     }
-    float _S575 = clampf_0(jitter_1, 0.0f, 1.0f);
-    float _S576 = _S568 - _S567;
-    Vector<float, 3>  lossR_0 = none_1;
-    Vector<float, 3>  lossM_0 = none_1;
-    i_24 = int(0);
+    float _S604 = clampf_0(jitter_1, 0.0f, 1.0f);
+    float _S605 = _S597 - _S596;
+    Vector<float, 3>  lossR_0 = none_0;
+    Vector<float, 3>  lossM_0 = none_0;
+    i_26 = int(0);
     for(;;)
     {
-        if(i_24 < int(48))
+        if(i_26 < int(48))
         {
         }
         else
         {
             break;
         }
-        float s0_0 = _S567 + _S576 * float(i_24 * i_24) * 0.00043402778101154f;
-        int32_t _S577 = i_24 + int(1);
-        float dt_2 = _S567 + _S576 * float(_S577 * _S577) * 0.00043402778101154f - s0_0;
-        float ts_0 = s0_0 + _S575 * dt_2;
+        float s0_0 = _S596 + _S605 * float(i_26 * i_26) * 0.00043402778101154f;
+        int32_t _S606 = i_26 + int(1);
+        float dt_2 = _S596 + _S605 * float(_S606 * _S606) * 0.00043402778101154f - s0_0;
+        float ts_0 = s0_0 + _S604 * dt_2;
         float h_8 = altitudeFromQ_0(cGround_2 + 2.0f * ts_0 * b_9 + ts_0 * ts_0, planetRadius_6);
         if(h_8 < 0.0f)
         {
@@ -5541,63 +5830,63 @@ static Vector<float, 3>  airShadowLoss_0(SkyInput_0 * p_29, LayerShadowMap_0 * m
         {
             hc_2 = h_8;
         }
-        float _S578 = - hc_2;
-        float rhoR_0 = (F32_exp((_S578 / scaleHeight_4)));
-        float rhoM_0 = (F32_exp((_S578 / 1200.0f)));
-        float _S579 = ts_0 - s0_0;
-        float atR_0 = depthR_3 + rhoR_0 * _S579;
-        float atM_0 = depthM_4 + rhoM_0 * _S579;
+        float _S607 = - hc_2;
+        float rhoR_0 = (F32_exp((_S607 / scaleHeight_4)));
+        float rhoM_0 = (F32_exp((_S607 / 1200.0f)));
+        float _S608 = ts_0 - s0_0;
+        float atR_0 = depthR_3 + rhoR_0 * _S608;
+        float atM_0 = depthM_4 + rhoM_0 * _S608;
         float depthR_5 = depthR_3 + rhoR_0 * dt_2;
         float depthM_6 = depthM_4 + rhoM_0 * dt_2;
-        Vector<float, 3>  pw_0 = ro_7 + rd_7 * (Vector<float, 3> )ts_0;
-        float _S580 = layerMapTransmittance_0(mapA_1, pw_0);
-        float _S581 = layerMapTransmittance_0(mapB_1, pw_0);
-        float v_9 = _S580 * _S581;
+        Vector<float, 3>  pw_0 = ro_8 + rd_8 * (Vector<float, 3> )ts_0;
+        float _S609 = layerMapTransmittance_0(mapA_1, pw_0);
+        float _S610 = layerMapTransmittance_0(mapB_1, pw_0);
+        float v_9 = _S609 * _S610;
         if(v_9 >= 1.0f)
         {
-            i_24 = _S577;
+            i_26 = _S606;
             depthR_3 = depthR_5;
             depthM_4 = depthM_6;
             continue;
         }
-        Vector<float, 3>  _S582 = sampleTransmittanceLut_0(p_29, hc_2, lutMuFor_0(Vector<float, 3> (rd_7.x * ts_0, _S564 + _S565 * ts_0, rd_7.z * ts_0), _S560));
-        float _S583 = _S569 * atM_0;
-        Vector<float, 3>  w_7 = Vector<float, 3> ((F32_exp((- (betaR_2.x * atR_0 + _S583)))), (F32_exp((- (betaR_2.y * atR_0 + _S583)))), (F32_exp((- (betaR_2.z * atR_0 + _S583))))) * _S582 * (Vector<float, 3> )((1.0f - v_9) * dt_2);
-        Vector<float, 3>  _S584 = lossM_0 + w_7 * (Vector<float, 3> )rhoM_0;
+        Vector<float, 3>  _S611 = sampleTransmittanceLut_0(p_30, hc_2, lutMuFor_0(Vector<float, 3> (rd_8.x * ts_0, _S593 + _S594 * ts_0, rd_8.z * ts_0), _S589));
+        float _S612 = _S598 * atM_0;
+        Vector<float, 3>  w_7 = Vector<float, 3> ((F32_exp((- (betaR_2.x * atR_0 + _S612)))), (F32_exp((- (betaR_2.y * atR_0 + _S612)))), (F32_exp((- (betaR_2.z * atR_0 + _S612))))) * _S611 * (Vector<float, 3> )((1.0f - v_9) * dt_2);
+        Vector<float, 3>  _S613 = lossM_0 + w_7 * (Vector<float, 3> )rhoM_0;
         lossR_0 = lossR_0 + w_7 * (Vector<float, 3> )rhoR_0;
-        lossM_0 = _S584;
-        i_24 = _S577;
+        lossM_0 = _S613;
+        i_26 = _S606;
         depthR_3 = depthR_5;
         depthM_4 = depthM_6;
     }
-    Vector<float, 3>  _S585 = lossR_0 * betaR_2 * (Vector<float, 3> )phaseR_1 + lossM_0 * (Vector<float, 3> )(betaM_1 * phaseM_1);
-    float _S586 = sunIrradianceTop_0(p_29);
-    return _S585 * (Vector<float, 3> )_S586;
+    Vector<float, 3>  _S614 = lossR_0 * betaR_2 * (Vector<float, 3> )phaseR_1 + lossM_0 * (Vector<float, 3> )(betaM_1 * phaseM_1);
+    float _S615 = sunIrradianceTop_0(p_30);
+    return _S614 * (Vector<float, 3> )_S615;
 }
 
-static AirSegment_0 airSegment_0(SkyInput_0 * p_30, float originAltitude_2, Vector<float, 3>  rayDir_2, float dist_4, float u1_0, float u2_0)
+static AirSegment_0 airSegment_0(SkyInput_0 * p_31, float originAltitude_2, Vector<float, 3>  rayDir_2, float dist_4, float u1_0, float u2_0)
 {
     AirSegment_0 seg_0;
-    Vector<float, 3>  _S587 = Vector<float, 3> (0.0f, 0.0f, 0.0f);
-    (&seg_0)->airIn_0 = _S587;
+    Vector<float, 3>  _S616 = Vector<float, 3> (0.0f, 0.0f, 0.0f);
+    (&seg_0)->airIn_0 = _S616;
     (&seg_0)->airT_0 = Vector<float, 3> (1.0f, 1.0f, 1.0f);
     (&seg_0)->shadowAt_0 = -1.0f;
-    Vector<float, 3>  _S588 = sunDirection_0(p_30);
-    float _S589 = p_30->planetRadius_0;
+    Vector<float, 3>  _S617 = sunDirection_0(p_31);
+    float _S618 = p_31->planetRadius_0;
     float planetRadius_7;
-    if((p_30->planetRadius_0) > 1000.0f)
+    if((p_31->planetRadius_0) > 1000.0f)
     {
-        planetRadius_7 = _S589;
+        planetRadius_7 = _S618;
     }
     else
     {
         planetRadius_7 = 1000.0f;
     }
-    float _S590 = p_30->scaleHeight_0;
+    float _S619 = p_31->scaleHeight_0;
     float scaleHeight_5;
-    if((p_30->scaleHeight_0) > 1.0f)
+    if((p_31->scaleHeight_0) > 1.0f)
     {
-        scaleHeight_5 = _S590;
+        scaleHeight_5 = _S619;
     }
     else
     {
@@ -5613,21 +5902,21 @@ static AirSegment_0 airSegment_0(SkyInput_0 * p_30, float originAltitude_2, Vect
     {
         observerAltitude_3 = 0.0f;
     }
-    float _S591 = planetRadius_7 + observerAltitude_3;
-    float _S592 = rayDir_2.y;
-    float b_10 = _S591 * _S592;
+    float _S620 = planetRadius_7 + observerAltitude_3;
+    float _S621 = rayDir_2.y;
+    float b_10 = _S620 * _S621;
     float cGround_3 = shellC_0(observerAltitude_3, planetRadius_7, 0.0f);
     float tTop_3 = shellExit_0(b_10, shellC_0(observerAltitude_3, planetRadius_7, atmosphereHeight_3));
-    bool _S593;
+    bool _S622;
     if(tTop_3 <= 0.0f)
     {
-        _S593 = true;
+        _S622 = true;
     }
     else
     {
-        _S593 = !(dist_4 > 0.0f);
+        _S622 = !(dist_4 > 0.0f);
     }
-    if(_S593)
+    if(_S622)
     {
         return seg_0;
     }
@@ -5646,15 +5935,15 @@ static AirSegment_0 airSegment_0(SkyInput_0 * p_30, float originAltitude_2, Vect
         tMax_3 = dist_4;
     }
     Vector<float, 3>  betaR_3 = rayleighCoefficients_0();
-    float betaM_2 = mieCoefficient_0(p_30->turbidity_0);
+    float betaM_2 = mieCoefficient_0(p_31->turbidity_0);
     float betaMExt_2 = betaM_2 * 1.11000001430511475f;
-    float cosTheta_2 = clampf_0(dot_0(rayDir_2, _S588), -1.0f, 1.0f);
+    float cosTheta_2 = clampf_0(dot_0(rayDir_2, _S617), -1.0f, 1.0f);
     float phaseR_2 = 0.05968309938907623f * (1.0f + cosTheta_2 * cosTheta_2);
-    float g_21 = clampf_0(p_30->mieAnisotropy_0, -0.94999998807907104f, 0.94999998807907104f);
-    float _S594 = g_21 * g_21;
-    float hgDenom_2 = 1.0f + _S594 - 2.0f * g_21 * cosTheta_2;
-    float _S595 = 1.0f - _S594;
-    float _S596 = 12.56637096405029297f * hgDenom_2;
+    float g_22 = clampf_0(p_31->mieAnisotropy_0, -0.94999998807907104f, 0.94999998807907104f);
+    float _S623 = g_22 * g_22;
+    float hgDenom_2 = 1.0f + _S623 - 2.0f * g_22 * cosTheta_2;
+    float _S624 = 1.0f - _S623;
+    float _S625 = 12.56637096405029297f * hgDenom_2;
     if(hgDenom_2 > 9.99999997475242708e-07f)
     {
         observerAltitude_3 = hgDenom_2;
@@ -5663,28 +5952,28 @@ static AirSegment_0 airSegment_0(SkyInput_0 * p_30, float originAltitude_2, Vect
     {
         observerAltitude_3 = 9.99999997475242708e-07f;
     }
-    float phaseM_2 = _S595 / (_S596 * (F32_sqrt((observerAltitude_3))));
+    float phaseM_2 = _S624 / (_S625 * (F32_sqrt((observerAltitude_3))));
     float tPrev_2 = 0.0f;
-    Vector<float, 3>  sumR_1 = _S587;
-    Vector<float, 3>  sumM_1 = _S587;
+    Vector<float, 3>  sumR_1 = _S616;
+    Vector<float, 3>  sumM_1 = _S616;
     float u_4 = u1_0;
     float pickedFrom_0 = -1.0f;
     float pickedSpan_0 = 0.0f;
-    int32_t i_25 = int(0);
+    int32_t i_27 = int(0);
     float depthR_6 = 0.0f;
     float depthM_7 = 0.0f;
     float lumTotal_0 = 0.0f;
     for(;;)
     {
-        if(i_25 < int(24))
+        if(i_27 < int(24))
         {
         }
         else
         {
             break;
         }
-        int32_t _S597 = i_25 + int(1);
-        float tNext_2 = tMax_3 * float(_S597 * _S597) * 0.00173611112404615f;
+        int32_t _S626 = i_27 + int(1);
+        float tNext_2 = tMax_3 * float(_S626 * _S626) * 0.00173611112404615f;
         float dt_3 = tNext_2 - tPrev_2;
         float tMid_2 = (tPrev_2 + tNext_2) * 0.5f;
         float u_5;
@@ -5699,7 +5988,7 @@ static AirSegment_0 airSegment_0(SkyInput_0 * p_30, float originAltitude_2, Vect
             u_4 = u_5;
             pickedFrom_0 = pickedFrom_1;
             pickedSpan_0 = pickedSpan_1;
-            i_25 = _S597;
+            i_27 = _S626;
             continue;
         }
         float h_9 = altitudeFromQ_0(cGround_3 + 2.0f * tMid_2 * b_10 + tMid_2 * tMid_2, planetRadius_7);
@@ -5712,18 +6001,18 @@ static AirSegment_0 airSegment_0(SkyInput_0 * p_30, float originAltitude_2, Vect
         {
             hc_3 = h_9;
         }
-        float _S598 = - hc_3;
-        float dR_1 = (F32_exp((_S598 / scaleHeight_5))) * dt_3;
-        float dM_1 = (F32_exp((_S598 / 1200.0f))) * dt_3;
+        float _S627 = - hc_3;
+        float dR_1 = (F32_exp((_S627 / scaleHeight_5))) * dt_3;
+        float dM_1 = (F32_exp((_S627 / 1200.0f))) * dt_3;
         float midR_1 = depthR_6 + 0.5f * dR_1;
         float midM_1 = depthM_7 + 0.5f * dM_1;
         float depthR_7 = depthR_6 + dR_1;
         float depthM_8 = depthM_7 + dM_1;
-        Vector<float, 3>  _S599 = sampleTransmittanceLut_0(p_30, hc_3, lutMuFor_0(Vector<float, 3> (rayDir_2.x * tMid_2, _S591 + _S592 * tMid_2, rayDir_2.z * tMid_2), _S588));
-        float _S600 = betaMExt_2 * midM_1;
-        Vector<float, 3>  transmittance_2 = Vector<float, 3> ((F32_exp((- (betaR_3.x * midR_1 + _S600)))), (F32_exp((- (betaR_3.y * midR_1 + _S600)))), (F32_exp((- (betaR_3.z * midR_1 + _S600))))) * _S599;
-        Vector<float, 3>  _S601 = sumR_1 + transmittance_2 * (Vector<float, 3> )dR_1;
-        Vector<float, 3>  _S602 = sumM_1 + transmittance_2 * (Vector<float, 3> )dM_1;
+        Vector<float, 3>  _S628 = sampleTransmittanceLut_0(p_31, hc_3, lutMuFor_0(Vector<float, 3> (rayDir_2.x * tMid_2, _S620 + _S621 * tMid_2, rayDir_2.z * tMid_2), _S617));
+        float _S629 = betaMExt_2 * midM_1;
+        Vector<float, 3>  transmittance_2 = Vector<float, 3> ((F32_exp((- (betaR_3.x * midR_1 + _S629)))), (F32_exp((- (betaR_3.y * midR_1 + _S629)))), (F32_exp((- (betaR_3.z * midR_1 + _S629))))) * _S628;
+        Vector<float, 3>  _S630 = sumR_1 + transmittance_2 * (Vector<float, 3> )dR_1;
+        Vector<float, 3>  _S631 = sumM_1 + transmittance_2 * (Vector<float, 3> )dM_1;
         Vector<float, 3>  c_56 = transmittance_2 * (betaR_3 * (Vector<float, 3> )(phaseR_2 * dR_1) + (Vector<float, 3> )(betaM_2 * (phaseM_2 * dM_1)));
         float lum_0 = c_56.x + c_56.y + c_56.z;
         float lumTotal_1;
@@ -5752,8 +6041,8 @@ static AirSegment_0 airSegment_0(SkyInput_0 * p_30, float originAltitude_2, Vect
             pickedSpan_1 = pickedSpan_0;
             lumTotal_1 = lumTotal_0;
         }
-        sumR_1 = _S601;
-        sumM_1 = _S602;
+        sumR_1 = _S630;
+        sumM_1 = _S631;
         depthR_6 = depthR_7;
         depthM_7 = depthM_8;
         lumTotal_0 = lumTotal_1;
@@ -5761,12 +6050,12 @@ static AirSegment_0 airSegment_0(SkyInput_0 * p_30, float originAltitude_2, Vect
         u_4 = u_5;
         pickedFrom_0 = pickedFrom_1;
         pickedSpan_0 = pickedSpan_1;
-        i_25 = _S597;
+        i_27 = _S626;
     }
-    float _S603 = sunIrradianceTop_0(p_30);
-    (&seg_0)->airIn_0 = (sumR_1 * betaR_3 * (Vector<float, 3> )phaseR_2 + sumM_1 * (Vector<float, 3> )(betaM_2 * phaseM_2)) * (Vector<float, 3> )_S603;
-    float _S604 = betaMExt_2 * depthM_7;
-    (&seg_0)->airT_0 = Vector<float, 3> ((F32_exp((- (betaR_3.x * depthR_6 + _S604)))), (F32_exp((- (betaR_3.y * depthR_6 + _S604)))), (F32_exp((- (betaR_3.z * depthR_6 + _S604)))));
+    float _S632 = sunIrradianceTop_0(p_31);
+    (&seg_0)->airIn_0 = (sumR_1 * betaR_3 * (Vector<float, 3> )phaseR_2 + sumM_1 * (Vector<float, 3> )(betaM_2 * phaseM_2)) * (Vector<float, 3> )_S632;
+    float _S633 = betaMExt_2 * depthM_7;
+    (&seg_0)->airT_0 = Vector<float, 3> ((F32_exp((- (betaR_3.x * depthR_6 + _S633)))), (F32_exp((- (betaR_3.y * depthR_6 + _S633)))), (F32_exp((- (betaR_3.z * depthR_6 + _S633)))));
     if(pickedFrom_0 >= 0.0f)
     {
         (&seg_0)->shadowAt_0 = pickedFrom_0 + clampf_0(u2_0, 0.0f, 1.0f) * pickedSpan_0;
@@ -5774,44 +6063,44 @@ static AirSegment_0 airSegment_0(SkyInput_0 * p_30, float originAltitude_2, Vect
     return seg_0;
 }
 
-static float airShadow_0(Scene_0 * s_17, StructuredBuffer<float> bounds_9, StructuredBuffer<Vector<float, 2> > drift_6, Rng_0 * rng_7, AirSegment_0 * seg_1, Vector<float, 3>  ro_8, Vector<float, 3>  rd_8, int32_t * steps_7)
+static float airShadow_0(Scene_0 * s_18, StructuredBuffer<float> bounds_10, StructuredBuffer<Vector<float, 2> > drift_6, Rng_0 * rng_8, AirSegment_0 * seg_1, Vector<float, 3>  ro_9, Vector<float, 3>  rd_9, int32_t * steps_8)
 {
-    bool _S605;
-    if((s_17->aerialMode_0) < int(2))
+    bool _S634;
+    if((s_18->aerialMode_0) < int(2))
     {
-        _S605 = true;
+        _S634 = true;
     }
     else
     {
-        _S605 = (seg_1->shadowAt_0) < 0.0f;
+        _S634 = (seg_1->shadowAt_0) < 0.0f;
     }
-    if(_S605)
+    if(_S634)
     {
         return 1.0f;
     }
-    float _S606 = sceneTransmittance_0(s_17, bounds_9, drift_6, rng_7, ro_8 + rd_8 * (Vector<float, 3> )seg_1->shadowAt_0, s_17->sunDir_0, steps_7);
-    return _S606;
+    float _S635 = sceneTransmittance_0(s_18, bounds_10, drift_6, rng_8, ro_9 + rd_9 * (Vector<float, 3> )seg_1->shadowAt_0, s_18->sunDir_0, steps_8);
+    return _S635;
 }
 
-static Vector<float, 3>  sampleHG_0(Rng_0 * rng_8, Vector<float, 3>  wo_0, float g_22, float * cosT_6)
+static Vector<float, 3>  sampleHG_0(Rng_0 * rng_9, Vector<float, 3>  wo_0, float g_23, float * cosT_6)
 {
-    float _S607 = clamp_0(g_22, -0.99900001287460327f, 0.99900001287460327f);
-    float u1_1 = randFloat_0(rng_8);
-    float u2_1 = randFloat_0(rng_8);
-    if((F32_abs((_S607))) < 0.00100000004749745f)
+    float _S636 = clamp_0(g_23, -0.99900001287460327f, 0.99900001287460327f);
+    float u1_1 = randFloat_0(rng_9);
+    float u2_1 = randFloat_0(rng_9);
+    if((F32_abs((_S636))) < 0.00100000004749745f)
     {
         *cosT_6 = 1.0f - 2.0f * u1_1;
     }
     else
     {
-        float _S608 = _S607 * _S607;
-        float _S609 = 2.0f * _S607;
-        float s_18 = (1.0f - _S608) / (1.0f - _S607 + _S609 * u1_1);
-        *cosT_6 = (1.0f + _S608 - s_18 * s_18) / _S609;
+        float _S637 = _S636 * _S636;
+        float _S638 = 2.0f * _S636;
+        float s_19 = (1.0f - _S637) / (1.0f - _S636 + _S638 * u1_1);
+        *cosT_6 = (1.0f + _S637 - s_19 * s_19) / _S638;
     }
-    float _S610 = clamp_0(*cosT_6, -1.0f, 1.0f);
-    *cosT_6 = _S610;
-    float sinT_0 = (F32_sqrt(((F32_max((0.0f), (1.0f - _S610 * _S610))))));
+    float _S639 = clamp_0(*cosT_6, -1.0f, 1.0f);
+    *cosT_6 = _S639;
+    float sinT_0 = (F32_sqrt(((F32_max((0.0f), (1.0f - _S639 * _S639))))));
     float phi_0 = 6.28318548202514648f * u2_1;
     Vector<float, 3>  w_8 = normalize_0(wo_0);
     Vector<float, 3>  a_6;
@@ -5827,374 +6116,431 @@ static Vector<float, 3>  sampleHG_0(Rng_0 * rng_8, Vector<float, 3>  wo_0, float
     return normalize_0((Vector<float, 3> )(sinT_0 * (F32_cos((phi_0)))) * u_6 + (Vector<float, 3> )(sinT_0 * (F32_sin((phi_0)))) * cross_0(w_8, u_6) + (Vector<float, 3> )*cosT_6 * w_8);
 }
 
-static Vector<float, 3>  sampleDraine_0(Rng_0 * rng_9, Vector<float, 3>  wo_1, float g_23, float a_7, float * cosT_7)
+static Vector<float, 3>  sampleDraine_0(Rng_0 * rng_10, Vector<float, 3>  wo_1, float g_24, float a_7, float * cosT_7)
 {
-    Vector<float, 3>  dir_5 = sampleHG_0(rng_9, wo_1, g_23, cosT_7);
+    Vector<float, 3>  dir_6 = sampleHG_0(rng_10, wo_1, g_24, cosT_7);
     if(!(a_7 > 0.0f))
     {
-        return dir_5;
+        return dir_6;
     }
-    Vector<float, 3>  dir_6 = dir_5;
-    int32_t i_26 = int(0);
+    Vector<float, 3>  dir_7 = dir_6;
+    int32_t i_28 = int(0);
     for(;;)
     {
-        if(i_26 < int(64))
+        if(i_28 < int(64))
         {
         }
         else
         {
             break;
         }
-        float _S611 = randFloat_0(rng_9);
-        if((_S611 * (1.0f + a_7)) <= (1.0f + a_7 * *cosT_7 * *cosT_7))
+        float _S640 = randFloat_0(rng_10);
+        if((_S640 * (1.0f + a_7)) <= (1.0f + a_7 * *cosT_7 * *cosT_7))
         {
             break;
         }
-        Vector<float, 3>  _S612 = sampleHG_0(rng_9, wo_1, g_23, cosT_7);
-        int32_t i_27 = i_26 + int(1);
-        dir_6 = _S612;
-        i_26 = i_27;
-    }
-    return dir_6;
-}
-
-static Vector<float, 3>  samplePhaseDir_0(PhaseInput_0 * p_31, Rng_0 * rng_10, Vector<float, 3>  wo_2, float * weight_0)
-{
-    float cosT_8;
-    Vector<float, 3>  dir_7;
-    float _S613;
-    if((p_31->useIce_0) != int(0))
-    {
-        float _S614 = randFloat_0(rng_10);
-        if(_S614 < 0.72000002861022949f)
-        {
-            Vector<float, 3>  _S615 = sampleHG_0(rng_10, wo_2, 0.85000002384185791f, &cosT_8);
-            dir_7 = _S615;
-        }
-        else
-        {
-            Vector<float, 3>  _S616 = sampleHG_0(rng_10, wo_2, 0.0f, &cosT_8);
-            dir_7 = _S616;
-        }
-        float pdf_0 = 0.72000002861022949f * hg_0(cosT_8, 0.85000002384185791f) + 0.02228168956935406f;
-        if(pdf_0 > 9.99999971718068537e-10f)
-        {
-            _S613 = phaseIce_0(cosT_8) / pdf_0;
-        }
-        else
-        {
-            _S613 = 0.0f;
-        }
-        *weight_0 = _S613;
-    }
-    else
-    {
-        float _S617 = randFloat_0(rng_10);
-        if(_S617 < (p_31->draineW_0))
-        {
-            Vector<float, 3>  _S618 = sampleDraine_0(rng_10, wo_2, p_31->draineG_0, p_31->draineAlpha_0, &cosT_8);
-            dir_7 = _S618;
-        }
-        else
-        {
-            Vector<float, 3>  _S619 = sampleHG_0(rng_10, wo_2, p_31->hgG_0, &cosT_8);
-            dir_7 = _S619;
-        }
-        float _S620 = phaseLiquid_0(p_31, cosT_8);
-        if(_S620 > 9.99999971718068537e-10f)
-        {
-            _S613 = 1.0f;
-        }
-        else
-        {
-            _S613 = 0.0f;
-        }
-        *weight_0 = _S613;
+        Vector<float, 3>  _S641 = sampleHG_0(rng_10, wo_1, g_24, cosT_7);
+        int32_t i_29 = i_28 + int(1);
+        dir_7 = _S641;
+        i_28 = i_29;
     }
     return dir_7;
 }
 
-static TraceResult_0 trace_0(Scene_0 * s_19, PhaseInput_0 * ph_1, StructuredBuffer<float> bounds_10, StructuredBuffer<Vector<float, 2> > drift_7, Rng_0 * rng_11, Vector<float, 3>  ro_9, Vector<float, 3>  rd_9)
+static Vector<float, 3>  samplePhaseDir_0(PhaseInput_0 * p_32, Rng_0 * rng_11, Vector<float, 3>  wo_2, float * weight_0)
 {
-    TraceResult_0 r_13;
-    Vector<float, 3>  _S621 = Vector<float, 3> (0.0f, 0.0f, 0.0f);
-    (&r_13)->pathRadiance_0 = _S621;
-    (&r_13)->scatterEvents_0 = int(0);
-    (&r_13)->capped_0 = int(0);
-    (&r_13)->trackingSteps_0 = int(0);
-    Vector<float, 3>  throughput_0 = Vector<float, 3> (1.0f, 1.0f, 1.0f);
-    int32_t _S622 = (I32_min((s_19->maxBounces_0), (int(256))));
-    bool sunAlongCamera_0;
-    if((s_19->neeTentativeScale_0) > 0.0f)
+    float cosT_8;
+    Vector<float, 3>  dir_8;
+    float _S642;
+    if((p_32->useIce_0) != int(0))
     {
-        sunAlongCamera_0 = _S622 > int(0);
+        float _S643 = randFloat_0(rng_11);
+        if(_S643 < 0.72000002861022949f)
+        {
+            Vector<float, 3>  _S644 = sampleHG_0(rng_11, wo_2, 0.85000002384185791f, &cosT_8);
+            dir_8 = _S644;
+        }
+        else
+        {
+            Vector<float, 3>  _S645 = sampleHG_0(rng_11, wo_2, 0.0f, &cosT_8);
+            dir_8 = _S645;
+        }
+        float pdf_0 = 0.72000002861022949f * hg_0(cosT_8, 0.85000002384185791f) + 0.02228168956935406f;
+        if(pdf_0 > 9.99999971718068537e-10f)
+        {
+            _S642 = phaseIce_0(cosT_8) / pdf_0;
+        }
+        else
+        {
+            _S642 = 0.0f;
+        }
+        *weight_0 = _S642;
+    }
+    else
+    {
+        float _S646 = randFloat_0(rng_11);
+        if(_S646 < (p_32->draineW_0))
+        {
+            Vector<float, 3>  _S647 = sampleDraine_0(rng_11, wo_2, p_32->draineG_0, p_32->draineAlpha_0, &cosT_8);
+            dir_8 = _S647;
+        }
+        else
+        {
+            Vector<float, 3>  _S648 = sampleHG_0(rng_11, wo_2, p_32->hgG_0, &cosT_8);
+            dir_8 = _S648;
+        }
+        float _S649 = phaseLiquid_0(p_32, cosT_8);
+        if(_S649 > 9.99999971718068537e-10f)
+        {
+            _S642 = 1.0f;
+        }
+        else
+        {
+            _S642 = 0.0f;
+        }
+        *weight_0 = _S642;
+    }
+    return dir_8;
+}
+
+static bool pathScatter_0(Scene_0 * s_20, PhaseInput_0 * ph_1, StructuredBuffer<float> bounds_11, StructuredBuffer<Vector<float, 2> > drift_7, PathState_0 * st_1, Vector<float, 3>  p_33, int32_t layer_1, bool nee_0)
+{
+    Vector<float, 3>  _S650 = s_20->albedo_0;
+    PhaseInput_0 matterPhase_0;
+    Vector<float, 3>  matterAlbedo_1;
+    if(layer_1 != int(0))
+    {
+        matterPhase_0 = s_20->phase2_0;
+        matterAlbedo_1 = s_20->albedo2_0;
+    }
+    else
+    {
+        matterPhase_0 = *ph_1;
+        matterAlbedo_1 = _S650;
+    }
+    if(nee_0)
+    {
+        Vector<float, 3>  _S651 = s_20->sunDir_0;
+        float _S652 = sceneTransmittance_0(s_20, bounds_11, drift_7, &st_1->psRng_0, p_33 + s_20->sunDir_0 * (Vector<float, 3> )s_20->shadowOffset_0, s_20->sunDir_0, &st_1->psSteps_0);
+        if(_S652 > 0.0f)
+        {
+            float _S653 = dot_0(st_1->psDir_0, _S651);
+            PhaseInput_0 _S654 = matterPhase_0;
+            float _S655 = phaseAt_0(&_S654, _S653);
+            Vector<float, 3>  _S656 = st_1->psThroughput_0 * matterAlbedo_1 * (Vector<float, 3> )_S655 * (Vector<float, 3> )_S652;
+            Vector<float, 3>  _S657 = sunIrradianceAt_0(s_20, p_33);
+            st_1->psRadiance_0 = st_1->psRadiance_0 + _S656 * _S657;
+        }
+    }
+    PhaseInput_0 _S658 = matterPhase_0;
+    float w_9;
+    Vector<float, 3>  _S659 = samplePhaseDir_0(&_S658, &st_1->psRng_0, st_1->psDir_0, &w_9);
+    st_1->psThroughput_0 = st_1->psThroughput_0 * (matterAlbedo_1 * (Vector<float, 3> )w_9);
+    st_1->psOrigin_0 = p_33;
+    st_1->psDir_0 = _S659;
+    if((st_1->psBounce_0) >= (s_20->rrStartBounce_0))
+    {
+        float p2_0 = clamp_0((F32_max((st_1->psThroughput_0.x), ((F32_max((st_1->psThroughput_0.y), (st_1->psThroughput_0.z)))))), 0.05000000074505806f, 1.0f);
+        float _S660 = randFloat_0(&st_1->psRng_0);
+        if(_S660 > p2_0)
+        {
+            return false;
+        }
+        st_1->psThroughput_0 = st_1->psThroughput_0 / (Vector<float, 3> )p2_0;
+    }
+    return true;
+}
+
+static PathState_0 pathBegin_0(Scene_0 * s_21, PhaseInput_0 * ph_2, StructuredBuffer<float> bounds_12, StructuredBuffer<Vector<float, 2> > drift_8, Rng_0 * rng_12, Vector<float, 3>  ro_10, Vector<float, 3>  rd_10)
+{
+    PathState_0 st_2;
+    Vector<float, 3>  _S661 = Vector<float, 3> (0.0f, 0.0f, 0.0f);
+    (&st_2)->psRadiance_0 = _S661;
+    (&st_2)->psThroughput_0 = Vector<float, 3> (1.0f, 1.0f, 1.0f);
+    (&st_2)->psOrigin_0 = ro_10;
+    (&st_2)->psDir_0 = rd_10;
+    (&st_2)->psRng_0 = *rng_12;
+    (&st_2)->psBounce_0 = int(0);
+    (&st_2)->psAlive_0 = int(0);
+    (&st_2)->psEvents_0 = int(0);
+    (&st_2)->psCapped_0 = int(0);
+    (&st_2)->psSteps_0 = int(0);
+    int32_t _S662 = (I32_min((s_21->maxBounces_0), (int(256))));
+    bool sunAlongCamera_0;
+    if((s_21->neeTentativeScale_0) > 0.0f)
+    {
+        sunAlongCamera_0 = _S662 > int(0);
     }
     else
     {
         sunAlongCamera_0 = false;
     }
+    int32_t cameraHit_0 = int(0);
+    Vector<float, 3>  cameraHitAt_0 = _S661;
+    int32_t cameraHitLayer_0 = int(0);
+    float cameraResume_0 = 0.0f;
     if(sunAlongCamera_0)
     {
-        Rng_0 _S623 = *rng_11;
-        Rng_0 _S624 = splitRng_0(&_S623, 1510U);
-        Rng_0 segmentRng_0 = _S624;
-        Rng_0 _S625 = *rng_11;
-        Rng_0 _S626 = splitRng_0(&_S625, 1511U);
-        Rng_0 _S627 = _S626;
-        Vector<float, 3>  _S628 = cameraSegmentSun_0(s_19, ph_1, bounds_10, drift_7, &segmentRng_0, &_S627, ro_9, rd_9, &(&r_13)->trackingSteps_0);
-        (&r_13)->pathRadiance_0 = (&r_13)->pathRadiance_0 + _S628;
+        Rng_0 _S663 = splitRng_0(rng_12, 1510U);
+        Rng_0 segmentRng_0 = _S663;
+        Rng_0 _S664 = splitRng_0(rng_12, 1511U);
+        Rng_0 _S665 = _S664;
+        Vector<float, 3>  _S666 = cameraSegmentSun_0(s_21, ph_2, bounds_12, drift_8, &segmentRng_0, &_S665, ro_10, rd_10, &(&st_2)->psSteps_0, &cameraHit_0, &cameraHitAt_0, &cameraHitLayer_0, &cameraResume_0);
+        (&st_2)->psRadiance_0 = (&st_2)->psRadiance_0 + (&st_2)->psThroughput_0 * _S666;
     }
-    bool _S629;
-    if(((&s_19->environment_0)->envMode_0) == int(1))
+    bool airOn_0;
+    if(((&s_21->environment_0)->envMode_0) == int(1))
     {
-        _S629 = (s_19->aerialMode_0) != int(0);
+        airOn_0 = (s_21->aerialMode_0) != int(0);
     }
     else
     {
-        _S629 = false;
+        airOn_0 = false;
     }
-    Rng_0 _S630 = *rng_11;
-    Rng_0 _S631 = splitRng_0(&_S630, 2590U);
-    Rng_0 airRng_0 = _S631;
-    Vector<float, 3>  env_0 = ro_9;
-    Vector<float, 3>  _S632 = rd_9;
-    int32_t bounce_0 = int(0);
-    Vector<float, 3>  throughput_1 = throughput_0;
-    for(;;)
+    Rng_0 _S667 = splitRng_0(rng_12, 2590U);
+    Rng_0 airRng_0 = _S667;
+    if(_S662 <= int(0))
     {
-        if(bounce_0 < int(256))
-        {
-        }
-        else
-        {
-            break;
-        }
-        if(bounce_0 >= _S622)
-        {
-            (&r_13)->capped_0 = int(1);
-            break;
-        }
-        Vector<float, 3>  p_32;
-        int32_t layer_1;
-        bool _S633 = sceneFreeFlight_0(s_19, bounds_10, drift_7, rng_11, env_0, _S632, &p_32, &layer_1, &(&r_13)->trackingSteps_0);
-        if(!_S633)
-        {
-            bool _S634 = (s_19->airMapOn_0) != int(0);
-            float groundLit_2;
-            if(_S634)
-            {
-                float _S635 = groundShadow_0(&s_19->airMapIce_0, &s_19->airMapCu_0, env_0, _S632);
-                groundLit_2 = _S635;
-            }
-            else
-            {
-                groundLit_2 = 1.0f;
-            }
-            bool _S636 = bounce_0 == int(0);
-            Vector<float, 3>  _S637 = environmentRadiance_0(&s_19->environment_0, env_0, _S632, _S636, groundLit_2);
-            if(_S636)
-            {
-                sunAlongCamera_0 = _S629;
-            }
-            else
-            {
-                sunAlongCamera_0 = false;
-            }
-            if(sunAlongCamera_0)
-            {
-                sunAlongCamera_0 = (s_19->aerialMode_0) >= int(2);
-            }
-            else
-            {
-                sunAlongCamera_0 = false;
-            }
-            if(sunAlongCamera_0)
-            {
-                float u1_2 = randFloat_0(&airRng_0);
-                float u2_2 = randFloat_0(&airRng_0);
-                if(_S634)
-                {
-                    Vector<float, 3>  _S638 = airShadowLoss_0(&(&s_19->environment_0)->sky_0, &s_19->airMapIce_0, &s_19->airMapCu_0, env_0, _S632, 1.00000001504746622e+30f, u2_2);
-                    env_0 = max_0(_S637 - _S638, _S621);
-                }
-                else
-                {
-                    AirSegment_0 _S639 = airSegment_0(&(&s_19->environment_0)->sky_0, env_0.y, _S632, 1.00000001504746622e+30f, u1_2, u2_2);
-                    AirSegment_0 _S640 = _S639;
-                    float _S641 = airShadow_0(s_19, bounds_10, drift_7, &airRng_0, &_S640, env_0, _S632, &(&r_13)->trackingSteps_0);
-                    env_0 = _S637 - _S639.airIn_0 * (Vector<float, 3> )(1.0f - _S641);
-                }
-            }
-            else
-            {
-                env_0 = _S637;
-            }
-            (&r_13)->pathRadiance_0 = (&r_13)->pathRadiance_0 + throughput_1 * env_0;
-            break;
-        }
-        (&r_13)->scatterEvents_0 = (&r_13)->scatterEvents_0 + int(1);
-        bool _S642 = bounce_0 == int(0);
-        bool _S643;
-        if(_S642)
-        {
-            _S643 = _S629;
-        }
-        else
-        {
-            _S643 = false;
-        }
-        bool _S644;
-        Vector<float, 3>  throughput_2;
-        if(_S643)
-        {
-            float u1_3 = randFloat_0(&airRng_0);
-            float u2_3 = randFloat_0(&airRng_0);
-            float dist_5 = length_0(p_32 - env_0);
-            AirSegment_0 _S645 = airSegment_0(&(&s_19->environment_0)->sky_0, env_0.y, _S632, dist_5, u1_3, u2_3);
-            if((s_19->aerialMode_0) >= int(2))
-            {
-                _S644 = (s_19->airMapOn_0) != int(0);
-            }
-            else
-            {
-                _S644 = false;
-            }
-            if(_S644)
-            {
-                Vector<float, 3>  _S646 = airShadowLoss_0(&(&s_19->environment_0)->sky_0, &s_19->airMapIce_0, &s_19->airMapCu_0, env_0, _S632, dist_5, u2_3);
-                throughput_2 = max_0(_S645.airIn_0 - _S646, _S621);
-            }
-            else
-            {
-                AirSegment_0 _S647 = _S645;
-                float _S648 = airShadow_0(s_19, bounds_10, drift_7, &airRng_0, &_S647, env_0, _S632, &(&r_13)->trackingSteps_0);
-                throughput_2 = _S645.airIn_0 * (Vector<float, 3> )_S648;
-            }
-            (&r_13)->pathRadiance_0 = (&r_13)->pathRadiance_0 + throughput_1 * throughput_2;
-            throughput_2 = throughput_1 * _S645.airT_0;
-        }
-        else
-        {
-            throughput_2 = throughput_1;
-        }
-        Vector<float, 3>  _S649 = s_19->albedo_0;
-        Vector<float, 3>  matterAlbedo_1;
-        PhaseInput_0 matterPhase_0;
-        if(layer_1 != int(0))
-        {
-            matterPhase_0 = s_19->phase2_0;
-            matterAlbedo_1 = s_19->albedo2_0;
-        }
-        else
-        {
-            matterPhase_0 = *ph_1;
-            matterAlbedo_1 = _S649;
-        }
-        if(_S642)
-        {
-            _S644 = sunAlongCamera_0;
-        }
-        else
-        {
-            _S644 = false;
-        }
-        if(!_S644)
-        {
-            Vector<float, 3>  _S650 = s_19->sunDir_0;
-            float _S651 = sceneTransmittance_0(s_19, bounds_10, drift_7, rng_11, p_32 + s_19->sunDir_0 * (Vector<float, 3> )s_19->shadowOffset_0, s_19->sunDir_0, &(&r_13)->trackingSteps_0);
-            if(_S651 > 0.0f)
-            {
-                float _S652 = dot_0(_S632, _S650);
-                PhaseInput_0 _S653 = matterPhase_0;
-                float _S654 = phaseAt_0(&_S653, _S652);
-                Vector<float, 3>  _S655 = throughput_2 * matterAlbedo_1 * (Vector<float, 3> )_S654 * (Vector<float, 3> )_S651;
-                Vector<float, 3>  _S656 = sunIrradianceAt_0(s_19, p_32);
-                (&r_13)->pathRadiance_0 = (&r_13)->pathRadiance_0 + _S655 * _S656;
-            }
-        }
-        PhaseInput_0 _S657 = matterPhase_0;
-        float w_9;
-        Vector<float, 3>  _S658 = samplePhaseDir_0(&_S657, rng_11, _S632, &w_9);
-        Vector<float, 3>  throughput_3 = throughput_2 * (matterAlbedo_1 * (Vector<float, 3> )w_9);
-        Vector<float, 3>  _S659 = p_32;
-        if(bounce_0 >= (s_19->rrStartBounce_0))
-        {
-            float p2_0 = clamp_0((F32_max((throughput_3.x), ((F32_max((throughput_3.y), (throughput_3.z)))))), 0.05000000074505806f, 1.0f);
-            float _S660 = randFloat_0(rng_11);
-            if(_S660 > p2_0)
-            {
-                break;
-            }
-            throughput_1 = throughput_3 / (Vector<float, 3> )p2_0;
-        }
-        else
-        {
-            throughput_1 = throughput_3;
-        }
-        int32_t bounce_1 = bounce_0 + int(1);
-        env_0 = _S659;
-        _S632 = _S658;
-        bounce_0 = bounce_1;
+        (&st_2)->psCapped_0 = int(1);
+        return st_2;
     }
-    return r_13;
+    Vector<float, 3>  p_34;
+    int32_t layer_2;
+    bool collided_0;
+    if(sunAlongCamera_0)
+    {
+        collided_0 = cameraHit_0 != int(2);
+    }
+    else
+    {
+        collided_0 = false;
+    }
+    if(collided_0)
+    {
+        bool _S668 = cameraHit_0 == int(1);
+        p_34 = cameraHitAt_0;
+        layer_2 = cameraHitLayer_0;
+        collided_0 = _S668;
+    }
+    else
+    {
+        if(sunAlongCamera_0)
+        {
+            bool _S669 = sceneFreeFlight_0(s_21, bounds_12, drift_8, &(&st_2)->psRng_0, ro_10 + rd_10 * (Vector<float, 3> )cameraResume_0, rd_10, &p_34, &layer_2, &(&st_2)->psSteps_0);
+            collided_0 = _S669;
+        }
+        else
+        {
+            bool _S670 = sceneFreeFlight_0(s_21, bounds_12, drift_8, &(&st_2)->psRng_0, ro_10, rd_10, &p_34, &layer_2, &(&st_2)->psSteps_0);
+            collided_0 = _S670;
+        }
+    }
+    Vector<float, 3>  env_0;
+    if(!collided_0)
+    {
+        Vector<float, 3>  _S671 = pathEnvironment_0(s_21, ro_10, rd_10, true);
+        if(airOn_0)
+        {
+            sunAlongCamera_0 = (s_21->aerialMode_0) >= int(2);
+        }
+        else
+        {
+            sunAlongCamera_0 = false;
+        }
+        if(sunAlongCamera_0)
+        {
+            float u1_2 = randFloat_0(&airRng_0);
+            float u2_2 = randFloat_0(&airRng_0);
+            if((s_21->airMapOn_0) != int(0))
+            {
+                Vector<float, 3>  _S672 = airShadowLoss_0(&(&s_21->environment_0)->sky_0, &s_21->airMapIce_0, &s_21->airMapCu_0, ro_10, rd_10, 1.00000001504746622e+30f, u2_2);
+                env_0 = max_0(_S671 - _S672, _S661);
+            }
+            else
+            {
+                AirSegment_0 _S673 = airSegment_0(&(&s_21->environment_0)->sky_0, ro_10.y, rd_10, 1.00000001504746622e+30f, u1_2, u2_2);
+                AirSegment_0 _S674 = _S673;
+                float _S675 = airShadow_0(s_21, bounds_12, drift_8, &airRng_0, &_S674, ro_10, rd_10, &(&st_2)->psSteps_0);
+                env_0 = _S671 - _S673.airIn_0 * (Vector<float, 3> )(1.0f - _S675);
+            }
+        }
+        else
+        {
+            env_0 = _S671;
+        }
+        (&st_2)->psRadiance_0 = (&st_2)->psRadiance_0 + (&st_2)->psThroughput_0 * env_0;
+        return st_2;
+    }
+    (&st_2)->psEvents_0 = (&st_2)->psEvents_0 + int(1);
+    if(airOn_0)
+    {
+        float u1_3 = randFloat_0(&airRng_0);
+        float u2_3 = randFloat_0(&airRng_0);
+        float dist_5 = length_0(p_34 - ro_10);
+        AirSegment_0 _S676 = airSegment_0(&(&s_21->environment_0)->sky_0, ro_10.y, rd_10, dist_5, u1_3, u2_3);
+        if((s_21->aerialMode_0) >= int(2))
+        {
+            airOn_0 = (s_21->airMapOn_0) != int(0);
+        }
+        else
+        {
+            airOn_0 = false;
+        }
+        if(airOn_0)
+        {
+            Vector<float, 3>  _S677 = airShadowLoss_0(&(&s_21->environment_0)->sky_0, &s_21->airMapIce_0, &s_21->airMapCu_0, ro_10, rd_10, dist_5, u2_3);
+            env_0 = max_0(_S676.airIn_0 - _S677, _S661);
+        }
+        else
+        {
+            AirSegment_0 _S678 = _S676;
+            float _S679 = airShadow_0(s_21, bounds_12, drift_8, &airRng_0, &_S678, ro_10, rd_10, &(&st_2)->psSteps_0);
+            env_0 = _S676.airIn_0 * (Vector<float, 3> )_S679;
+        }
+        (&st_2)->psRadiance_0 = (&st_2)->psRadiance_0 + (&st_2)->psThroughput_0 * env_0;
+        (&st_2)->psThroughput_0 = (&st_2)->psThroughput_0 * _S676.airT_0;
+    }
+    bool _S680 = pathScatter_0(s_21, ph_2, bounds_12, drift_8, &st_2, p_34, layer_2, !sunAlongCamera_0);
+    if(_S680)
+    {
+        (&st_2)->psBounce_0 = int(1);
+        (&st_2)->psAlive_0 = int(1);
+    }
+    return st_2;
 }
 
-static Vector<float, 3>  renderSample_0(Scene_0 * s_20, PhaseInput_0 * ph_2, StructuredBuffer<float> bounds_11, StructuredBuffer<Vector<float, 2> > drift_8, Vector<float, 3>  ro_10, Vector<float, 3>  rd_10, uint32_t seed_2)
+static void pathBounce_0(Scene_0 * s_22, PhaseInput_0 * ph_3, StructuredBuffer<float> bounds_13, StructuredBuffer<Vector<float, 2> > drift_9, PathState_0 * st_3)
 {
-    Rng_0 rng_12 = makeRng_0(seed_2);
-    TraceResult_0 _S661 = trace_0(s_20, ph_2, bounds_11, drift_8, &rng_12, ro_10, rd_10);
-    return _S661.pathRadiance_0;
-}
-
-void _cpuRenderRays(void* _S662, void* entryPointParams_0, void* _S663)
-{
-    ComputeThreadVaryingInput * _S664 = (slang_bit_cast<ComputeThreadVaryingInput *>(_S662));
-    int32_t i_28 = int32_t((_S664->groupID * Vector<uint32_t, 3> (64U, 1U, 1U) + _S664->groupThreadID).x);
-    if(i_28 >= ((slang_bit_cast<EntryPointParams_0*>(entryPointParams_0))->count_0))
+    if((st_3->psAlive_0) == int(0))
     {
         return;
     }
-    Vector<float, 3>  * _S665 = (&((slang_bit_cast<EntryPointParams_0*>(entryPointParams_0))->outRadiance_0)[i_28]);
-    Vector<float, 3>  _S666 = renderSample_0(&(slang_bit_cast<EntryPointParams_0*>(entryPointParams_0))->scene_0, &(slang_bit_cast<EntryPointParams_0*>(entryPointParams_0))->phase_0, (slang_bit_cast<EntryPointParams_0*>(entryPointParams_0))->bounds_0, (slang_bit_cast<EntryPointParams_0*>(entryPointParams_0))->drift_0, (slang_bit_cast<EntryPointParams_0*>(entryPointParams_0))->origins_0.Load(i_28), (slang_bit_cast<EntryPointParams_0*>(entryPointParams_0))->directions_0.Load(i_28), (slang_bit_cast<EntryPointParams_0*>(entryPointParams_0))->seed_0 + uint32_t(i_28));
-    *_S665 = _S666;
+    if((st_3->psBounce_0) >= (I32_min((s_22->maxBounces_0), (int(256)))))
+    {
+        st_3->psCapped_0 = int(1);
+        st_3->psAlive_0 = int(0);
+        return;
+    }
+    Vector<float, 3>  p_35;
+    int32_t layer_3;
+    bool _S681 = sceneFreeFlight_0(s_22, bounds_13, drift_9, &st_3->psRng_0, st_3->psOrigin_0, st_3->psDir_0, &p_35, &layer_3, &st_3->psSteps_0);
+    if(!_S681)
+    {
+        Vector<float, 3>  _S682 = st_3->psThroughput_0;
+        Vector<float, 3>  _S683 = pathEnvironment_0(s_22, st_3->psOrigin_0, st_3->psDir_0, false);
+        st_3->psRadiance_0 = st_3->psRadiance_0 + _S682 * _S683;
+        st_3->psAlive_0 = int(0);
+        return;
+    }
+    st_3->psEvents_0 = st_3->psEvents_0 + int(1);
+    bool _S684 = pathScatter_0(s_22, ph_3, bounds_13, drift_9, st_3, p_35, layer_3, true);
+    if(_S684)
+    {
+        st_3->psBounce_0 = st_3->psBounce_0 + int(1);
+    }
+    else
+    {
+        st_3->psAlive_0 = int(0);
+    }
     return;
 }
 
-static void layerMapColumn_0(Medium_0 * med_0, StructuredBuffer<Vector<float, 2> > drift_9, LayerShadowMap_0 * m_15, int32_t texel_0, RWStructuredBuffer<float> outTexels_1)
+static TraceResult_0 trace_0(Scene_0 * s_23, PhaseInput_0 * ph_4, StructuredBuffer<float> bounds_14, StructuredBuffer<Vector<float, 2> > drift_10, Rng_0 * rng_13, Vector<float, 3>  ro_11, Vector<float, 3>  rd_11)
 {
-    int32_t _S667 = m_15->smDimU_0;
-    int32_t stride_0 = m_15->smDimU_0 * m_15->smDimV_0;
-    bool _S668;
-    if(texel_0 < int(0))
+    Rng_0 _S685 = *rng_13;
+    PathState_0 _S686 = pathBegin_0(s_23, ph_4, bounds_14, drift_10, &_S685, ro_11, rd_11);
+    PathState_0 st_4 = _S686;
+    int32_t i_30 = int(1);
+    for(;;)
     {
-        _S668 = true;
+        bool _S687;
+        if(i_30 < int(256))
+        {
+            _S687 = ((&st_4)->psAlive_0) != int(0);
+        }
+        else
+        {
+            _S687 = false;
+        }
+        if(_S687)
+        {
+        }
+        else
+        {
+            break;
+        }
+        pathBounce_0(s_23, ph_4, bounds_14, drift_10, &st_4);
+        i_30 = i_30 + int(1);
     }
-    else
+    if(((&st_4)->psAlive_0) != int(0))
     {
-        _S668 = texel_0 >= stride_0;
+        (&st_4)->psCapped_0 = int(1);
     }
-    if(_S668)
+    *rng_13 = (&st_4)->psRng_0;
+    TraceResult_0 r_13;
+    (&r_13)->pathRadiance_0 = (&st_4)->psRadiance_0;
+    (&r_13)->scatterEvents_0 = (&st_4)->psEvents_0;
+    (&r_13)->capped_0 = (&st_4)->psCapped_0;
+    (&r_13)->trackingSteps_0 = (&st_4)->psSteps_0;
+    return r_13;
+}
+
+static Vector<float, 3>  renderSample_0(Scene_0 * s_24, PhaseInput_0 * ph_5, StructuredBuffer<float> bounds_15, StructuredBuffer<Vector<float, 2> > drift_11, Vector<float, 3>  ro_12, Vector<float, 3>  rd_12, uint32_t seed_2)
+{
+    Rng_0 rng_14 = makeRng_0(seed_2);
+    TraceResult_0 _S688 = trace_0(s_24, ph_5, bounds_15, drift_11, &rng_14, ro_12, rd_12);
+    return _S688.pathRadiance_0;
+}
+
+void _cpuRenderRays(void* _S689, void* entryPointParams_0, void* _S690)
+{
+    ComputeThreadVaryingInput * _S691 = (slang_bit_cast<ComputeThreadVaryingInput *>(_S689));
+    int32_t i_31 = int32_t((_S691->groupID * Vector<uint32_t, 3> (64U, 1U, 1U) + _S691->groupThreadID).x);
+    if(i_31 >= ((slang_bit_cast<EntryPointParams_0*>(entryPointParams_0))->count_0))
     {
         return;
     }
-    int32_t iu_1 = texel_0 % _S667;
-    int32_t iv_1 = texel_0 / _S667;
-    Vector<float, 2>  _S669 = m_15->smLo_0;
-    Vector<float, 2>  _S670 = m_15->smTexel_0;
-    Vector<float, 2>  _S671 = m_15->smCentre_0 + m_15->smAxisU_0 * (Vector<float, 2> )(m_15->smLo_0.x + (float(iu_1) + 0.5f) * m_15->smTexel_0.x);
-    Vector<float, 2>  _S672 = airMapAxisV_0(m_15);
-    Vector<float, 2>  q_14 = _S671 + _S672 * (Vector<float, 2> )(_S669.y + (float(iv_1) + 0.5f) * _S670.y);
-    Vector<float, 3>  base_0 = Vector<float, 3> (q_14.x, m_15->smBottom_0, q_14.y);
-    Vector<float, 3>  _S673 = m_15->smSun_0;
-    int32_t _S674 = m_15->smSlices_0;
-    int32_t _S675 = m_15->smSlices_0 - int(1);
-    float _S676 = (m_15->smTop_0 - m_15->smBottom_0) / (float(_S675) * m_15->smSun_0.y);
-    float _S677 = (F32_max((m_15->smStep_0), (1.0f)));
-    float t0_5;
-    float t1_5;
-    bool _S678 = slabRange_0(med_0, base_0, m_15->smSun_0, &t0_5, &t1_5);
-    *(&(outTexels_1)[_S675 * stride_0 + texel_0]) = 1.0f;
-    int32_t k_12 = _S674 - int(2);
+    Vector<float, 3>  * _S692 = (&((slang_bit_cast<EntryPointParams_0*>(entryPointParams_0))->outRadiance_0)[i_31]);
+    Vector<float, 3>  _S693 = renderSample_0(&(slang_bit_cast<EntryPointParams_0*>(entryPointParams_0))->scene_0, &(slang_bit_cast<EntryPointParams_0*>(entryPointParams_0))->phase_0, (slang_bit_cast<EntryPointParams_0*>(entryPointParams_0))->bounds_0, (slang_bit_cast<EntryPointParams_0*>(entryPointParams_0))->drift_0, (slang_bit_cast<EntryPointParams_0*>(entryPointParams_0))->origins_0.Load(i_31), (slang_bit_cast<EntryPointParams_0*>(entryPointParams_0))->directions_0.Load(i_31), (slang_bit_cast<EntryPointParams_0*>(entryPointParams_0))->seed_0 + uint32_t(i_31));
+    *_S692 = _S693;
+    return;
+}
+
+static void layerMapColumn_0(Medium_0 * med_0, StructuredBuffer<Vector<float, 2> > drift_12, LayerShadowMap_0 * m_16, int32_t texel_0, RWStructuredBuffer<float> outTexels_1)
+{
+    int32_t _S694 = m_16->smDimU_0;
+    int32_t stride_0 = m_16->smDimU_0 * m_16->smDimV_0;
+    bool _S695;
+    if(texel_0 < int(0))
+    {
+        _S695 = true;
+    }
+    else
+    {
+        _S695 = texel_0 >= stride_0;
+    }
+    if(_S695)
+    {
+        return;
+    }
+    int32_t iu_1 = texel_0 % _S694;
+    int32_t iv_1 = texel_0 / _S694;
+    Vector<float, 2>  _S696 = m_16->smLo_0;
+    Vector<float, 2>  _S697 = m_16->smTexel_0;
+    Vector<float, 2>  _S698 = m_16->smCentre_0 + m_16->smAxisU_0 * (Vector<float, 2> )(m_16->smLo_0.x + (float(iu_1) + 0.5f) * m_16->smTexel_0.x);
+    Vector<float, 2>  _S699 = airMapAxisV_0(m_16);
+    Vector<float, 2>  q_14 = _S698 + _S699 * (Vector<float, 2> )(_S696.y + (float(iv_1) + 0.5f) * _S697.y);
+    Vector<float, 3>  base_0 = Vector<float, 3> (q_14.x, m_16->smBottom_0, q_14.y);
+    Vector<float, 3>  _S700 = m_16->smSun_0;
+    int32_t _S701 = m_16->smSlices_0;
+    int32_t _S702 = m_16->smSlices_0 - int(1);
+    float _S703 = (m_16->smTop_0 - m_16->smBottom_0) / (float(_S702) * m_16->smSun_0.y);
+    float _S704 = (F32_max((m_16->smStep_0), (1.0f)));
+    float t0_6;
+    float t1_6;
+    bool _S705 = slabRange_0(med_0, base_0, m_16->smSun_0, &t0_6, &t1_6);
+    *(&(outTexels_1)[_S702 * stride_0 + texel_0]) = 1.0f;
+    int32_t k_12 = _S701 - int(2);
     float tau_0 = 0.0f;
     for(;;)
     {
@@ -6205,24 +6551,24 @@ static void layerMapColumn_0(Medium_0 * med_0, StructuredBuffer<Vector<float, 2>
         {
             break;
         }
-        if(_S678)
+        if(_S705)
         {
-            _S668 = tau_0 < 12.0f;
+            _S695 = tau_0 < 12.0f;
         }
         else
         {
-            _S668 = false;
+            _S695 = false;
         }
         float tau_1;
-        if(_S668)
+        if(_S695)
         {
-            float _S679 = (F32_max((float(k_12) * _S676), (t0_5)));
-            float _S680 = (F32_min((float(k_12 + int(1)) * _S676), (t1_5)));
-            if(_S680 > _S679)
+            float _S706 = (F32_max((float(k_12) * _S703), (t0_6)));
+            float _S707 = (F32_min((float(k_12 + int(1)) * _S703), (t1_6)));
+            if(_S707 > _S706)
             {
-                float _S681 = _S680 - _S679;
-                int32_t n_0 = clamp_1(int32_t((F32_ceil((_S681 / _S677)))), int(1), int(1024));
-                float _S682 = _S681 / float(n_0);
+                float _S708 = _S707 - _S706;
+                int32_t n_0 = clamp_1(int32_t((F32_ceil((_S708 / _S704)))), int(1), int(1024));
+                float _S709 = _S708 / float(n_0);
                 int32_t j_13 = int(0);
                 tau_1 = tau_0;
                 for(;;)
@@ -6234,8 +6580,8 @@ static void layerMapColumn_0(Medium_0 * med_0, StructuredBuffer<Vector<float, 2>
                     {
                         break;
                     }
-                    float _S683 = densityAt_0(med_0, drift_9, base_0 + _S673 * (Vector<float, 3> )(_S679 + (float(j_13) + 0.5f) * _S682));
-                    float tau_2 = tau_1 + _S683 * _S682;
+                    float _S710 = densityAt_0(med_0, drift_12, base_0 + _S700 * (Vector<float, 3> )(_S706 + (float(j_13) + 0.5f) * _S709));
+                    float tau_2 = tau_1 + _S710 * _S709;
                     j_13 = j_13 + int(1);
                     tau_1 = tau_2;
                 }
@@ -6249,32 +6595,32 @@ static void layerMapColumn_0(Medium_0 * med_0, StructuredBuffer<Vector<float, 2>
         {
             tau_1 = tau_0;
         }
-        float * _S684 = (&(outTexels_1)[k_12 * stride_0 + texel_0]);
-        float _S685;
+        float * _S711 = (&(outTexels_1)[k_12 * stride_0 + texel_0]);
+        float _S712;
         if(tau_1 < 12.0f)
         {
-            _S685 = (F32_exp((- tau_1)));
+            _S712 = (F32_exp((- tau_1)));
         }
         else
         {
-            _S685 = 0.0f;
+            _S712 = 0.0f;
         }
-        *_S684 = _S685;
+        *_S711 = _S712;
         k_12 = k_12 - int(1);
         tau_0 = tau_1;
     }
     return;
 }
 
-void _cpuBuildAirMap(void* _S686, void* entryPointParams_1, void* _S687)
+void _cpuBuildAirMap(void* _S713, void* entryPointParams_1, void* _S714)
 {
-    ComputeThreadVaryingInput * _S688 = (slang_bit_cast<ComputeThreadVaryingInput *>(_S686));
-    int32_t i_29 = int32_t((_S688->groupID * Vector<uint32_t, 3> (64U, 1U, 1U) + _S688->groupThreadID).x);
-    if(i_29 >= ((slang_bit_cast<EntryPointParams_1*>(entryPointParams_1))->count_1))
+    ComputeThreadVaryingInput * _S715 = (slang_bit_cast<ComputeThreadVaryingInput *>(_S713));
+    int32_t i_32 = int32_t((_S715->groupID * Vector<uint32_t, 3> (64U, 1U, 1U) + _S715->groupThreadID).x);
+    if(i_32 >= ((slang_bit_cast<EntryPointParams_1*>(entryPointParams_1))->count_1))
     {
         return;
     }
-    layerMapColumn_0(&(slang_bit_cast<EntryPointParams_1*>(entryPointParams_1))->medium_1, (slang_bit_cast<EntryPointParams_1*>(entryPointParams_1))->drift_1, &(slang_bit_cast<EntryPointParams_1*>(entryPointParams_1))->map_0, i_29, (slang_bit_cast<EntryPointParams_1*>(entryPointParams_1))->outTexels_0);
+    layerMapColumn_0(&(slang_bit_cast<EntryPointParams_1*>(entryPointParams_1))->medium_1, (slang_bit_cast<EntryPointParams_1*>(entryPointParams_1))->drift_1, &(slang_bit_cast<EntryPointParams_1*>(entryPointParams_1))->map_0, i_32, (slang_bit_cast<EntryPointParams_1*>(entryPointParams_1))->outTexels_0);
     return;
 }
 
