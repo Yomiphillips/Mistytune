@@ -132,6 +132,11 @@ std::vector<Mutation> allMutations() {
         { "convection.pareidolia.billows",   [](FieldParams& f) { f.convection.pareidolia.billows += 0.1f; } },
         { "convection.pareidolia.facing",    [](FieldParams& f) { f.convection.pareidolia.facing = 1; } },
         { "convection.pareidolia.bearing",   [](FieldParams& f) { f.convection.pareidolia.bearing += 5.0f; } },
+        // Relief (build 27). The depth map is a picture too, and in the map's hash.
+        { "convection.pareidolia.reliefChannel",  [](FieldParams& f) { f.convection.pareidolia.reliefChannel = 1; } },
+        { "convection.pareidolia.reliefDepth",    [](FieldParams& f) { f.convection.pareidolia.reliefDepth += 0.1f; } },
+        { "convection.pareidolia.reliefSoftness", [](FieldParams& f) { f.convection.pareidolia.reliefSoftness += 0.1f; } },
+        { "convection.pareidolia.reliefDetail",   [](FieldParams& f) { f.convection.pareidolia.reliefDetail += 0.1f; } },
 
         // FieldParams itself
         { "timeSeconds", [](FieldParams& f) { f.timeSeconds += 1.0f; } },

@@ -28,11 +28,11 @@ static_assert(sizeof(OrganizationParams) == 36,
               "OrganizationParams changed -- hash the new member in Fingerprint::add(OrganizationParams)");
 static_assert(sizeof(IceParams) == 136,
               "IceParams changed -- hash the new member in Fingerprint::add(IceParams)");
-static_assert(sizeof(PareidoliaParams) == 28,
+static_assert(sizeof(PareidoliaParams) == 44,
               "PareidoliaParams changed -- hash the new member in Fingerprint::add(PareidoliaParams)");
-static_assert(sizeof(ConvectionParams) == 176,
+static_assert(sizeof(ConvectionParams) == 192,
               "ConvectionParams changed -- hash the new member in Fingerprint::add(ConvectionParams)");
-static_assert(sizeof(FieldParams) == 384,
+static_assert(sizeof(FieldParams) == 400,
               "FieldParams changed -- hash the new member in Fingerprint::add(FieldParams)");
 
 // THE ONE PAIR THAT MUST NOT BE HASHED, asserted so that a future refactor
@@ -168,6 +168,10 @@ void Fingerprint::add(const PareidoliaParams& p) {
     add(p.billows);
     add(p.facing);
     add(p.bearing);
+    add(p.reliefChannel);
+    add(p.reliefDepth);
+    add(p.reliefSoftness);
+    add(p.reliefDetail);
 }
 
 void Fingerprint::add(const FieldParams& f) {

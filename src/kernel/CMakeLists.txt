@@ -38,6 +38,7 @@ set(PLUGIN_SLANG_RENDER_DEPS
     "${SLANG_DIR}/PhaseLib.slang"
     "${SLANG_DIR}/SkyLib.slang"
     "${SLANG_DIR}/AirMapLib.slang"
+    "${SLANG_DIR}/LightLib.slang"
     "${SLANG_DIR}/Rng.slang")
 
 slang_generate("${SLANG_DIR}/Render.slang"

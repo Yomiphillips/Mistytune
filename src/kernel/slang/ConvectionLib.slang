@@ -90,6 +90,13 @@ public struct ConvectionInput
     float  cvShapeDecay;     // 0 the shape .. 1 the hero's tower
     float  cvShapeBillow;    // the shape's billows over the hero's, 0..1
 
+    // RELIEF (build 27): the map's fourth float is a depth map, 0..1, and the face towards
+    // the eye (+n) stands proud of the cushion by up to cvReliefHeight. 0 IS NONE, and the
+    // shape is build 21's to the bit.
+    float  cvReliefHeight;   // m
+    float  cvReliefSlope;    // m per m across the plane, at most: the bound's
+    float  cvReliefFade;     // m inside the silhouette's edge over which the lift comes in
+
     // HERO CONNECTION (build 22): the towers that tie the hero into the field, and how
     // hard the field's updraft sinks under them. ZERO IS NONE for both, so a zeroed input
     // is still the lone hero. Each turret is (world x, world z, radius, top above the
@@ -689,12 +696,13 @@ public float convHeroReach(ConvectionInput c)
 
 // THE SHAPE'S REACH, the same way. A point is outside the shape by at least how far it is
 // past the silhouette's box across the plane, and by at least how far it is past the rims
-// along the normal (see convShapeProfile) -- so once both are more than the billows can
-// lift, it is clear. The host's box uses the same arithmetic (SlangBridge.h).
+// along the normal (see convShapeProfile) -- the front's rims lifted by the relief, at
+// most cvReliefHeight -- so once both are more than the billows can lift, it is clear. The
+// host's box uses the same arithmetic (SlangBridge.h).
 public float convShapeReach(ConvectionInput c)
 {
     float lift = 1.5f * c.cvBillow * c.cvHeroBillow + 2.0f * kConvEdgeSoft;
-    float2 corner = float2(c.cvShapeHalfWidth + lift, c.cvShapeRound + lift);
+    float2 corner = float2(c.cvShapeHalfWidth + lift, c.cvShapeRound + c.cvReliefHeight + lift);
     return length(corner);
 }
 
@@ -828,6 +836,13 @@ float convInside(ConvectionInput c, float d, float lift, float3 x, float scale)
 // same sign inside and out and no slope that runs away at the rim -- which is what a
 // thickness height field does, and the billows would show it as a seam round the
 // silhouette.
+//
+// RELIEF (build 27) IS NOT THAT HEIGHT FIELD. It lifts the front half's distance from the
+// plane, so the whole round profile moves out towards the eye by the lift, rim included;
+// and the lift fades in from the silhouette's edge, so it is zero where the rim is. The
+// distance stays the profile's, continuous everywhere. On a steep relief it overstates
+// the true distance by up to sqrt(1 + slope^2), which only makes the billows there a
+// little shallower -- the host's blur keeps the slope gentle.
 // ===========================================================================
 
 // kShapeLipschitz: how fast D can change per metre, map and extension together. Adjacent
@@ -841,18 +856,23 @@ public static const float kShapeLipschitz = 2.5f;
 // few metres would be grain on the surface rather than cauliflower.
 public static const float kShapeLobeFloor = 0.3f;
 
-// Texel (i, j) of the map: distance in texels and its slopes along u and y.
-float3 convShapeTexel(ConvectionInput c, int i, int j)
+// Texel (i, j) of the map: distance in texels, its slopes along u and y, and the relief.
+float4 convShapeTexel(ConvectionInput c, int i, int j)
 {
     int k = (j * c.cvShapeDim.x + i) * 4;
-    return float3(c.cvShapeMap[k], c.cvShapeMap[k + 1], c.cvShapeMap[k + 2]);
+    return float4(c.cvShapeMap[k], c.cvShapeMap[k + 1], c.cvShapeMap[k + 2], c.cvShapeMap[k + 3]);
 }
 
 // THE SIGNED DISTANCE TO THE SILHOUETTE'S EDGE, in metres, at plane point (u, y), and its
 // slope. Bilinear inside the map. Past it, the value at the nearest map point less the
 // distance out: continuous, and never nearer the shape than the truth, since D changes by
 // at most a metre per metre -- the host's margin keeps the silhouette well inside.
-public float convShapeDistance(ConvectionInput c, float u, float y, out float2 slopeUY)
+//
+// `relief` IS THE DEPTH MAP THERE, 0..1, bilinear too, and past the map the nearest map
+// point's: clamping is a projection, so its slope never exceeds the map's own, which is
+// what cvReliefSlope bounds. Zero everywhere when there is no relief.
+public float convShapeDistance(ConvectionInput c, float u, float y, out float2 slopeUY,
+                               out float relief)
 {
     float2 st   = float2(u, y) / c.cvShapeTexel + c.cvShapeOffset - 0.5f;
     int2   last = c.cvShapeDim - int2(1, 1);
@@ -864,14 +884,30 @@ public float convShapeDistance(ConvectionInput c, float u, float y, out float2 s
     int2   i1 = min(i0 + int2(1, 1), last);
     float2 fr = q - f0;
 
-    float3 s00 = convShapeTexel(c, i0.x, i0.y);
-    float3 s10 = convShapeTexel(c, i1.x, i0.y);
-    float3 s01 = convShapeTexel(c, i0.x, i1.y);
-    float3 s11 = convShapeTexel(c, i1.x, i1.y);
-    float3 blend = lerp(lerp(s00, s10, fr.x), lerp(s01, s11, fr.x), fr.y);
+    float4 s00 = convShapeTexel(c, i0.x, i0.y);
+    float4 s10 = convShapeTexel(c, i1.x, i0.y);
+    float4 s01 = convShapeTexel(c, i0.x, i1.y);
+    float4 s11 = convShapeTexel(c, i1.x, i1.y);
+    float4 blend = lerp(lerp(s00, s10, fr.x), lerp(s01, s11, fr.x), fr.y);
 
     slopeUY = blend.yz;
+    relief  = blend.w;
     return (blend.x - past) * c.cvShapeTexel;
+}
+
+// HOW FAR THE FRONT FACE STANDS PROUD at a point `dIn` metres inside the silhouette where the
+// depth map reads `relief`: the relief's height, FADED IN FROM THE EDGE over cvReliefFade,
+// a quarter of the rims' radius at most, so the silhouette's edge does not stand as a
+// sheer wall. Never more than cvReliefHeight * relief, which is all the bound takes.
+//
+// SHORT ON PURPOSE, AND THAT IS A MEASUREMENT (build 28). Build 27 faded over the relief's
+// whole height, which on a 2.2 km face with Relief Depth 0.5 was 1.1 km -- the face's
+// half width. It kept 38% of the depth map and replaced the rest with a ridge down the
+// middle: the nose of a three-quarter face, which sits on the outline, was gone. A
+// quarter of the rims kept 91%.
+public float convReliefLift(ConvectionInput c, float dIn, float relief)
+{
+    return c.cvReliefHeight * relief * smoothstep(0.0f, max(c.cvReliefFade, 1.0f), dIn);
 }
 
 // THE ROUNDED RIM IN ITS OWN TWO DIMENSIONS: a point `dIn` metres inside the silhouette and
@@ -900,10 +936,19 @@ public float convShapeProfile(float dIn, float m, float rimR, out float2 stepDM)
 float convShapeSurface(ConvectionInput c, float2 plane, float py, float above, out float3 x)
 {
     float2 slopeUY;
-    float  dIn = convShapeDistance(c, plane.x, above, slopeUY);
+    float  relief;
+    float  dIn = convShapeDistance(c, plane.x, above, slopeUY, relief);
+
+    // RELIEF (build 27): IN FRONT, the distance from the plane counts from the lifted face,
+    // so the whole profile -- rim and face -- moves out towards the eye by the lift, and the
+    // slab between the plane and it is solid. Continuous at the plane, where both sides
+    // read zero. Behind, the cushion as it was.
+    float m = abs(plane.y);
+    if (c.cvReliefHeight > 0.0f && plane.y > 0.0f)
+        m = max(plane.y - convReliefLift(c, dIn, relief), 0.0f);
 
     float2 stepDM;
-    float  gap  = convShapeProfile(dIn, abs(plane.y), c.cvShapeRound, stepDM);
+    float  gap  = convShapeProfile(dIn, m, c.cvShapeRound, stepDM);
     float  side = plane.y >= 0.0f ? 1.0f : -1.0f;
 
     // Along the silhouette's own gradient for the in-plane part of the step. The slope is
@@ -1866,9 +1911,20 @@ float convShapeBound(ConvectionInput c, float3 lo, float3 hi, float low, float h
     float mMin = (nLo <= 0.0f && nHi >= 0.0f) ? 0.0f : min(abs(nLo), abs(nHi));
 
     float2 slopeUnused;
+    float  relief;
     float2 halfSpan = float2(0.5f * (uHi - uLo), 0.5f * (high - low));
-    float  dMax = convShapeDistance(c, 0.5f * (uLo + uHi), 0.5f * (low + high), slopeUnused)
+    float  dMax = convShapeDistance(c, 0.5f * (uLo + uHi), 0.5f * (low + high), slopeUnused, relief)
                 + kShapeLipschitz * length(halfSpan);
+
+    // RELIEF (build 27): A BOX WHOLLY IN FRONT IS NEARER THE FACE BY THE MOST IT CAN BE LIFTED
+    // there -- the relief at the footprint's centre plus its slope bound times the half
+    // diagonal, as for D, and never more than the whole height. The fade only lowers it.
+    if (c.cvReliefHeight > 0.0f && nLo > 0.0f)
+    {
+        float hMax = min(c.cvReliefHeight,
+                         c.cvReliefHeight * relief + c.cvReliefSlope * length(halfSpan));
+        mMin = max(nLo - hMax, 0.0f);
+    }
 
     float2 stepUnused;
     return -convShapeProfile(dMax, mMin, c.cvShapeRound, stepUnused);

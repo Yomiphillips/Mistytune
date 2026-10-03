@@ -74,6 +74,10 @@ constexpr PF_OutFlags2 kOutFlags2 =
     // costs a version bump and a stale-cache hunt. See cmake/EffectFlags.cmake --
     // which also records that removing it does NOT persuade AE to GPU-render.
     PF_OutFlag2_I_USE_3D_CAMERA |
+    // Build 29: the comp's lights light the clouds, read at pre-render (never on the
+    // render path). The SDK requires it of an effect that reads light layers, and it is
+    // what makes AE re-render when a light moves or flickers.
+    PF_OutFlag2_I_USE_3D_LIGHTS |
     PF_OutFlag2_SUPPORTS_SMART_RENDER |
     // 32 bpc float. LEGAL ONLY ALONGSIDE SUPPORTS_SMART_RENDER, and the format the
     // renderer actually works in: the accumulator holds linear radiance and values

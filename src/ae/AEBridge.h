@@ -32,12 +32,14 @@
 
 #include "CameraConvert.h"
 #include "CloudParams.h"
+#include "LocalLights.h"
 #include "ColorManagement.h"
 #include "OutputConvert.h"
 #include "RenderRequest.h"
 
 #include <cmath>
 #include <cstddef>
+#include <vector>
 
 namespace plugin {
 namespace ae {
@@ -639,6 +641,245 @@ inline void fillCameraFromComp(PF_InData* in_data, cloud::ViewParams& view,
         0.0f, 0.0f, 0.0f, 1.0f
     };
     for (int i = 0; i < 16; ++i) view.cameraToWorld[i] = m[i];
+}
+
+// ---------------------------------------------------------------------------
+// The comp's lights (build 29)
+// ---------------------------------------------------------------------------
+
+// A suite held for one scope, released on every path out of it.
+template <class Suite>
+struct ScopedSuite {
+    SPBasicSuite* basic;
+    const char*   name;
+    int           version;
+    Suite*        suite;
+    ScopedSuite(SPBasicSuite* b, const char* n, int v)
+        : basic(b), name(n), version(v), suite(acquireSuite<Suite>(b, n, v)) {}
+    ~ScopedSuite() { if (suite) basic->ReleaseSuite(name, version); }
+    ScopedSuite(const ScopedSuite&) = delete;
+    ScopedSuite& operator=(const ScopedSuite&) = delete;
+    Suite* operator->() const { return suite; }
+    explicit operator bool() const { return suite != nullptr; }
+};
+
+// ===========================================================================
+// EVERY LIGHT IN THE EFFECT'S COMP THAT IS ON NOW, in the renderer's world.
+//
+// WALKED THROUGH THE LAYER SUITE AT PRE-RENDER, where the camera and the colour settings
+// are already asked for and the log shows those calls succeed; never on the render path.
+// I_USE_3D_LIGHTS (EffectFlags.cmake) is what makes AE re-render when one changes.
+//
+// ON NOW MEANS: a light layer, its video switch on as solo leaves it (IsLayerVideoReallyOn),
+// and the comp's current time inside its in and out points. The comp's time, not the
+// effect's: a light is a comp layer, and the effect's layer may start late.
+//
+// PLACED THROUGH src/engine/LocalLights.h's frame: the comp camera's own mapping under the
+// Comp Camera, and onto the orbit rig with the comp plane at the hero's depth otherwise.
+// Either way the comp camera is the one AE draws the viewer through, or AE's default when
+// the comp has none.
+//
+// WHAT EACH LIGHT BECOMES:
+//   point, spot   a light at its position, Intensity/100 x Comp Light Strength, the sun's
+//                 strength inside its Falloff Radius and the inverse square outside it.
+//                 Smooth also fades it to nothing over its Falloff Distance. None is the
+//                 inverse square too: a light undimmed for kilometres would light the sky.
+//   parallel      a second sun, from its position towards its point of interest
+//   ambient       a uniform dome every scattered path sees on its way out
+//   environment   not read -- an HDRI light is the sky's job here -- and logged
+//
+// RAW VALUES ARE LOGGED, light by light, because a light in the wrong place renders a
+// plausible cloud lit from somewhere else.
+//
+// FAILS SAFE: any suite or call that fails leaves the lights read so far and says so. The
+// sky renders without the rest.
+// ===========================================================================
+inline int readCompLights(PF_InData* in_data, const cloud::ViewParams& view, bool compCamera,
+                          double travel, const cloud::LightAnchor& anchor, float strength,
+                          bool decodeColour, std::vector<cloud::LocalLight>& out,
+                          float ambient[3]) {
+    out.clear();
+    ambient[0] = ambient[1] = ambient[2] = 0.0f;
+    if (!in_data || !in_data->pica_basicP) return 0;
+    SPBasicSuite* basic = in_data->pica_basicP;
+
+    ScopedSuite<AEGP_PFInterfaceSuite1> pf(basic, kAEGPPFInterfaceSuite, kAEGPPFInterfaceSuiteVersion1);
+    ScopedSuite<AEGP_LayerSuite8>  layers(basic, kAEGPLayerSuite, kAEGPLayerSuiteVersion8);
+    ScopedSuite<AEGP_StreamSuite5> streams(basic, kAEGPStreamSuite, kAEGPStreamSuiteVersion5);
+    ScopedSuite<AEGP_LightSuite2>  lightSuite(basic, kAEGPLightSuite, kAEGPLightSuiteVersion2);
+    if (!pf || !layers || !streams || !lightSuite) {
+        diagLog("  comp lights: a suite is missing (pf %d layer %d stream %d light %d) -- none read",
+                pf ? 1 : 0, layers ? 1 : 0, streams ? 1 : 0, lightSuite ? 1 : 0);
+        return 0;
+    }
+
+    AEGP_LayerH effectLayer = nullptr;
+    AEGP_CompH  comp = nullptr;
+    A_Err aeErr = pf->AEGP_GetEffectLayer(in_data->effect_ref, &effectLayer);
+    if (!aeErr && effectLayer) aeErr = layers->AEGP_GetLayerParentComp(effectLayer, &comp);
+    if (aeErr || !comp) {
+        diagLog("  comp lights: no comp (err %d) -- none read", static_cast<int>(aeErr));
+        return 0;
+    }
+
+    A_Time compTime;
+    compTime.value = in_data->current_time;
+    compTime.scale = in_data->time_scale;
+    aeErr = pf->AEGP_ConvertEffectToCompTime(in_data->effect_ref, in_data->current_time,
+                                             in_data->time_scale, &compTime);
+    if (aeErr) {
+        compTime.value = in_data->current_time;
+        compTime.scale = in_data->time_scale;
+    }
+    const double now = compTime.scale ? static_cast<double>(compTime.value) / compTime.scale : 0.0;
+
+    // THE CAMERA AE DRAWS THE VIEWER THROUGH, or its default for a comp with none.
+    double camera[16];
+    double planeDistance = 0.0, planeHeight = 0.0;
+    {
+        A_Matrix4 m;
+        AEFX_CLR_STRUCT(m);
+        A_FpLong dist = 0.0;
+        A_short pw = 0, ph = 0;
+        A_Time when;
+        when.value = in_data->current_time;
+        when.scale = in_data->time_scale;
+        const A_Err camErr = pf->AEGP_GetEffectCameraMatrix(in_data->effect_ref, &when, &m,
+                                                            &dist, &pw, &ph);
+        if (!camErr && ph > 0 && dist > 0.0) {
+            for (int r = 0; r < 4; ++r)
+                for (int c = 0; c < 4; ++c) camera[r * 4 + c] = m.mat[r][c];
+            planeDistance = dist;
+            planeHeight   = ph;
+        } else {
+            cloud::defaultCompCamera(static_cast<double>(in_data->width),
+                                     static_cast<double>(in_data->height), camera, planeDistance);
+            planeHeight = static_cast<double>(in_data->height);
+        }
+    }
+    const cloud::CompLightFrame frame = cloud::compLightFrame(camera, planeDistance, planeHeight,
+                                                              compCamera, travel, view, anchor);
+
+    A_long count = 0;
+    if (layers->AEGP_GetCompNumLayers(comp, &count)) count = 0;
+
+    int ambientCount = 0, skipped = 0;
+    for (A_long i = 0; i < count; ++i) {
+        AEGP_LayerH layer = nullptr;
+        if (layers->AEGP_GetCompLayerByIndex(comp, i, &layer) || !layer) continue;
+        AEGP_ObjectType type = AEGP_ObjectType_NONE;
+        if (layers->AEGP_GetLayerObjectType(layer, &type) || type != AEGP_ObjectType_LIGHT) continue;
+
+        A_Boolean on = FALSE;
+        if (layers->AEGP_IsLayerVideoReallyOn(layer, &on) || !on) continue;
+
+        A_Time inPoint, duration;
+        if (!layers->AEGP_GetLayerInPoint(layer, AEGP_LTimeMode_CompTime, &inPoint) &&
+            !layers->AEGP_GetLayerDuration(layer, AEGP_LTimeMode_CompTime, &duration) &&
+            inPoint.scale && duration.scale) {
+            const double from = static_cast<double>(inPoint.value) / inPoint.scale;
+            const double span = static_cast<double>(duration.value) / duration.scale;
+            if (now < from || now >= from + span) continue;
+        }
+
+        AEGP_LightType lightType = static_cast<AEGP_LightType>(AEGP_LightType_NONE);
+        if (lightSuite->AEGP_GetLightType(layer, &lightType)) continue;
+
+        auto oneD = [&](AEGP_LayerStream which, double fallback) {
+            AEGP_StreamVal2 v;
+            AEFX_CLR_STRUCT(v);
+            AEGP_StreamType t = AEGP_StreamType_NO_DATA;
+            if (streams->AEGP_GetLayerStreamValue(layer, which, AEGP_LTimeMode_CompTime, &compTime,
+                                                  FALSE, &v, &t)) return fallback;
+            return static_cast<double>(v.one_d);
+        };
+
+        const double intensity = oneD(AEGP_LayerStream_INTENSITY, 100.0);
+        float colour[3] = { 1.0f, 1.0f, 1.0f };
+        {
+            AEGP_StreamVal2 v;
+            AEFX_CLR_STRUCT(v);
+            AEGP_StreamType t = AEGP_StreamType_NO_DATA;
+            if (!streams->AEGP_GetLayerStreamValue(layer, AEGP_LayerStream_COLOR, AEGP_LTimeMode_CompTime,
+                                                   &compTime, FALSE, &v, &t)) {
+                colour[0] = static_cast<float>(v.color.redF);
+                colour[1] = static_cast<float>(v.color.greenF);
+                colour[2] = static_cast<float>(v.color.blueF);
+            }
+            // AE's colours arrive the way the effect's output leaves: undone the same way.
+            if (decodeColour)
+                for (float& c : colour) c = cloud::decodeSrgb(c);
+        }
+        const float k = static_cast<float>(intensity / 100.0) * strength;
+
+        if (lightType == AEGP_LightType_AMBIENT) {
+            for (int c = 0; c < 3; ++c)
+                ambient[c] += (k > 0.0f ? k : 0.0f) * colour[c] * cloud::kAmbientRadiancePerIntensity;
+            ++ambientCount;
+            diagLog("  comp light %d: ambient, intensity %.1f%% -- a dome of %.3f",
+                    static_cast<int>(i + 1), intensity,
+                    static_cast<double>(k * cloud::kAmbientRadiancePerIntensity));
+            continue;
+        }
+        if (lightType != AEGP_LightType_POINT && lightType != AEGP_LightType_SPOT &&
+            lightType != AEGP_LightType_PARALLEL) {
+            ++skipped;
+            diagLog("  comp light %d: type %d not read (environment lights are the sky's job)",
+                    static_cast<int>(i + 1), static_cast<int>(lightType));
+            continue;
+        }
+
+        A_Matrix4 xf;
+        AEFX_CLR_STRUCT(xf);
+        if (layers->AEGP_GetLayerToWorldXform(layer, &compTime, &xf)) {
+            ++skipped;
+            continue;
+        }
+        const double pos[3] = { xf.mat[3][0], xf.mat[3][1], xf.mat[3][2] };
+        const double axis[3] = { xf.mat[2][0], xf.mat[2][1], xf.mat[2][2] };
+
+        cloud::LocalLight L;
+        L.kind = lightType == AEGP_LightType_SPOT     ? cloud::LightKind::Spot
+               : lightType == AEGP_LightType_PARALLEL ? cloud::LightKind::Parallel
+                                                      : cloud::LightKind::Point;
+        cloud::compPointToWorld(frame, view, pos, L.position);
+        cloud::compDirectionToWorld(frame, view, axis, L.direction);
+        for (int c = 0; c < 3; ++c) L.color[c] = colour[c];
+        L.intensity = k;
+
+        // THE FALLOFF: AEGP_LightFalloffType, 0-based -- None, Smooth, Inverse Square
+        // Clamped. The raw number is logged, so a host that counts from 1 shows itself.
+        const double falloff  = oneD(AEGP_LayerStream_LIGHT_FALLOFF_TYPE, 0.0);
+        const double radiusPx = oneD(AEGP_LayerStream_LIGHT_FALLOFF_START, 500.0);
+        const double fadePx   = oneD(AEGP_LayerStream_LIGHT_FALLOFF_DISTANCE, 500.0);
+        L.radius = static_cast<float>((radiusPx > 1.0 ? radiusPx : 1.0) * frame.along);
+        if (std::lround(falloff) == AEGP_LightFalloff_SMOOTH && fadePx > 0.0)
+            L.smoothFalloff = static_cast<float>(fadePx * frame.along);
+
+        if (L.kind == cloud::LightKind::Spot) {
+            L.coneAngleDeg = static_cast<float>(oneD(AEGP_LayerStream_CONE_ANGLE, 90.0));
+            L.coneFeather  = static_cast<float>(oneD(AEGP_LayerStream_CONE_FEATHER, 50.0) / 100.0);
+        }
+
+        diagLog("  comp light %d: %s at comp (%.1f, %.1f, %.1f) px -> (%.0f, %.0f, %.0f) m, "
+                "intensity %.1f%%, colour (%.3f, %.3f, %.3f), falloff %.0f radius %.0f px = %.0f m%s",
+                static_cast<int>(i + 1),
+                L.kind == cloud::LightKind::Spot ? "spot"
+                : L.kind == cloud::LightKind::Parallel ? "parallel" : "point",
+                pos[0], pos[1], pos[2],
+                static_cast<double>(L.position[0]), static_cast<double>(L.position[1]),
+                static_cast<double>(L.position[2]), intensity,
+                static_cast<double>(colour[0]), static_cast<double>(colour[1]),
+                static_cast<double>(colour[2]), falloff, radiusPx,
+                static_cast<double>(L.radius),
+                L.smoothFalloff > 0.0f ? ", smooth" : "");
+        out.push_back(L);
+    }
+
+    diagLog("  comp lights: %d read, %d ambient, %d not read; %.3f m/px across, %.3f along (%s)",
+            static_cast<int>(out.size()), ambientCount, skipped, frame.across, frame.along,
+            compCamera ? "comp camera" : "onto the orbit rig");
+    return static_cast<int>(out.size());
 }
 
 // ---------------------------------------------------------------------------

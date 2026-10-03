@@ -239,6 +239,12 @@ thread_local DeviceScratch g_shape;
 thread_local uint64_t      g_shapeHash     = 0;
 thread_local void*         g_shapeUploaded = nullptr;
 
+// THE LOCAL LIGHTS (build 29), uploaded when their hash moves, as the map above is. A frame
+// with a flickering bolt moves it every frame, and that is one copy of a few hundred KB.
+thread_local DeviceScratch g_lights;
+thread_local uint64_t      g_lightsHash     = 0;
+thread_local void*         g_lightsUploaded = nullptr;
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -689,6 +695,26 @@ bool renderCuda(const RenderRequest& req) {
             g_shapeHash     = work.shapeHash;
         }
         work.shapeBuffer = shapeDev;
+    }
+
+    // THE LOCAL LIGHTS: HOST POINTER IN, DEVICE POINTER OUT, like the map above.
+    if (work.lightBuffer && work.lightCount > 0 && work.lightFloats > 0) {
+        const size_t lightBytes = sizeof(float) * static_cast<size_t>(work.lightFloats);
+        void* lightDev = g_lights.reserve(lightBytes);
+        if (!lightDev) return false;   // reserve() has already set the error
+
+        if (lightDev != g_lightsUploaded || work.lightHash != g_lightsHash) {
+            g_lightsUploaded = nullptr;
+            const cudaError_t lightErr = cudaMemcpy(lightDev, work.lightBuffer, lightBytes,
+                                                    cudaMemcpyHostToDevice);
+            if (lightErr != cudaSuccess) {
+                setError("local lights upload", lightErr);
+                return false;
+            }
+            g_lightsUploaded = lightDev;
+            g_lightsHash     = work.lightHash;
+        }
+        work.lightBuffer = lightDev;
     }
 
     // THE CLOUDS' SHADOW MAPS, built on this device at most once per change. See

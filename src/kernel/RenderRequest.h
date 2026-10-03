@@ -22,6 +22,9 @@
 // The pareidolia map is HOST data the request only points at; see `shapeMap` below.
 namespace plugin::cloud { struct ShapeMap; }
 
+// ...and so are the local lights (build 29); see `lightSet` below.
+namespace plugin::cloud { struct LightSet; }
+
 namespace plugin::kernel {
 
 // WHERE A PIXEL'S FOUR FLOATS SIT IN MEMORY, and it is not the same on both
@@ -166,6 +169,23 @@ struct RenderRequest {
     cloud::ShapeGeometry   shape;
     const void*            shapeBuffer = nullptr;
     uint64_t               shapeHash   = 0;
+
+    // ===================================================================
+    // LOCAL LIGHTS (build 29): the comp's lights and a light layer, packed on the host by
+    // src/engine/LocalLights.h.
+    //
+    // `lightSet` IS THE ONE THING A CALLER SETS, and like the shape map it is HOST memory
+    // the caller owns for the render; null is no lights. deriveRenderInputs() reads the
+    // rest out of it: the buffer's address, which renderCuda replaces with a device copy
+    // keyed on `lightHash`, the record count and the float count the kernel bounds its
+    // reads by, and the ambient light's radiance, by value.
+    // ===================================================================
+    const cloud::LightSet* lightSet    = nullptr;
+    const void*            lightBuffer = nullptr;
+    int                    lightCount  = 0;
+    int                    lightFloats = 0;
+    uint64_t               lightHash   = 0;
+    float                  ambientLight[3] = { 0.0f, 0.0f, 0.0f };
 
     // THE REASON ALL FIVE ARE HERE RATHER THAN COMPUTED WHERE THEY ARE USED: the
     // marshalling into the kernel's structs runs ON THE DEVICE, inside renderPixel,

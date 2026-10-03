@@ -459,9 +459,29 @@ public float transmittance(Medium m, MajorantGrid g, StructuredBuffer<float> bou
                            StructuredBuffer<float2> disp,
                            inout Rng rng, float3 p, float3 dir, inout int steps)
 {
+    return transmittanceUpTo(m, g, bounds, disp, rng, p, dir, 1e30f, steps);
+}
+
+// ===========================================================================
+// THE SAME WALK, STOPPED AT tMax: the shadow ray to a light at a finite distance (build
+// 29). A bolt inside a cloud is lit through the cloud between it and the point, and not
+// through the cloud behind it.
+//
+// transmittance() ABOVE IS THIS AT 1e30, which is past every slab: min(t1, 1e30) is t1
+// exactly, so the sun's shadow rays draw and multiply exactly what they did before.
+//
+// A LIGHT NEARER THAN THE SLAB leaves t1 below t0, and the loop's first step leaves at
+// once with nothing taken off, which is the right answer.
+// ===========================================================================
+public float transmittanceUpTo(Medium m, MajorantGrid g, StructuredBuffer<float> bounds,
+                               StructuredBuffer<float2> disp,
+                               inout Rng rng, float3 p, float3 dir, float tMax,
+                               inout int steps)
+{
     float t0, t1;
     if (!slabRange(m, p, dir, t0, t1)) return 1.0f;
     t0 = max(t0, 0.0f);
+    t1 = min(t1, tMax);
 
     float tr = 1.0f;
     float t  = t0;
@@ -653,6 +673,68 @@ public bool sampleFreeFlight(Medium m, MajorantGrid g, StructuredBuffer<float> b
 {
     return sampleFreeFlightUpTo(m, g, bounds, disp, rng, ro, rd, 1e30f,
                                 scatterPoint, distance, steps);
+}
+
+// ---------------------------------------------------------------------------
+// The face the camera sees (build 29)
+// ---------------------------------------------------------------------------
+//
+// ===========================================================================
+// WHERE A RAY'S LIGHT FIRST SCATTERS, ON AVERAGE, AND HOW LIKELY IT IS TO SCATTER AT ALL,
+// as float2(the integral of t against the first-scatter density, the probability), up to
+// tMax. The mean is the first over the second. It lays the light layer's sheet on the
+// cloud -- see conformLightSheet in src/engine/LocalLights.h -- and nothing is rendered
+// with it. tMax keeps it to the hero: a cloud past it is another cloud's face.
+//
+// DETERMINISTIC, NOT A FREE FLIGHT. A free flight's mean from fixed random numbers jumps
+// whenever a moving cloud carries a collision across its acceptance, and the sheet would
+// jump with it. A midpoint march of the true density has no such jumps: a cloud that moves
+// smoothly moves this smoothly.
+//
+// A STEP IS A QUARTER OF THE CELL'S MAJORANT FREE PATH, so no step spans more than 0.25 of
+// optical depth, and an empty cell is crossed at once, as the trackers cross it. The march
+// stops where half a percent of the light is left unscattered: what lies behind that
+// cannot move the mean.
+// ===========================================================================
+public static const float kSurfaceStepTau = 0.25f;
+
+public float2 firstScatterMoments(Medium m, MajorantGrid g, StructuredBuffer<float> bounds,
+                                  StructuredBuffer<float2> disp, float3 ro, float3 rd,
+                                  float tMax)
+{
+    float t0, t1;
+    if (!slabRange(m, ro, rd, t0, t1)) return float2(0.0f, 0.0f);
+    t1 = min(t1, tMax);
+    float t = max(t0, 0.0f);
+    if (!(t1 > t)) return float2(0.0f, 0.0f);
+
+    Dda   dda      = ddaInit(g, ro, rd, t);
+    float localMaj = gridBound(m, g, bounds, disp, dda.cell, m.majorant);
+
+    float tr    = 1.0f;
+    float sumT  = 0.0f;
+    float sumP  = 0.0f;
+    for (int i = 0; i < kTrackCap; ++i)
+    {
+        float cellExit = min(ddaExit(dda), t1);
+        if (localMaj > 0.0f && cellExit > t)
+        {
+            float h  = min(kSurfaceStepTau / localMaj, cellExit - t);
+            float tm = t + 0.5f * h;
+            float a  = 1.0f - exp(-densityAt(m, disp, ro + rd * tm) * h);
+            sumP += tr * a;
+            sumT += tr * a * tm;
+            tr   *= 1.0f - a;
+            if (tr < 0.005f) break;
+            t += h;
+            if (t < cellExit) continue;
+        }
+        if (cellExit >= t1) break;
+        t = cellExit;
+        ddaAdvance(dda);
+        localMaj = gridBound(m, g, bounds, disp, dda.cell, m.majorant);
+    }
+    return float2(sumT, sumP);
 }
 
 #endif // MISTYTUNE_TRANSPORT_LIB_SLANG

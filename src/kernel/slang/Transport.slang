@@ -80,6 +80,27 @@ void freeFlightTrial(uint3 tid : SV_DispatchThreadID,
     outSteps[i]    = steps;
 }
 
+// THE FACE THE CAMERA SEES (build 29): firstScatterMoments, one ray per thread. A
+// deterministic march, so there is no seed and one ray is the whole answer.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void firstScatterTrial(uint3 tid : SV_DispatchThreadID,
+                       uniform Medium medium,
+                       uniform MajorantGrid grid,
+                       uniform StructuredBuffer<float> bounds,
+                       uniform StructuredBuffer<float2> drift,
+                       uniform float3 origin,
+                       uniform float3 direction,
+                       uniform float tMax,
+                       uniform RWStructuredBuffer<float2> output,
+                       uniform int count)
+{
+    int i = int(tid.x);
+    if (i >= count) return;
+
+    output[i] = firstScatterMoments(medium, grid, bounds, drift, origin, direction, tMax);
+}
+
 // The RNG, exposed so slang.transport can pin it against Phase.slang's.
 //
 // BOTH FILES NOW GET IT FROM Rng.slang, so this no longer compares two hand-kept

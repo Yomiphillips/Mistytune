@@ -4,7 +4,184 @@ Tracked against `PLAN.md`. Newest first.
 
 ---
 
-## 2026-10-02 — RENDER QUALITY: THE EFFECT'S OWN DRAFT/BEST SWITCH, AND A DRAFT THAT IS AS BRIGHT AS BEST. Build 26, minor 15. Draft traces one path per 2x2 block at one sample, with build 25's shadow hand-off and a full denoise, and leaves Max Bounces alone. Against Best at the same size, at 1 spp on the RTX 2070 SUPER: 3.4 to 3.9x less trace time at 480x270, 4.2 to 6.3x at 1920x1080. Its cloud is within 2 levels of a 64-spp reference. Through build 25, Draft capped Max Bounces at 16, and that left a close hero 27 levels dark. BUILT AND TESTED; INSTALL PENDING (After Effects was open).
+## 2026-10-02 — LOCAL LIGHTS: AE'S COMP LIGHTS AND A LIGHT LAYER (SABER FOR THUNDER) LIGHT THE CLOUD FROM INSIDE IT. Build 29, still minor 15. A new Lights topic. Use Comp Lights (default on) reads the comp's point, spot, parallel and ambient lights and places each where AE's viewer shows it. Light Layer takes another layer's pixels, such as a Saber bolt on black, as a glowing sheet laid on the face of the cloud the camera sees. Every light goes through the sun's own next-event estimator: a shadow ray through the cloud, the phase function, the albedo. The clouds stay water: a light adds light and the medium is untouched. With no lights a frame is byte-identical to build 28 (GPU and CPU). A light layer costs 35 to 46% at Best and 21 to 37% at Draft (1080p). On the user's 6 km hero, the flat sheet of the first draft left the cloud black; the laid sheet lights the cloud round the bolt. INSTALLED (2026-10-02, 18:00), 28/28 tests, NOT YET SEEN IN THE HOST.
+
+### What was asked
+
+"Can we work on making the clouds work with Ae light or layers (incase I want to use saber lighting for thunder)?"
+
+### What was built
+
+- **The Lights topic** (params 800–809, after Camera):
+  - Use Comp Lights (default on) and Comp Light Strength (×, default 1).
+  - Light Layer, Light Layer Strength (×, default 1) and Light Layer Depth (m, default 0).
+  - Three spares.
+  - `PF_OutFlag2_I_USE_3D_LIGHTS` is set, so AE re-renders when a light moves.
+- **Comp lights** (AEBridge.h `readCompLights`, src/engine/LocalLights.{h,cpp}): read at pre-render at the comp's time, honouring in/out points and the video switch.
+  - **Kinds:** point, spot (cone and feather), parallel (a second sun) and ambient (a uniform dome every scattered path sees on its way out).
+  - **Strength:** at 100% a light lights the cloud inside its radius as brightly as the sun does at Sun Intensity 1. It falls off as the inverse square past the radius (AE's Inverse Square Clamped), whatever its Falloff says. Smooth adds AE's smoothstep to zero.
+  - **Placement:** the light goes where the viewer shows it. Under the Comp Camera, the scale is Comp Camera Travel, the camera's own mapping. Under the orbit rig, the comp plane goes to the hero's depth and the frame is stretched by the two lenses' ratio, so a light on the comp plane lands on the same pixel of the render. TestLights checks both by projecting.
+- **The light layer:**
+  - **Reduction:** the layer is box-filtered to at most 128 texels on its long side, which keeps its power. It is sRGB-decoded when the effect encodes sRGB. Premultiplied colour is the emission, so a bolt over black and a bolt on a transparent layer glow alike.
+  - **Emission:** each texel is a small patch that shines every way.
+  - **Picking:** the kernel draws a texel down a quadtree by power over squared distance, so a point beside the bolt finds the texels beside it.
+  - **Key:** the light set's hash goes into the render key, so a flickering bolt re-renders.
+  - **GPU path:** a light layer withdraws the GPU offer, as a shape does. The host path still renders on CUDA (AE has never taken the GPU offer).
+- **The sheet laid on the cloud** (`conformLightSheet`):
+  - **Why:** the first draft stood the sheet on one plane through the hero's middle. In a thick hero that plane is hundreds of metres behind the face. Its glow arrived only after 8 to 32 bounces, so the frame was fireflies at 512 spp (build/tmp/b29/r5/m6.png) or, on the user's hero, next to nothing (r6/m7.png). Three samplers gave the same frame: this was diffusion from a buried source.
+  - **The probe:** each texel now stands where, on average, the camera's own light first scatters along its rays, plus Light Layer Depth behind that. The probe is a deterministic march of the density the render sees: `firstScatterMoments` in TransportLib, a quarter of the cell's majorant free path per step, stopping with 0.5% left. A free flight's mean from fixed random numbers would jump as the cloud moved, so the sheet would flicker.
+  - **The grid:** half the sheet's resolution, probed only at the points a lit texel reads, threaded on the CPU, with texels bilinear between them.
+  - **Where nothing is seen:** a point that sees no cloud takes the nearest seen face, so a bolt leaving the cloud's edge stays beside it. With no cloud behind the layer at all, the sheet sits at the hero's middle.
+  - **The far limit:** faces deeper than the hero's middle plus its width or height (whichever is larger) belong to another cloud and are not probed. Without this, part of a bolt was laid on a cloud 87 km away, and its texels, 400 times the area, lit the landscape.
+- **Kernel:** one light is drawn per scattering event on its own RNG stream, so the path's stream is untouched. Lights are picked in proportion to how brightly each lights the hero, floored at a tenth of the brightest's share. The shadow ray stops at the light (`transmittanceUpTo`) and never takes Draft's shadow-map hand-off, because the maps are columns towards the sun.
+- **CLI:** `--light`, `--comp-light`, `--light-color`, `--light-smooth`, `--ambient`, `--sun-intensity`, `--light-layer <file|bolt>` (`bolt` is a built-in procedural bolt), `--light-layer-strength`, `--light-layer-depth`, `--light-layer-flat` (the old plane, for A/B) and `--light-layer-dump`.
+
+### Tests
+
+- **TestLights** (12 tests): comp lights under both cameras land on their pixel, by projection. The sheet keeps the layer's power and decodes sRGB. The probe asks only where the layer glows. A laid texel stays on its pixel at the probed depth plus Light Layer Depth, takes the nearest face where none is seen, and is floored at 10 m. The packed layout is checked field by field, and the tree's root radius holds every pushed texel.
+- **slang.bounce, section 7:** one light drawn per event against every light summed by host quadrature. Point +0.06/−0.02%, spot −0.17%, parallel +0.04%, six-texel sheet +0.05%, crossed bolt −0.04%, **bolt laid on a face +0.17%**, all five −0.10% and +0.001% through the segment walk. The ambient dome is 1.0 standard error out.
+- **slang.transport, FIRST SCATTER:** the march against closed forms through a constant slab (mean 1312.7 m against 1310.6 at 1× majorant, the step midpoint's expected +2 m; 1310.6 at 20×), stopped by tMax (1201.3 against 1199.2), a slab thick enough to stop early (1049.1 against 1050.0) and the sharp core through the stored grid (1412.0 against a 5 cm quadrature's 1411.9).
+- **No lights:** byte-identical to build 28 on four scenes, GPU and CPU (build/tmp/b29/ab2).
+- **ctest:** 28/28 on the dev build.
+
+### Measured
+
+Two night heroes (Sun Intensity 0) with the built-in bolt. A is the default hero at 4 km. B is the user's settings: Hero Width 6000, Inversion 7000, Density 0.1, at 9 km. Montages are in build/tmp/b29/r9 (m10: flat against laid; m11: Light Layer Depth 0/50/150/400).
+
+- **Flat against laid:** on B the flat sheet leaves the cloud black, and the laid one lights it round the bolt. On A the glow follows the bolt's channel down the face where the flat sheet gave a diffuse patch.
+- **Brightness:** with the layer laid, 17% (A) and 10% (B) of the lit cloud clips at 8 bits, and the median lit pixel is 126 (A) or 89 (B). In daylight 20% and 15% of the frame clips. So a bolt at strength 1 lights the cloud near it about as the sun lights a cloud top, as `kLightLayerRadiance` (100) intends. Light Layer Strength turns it down.
+- **Light Layer Depth:** 0 is the crispest glow. Deeper is softer and wider, and on B at 150 m the cloud in front starts to shade it.
+- **The probe:** 338 of 64×36 points, 19 ms on A and 26 ms on B.
+- **Cost** at 1920×1080 on the RTX 2070 SUPER, CLI wall time, best of three:
+
+| | no layer | flat sheet | laid sheet |
+|---|---|---|---|
+| A, Best 4 spp | 3.29 s | 4.46 s | 4.48 s (+36%) |
+| A, Draft | 0.63 s | 0.78 s | 0.76 s (+21%) |
+| B, Best 4 spp | 8.78 s | 11.78 s | 12.81 s (+46%) |
+| B, Draft | 0.96 s | 1.24 s | 1.31 s (+37%) |
+
+### Known limits
+
+- **Noise in a night lit only by the bolt:** at 64 spp undenoised it is still sparkles round the glow. Denoise is what makes 16 spp usable.
+- **The cost is one more shadow ray per scattering event,** whichever light is drawn, and it scales with how many events a path has. The probe itself is negligible.
+- **The sheet follows the camera's view:** move the camera and it is re-laid on the face now seen. A bolt "inside" the cloud is Light Layer Depth, not a position.
+- **The layer is read in its own frame with transforms off:** a comp-sized layer lines up, but a scaled or moved one does not.
+- **Falloff:** AE's falloff enum is read 0-based and its raw values are logged. That is unchecked against a real comp.
+
+### What needs the host
+
+Everything: a real Saber layer (its brightness and its glow's spread at Light Layer Strength 1), comp lights under the Comp Camera and under the rig, the light-moved re-render, and a flickering bolt over a render with the Draft switch.
+
+## 2026-10-02 — RELIEF THAT KEEPS THE FEATURES: A SHORT EDGE FADE, AND RELIEF DETAIL. Build 28, still minor 15. Build 27's edge fade threw away most of a depth map, and with it the nose of a three-quarter face. It now keeps 91% of the map where build 27 kept 38%. Relief Detail (new, default 0.5) takes the depth map's large form away so the features spend Relief Depth. With the user's depth map, the forms are now in the cloud: the eye socket, the nose ridge and the lip line. They read as a sculpted fragment, not yet as a face. INSTALLED (2026-10-02, 13:51), 28/28 tests, NOT YET SEEN IN THE HOST.
+
+### What was reported
+
+The user fed build 27 a photo and its AI depth map: a tight three-quarter crop of a face (one eye, nose, lips), 4030x6000. Their first result was a box with a hole, because the photo was the Shape Source with Shape From Luminance at 0.5: 74% of it, background included, is brighter than 0.5. With a Threshold effect on the photo, the result was a blob with holes. A thresholded photo is still light and dark patches, and its dark parts are cut out. Both were reproduced in the CLI (build/tmp/b27/u1-montage.png). The setup that should work uses the depth map for both sources. Asked about our own renders, the user said: **"I don't see the eye brows. Just something sculpted like a head. don't see nose or any face feature."**
+
+### Why: build 27's fade
+
+The lift faded in from the silhouette's edge over the relief's whole height. On the user's map that was 1.1 km, on a 2.2 km wide face. Measured on the built maps with an exact distance transform (build/tmp/b27/user/lift-compare.png), the fade kept 38% of the depth map. What was left was a ridge down the middle, from distance-to-edge and not from the picture, and that ridge was the "sculpted head". The nose of a three-quarter face sits on the outline, where the fade was zero. A fade of 150 m kept 91%.
+
+The kernel now fades over `kReliefFadeOfRim` (0.25) times the rims' radius or the relief's height, whichever is less: 165 m on the user's face. The cost is that a depth map cut off by its frame or by a hard mask stands as a near-sheer wall at the cut. From below, its underside shows (u4-nob-d50-left). A feathered mask on the depth layer, used for both sources, tapers it, because the masked depth falls towards the mask's edge.
+
+### Relief Detail
+
+A three-quarter head's own turn spends most of the depth range, so the features are small bumps on a slope. `buildShapeMap` now subtracts Detail times the map blurred at `kReliefFormSigma` (12% of the longer side, after the fill so the rim does not sink), and stretches the rest to 0..1 again. 0 is build 27's map. Param 655, inserted after Relief Depth; `PareidoliaParams` 40 → 44.
+
+### Tests
+
+- **TestPareidolia, ReliefDetailKeepsTheFeatures:** a slope with a bump on it. As it is, the far end of the slope is nearest; at Detail 1, the bump is, by more than 0.3. The fit test checks the fade, and the older tests pin Detail 0, the behaviour they were written for.
+- **slang.convection (d):** two probes near the edge were added, one on the rounded rim (D 200 m) and one inside the fade (D 40 m). They give front 615.0 / 190.0 m against 616.1 / 191.1 expected, and back 346.2 / 173.8 against the profile's 346.4 / 174.4.
+- **Bound sweep:** still 0 violations.
+- **ctest:** 28/28 on the dev build.
+
+### What the user's map gives now, honestly
+
+These renders are in build/tmp/b27/u3, u4 and u5 montages. They use the user's settings (Hero Width 6000, Inversion 4160, Density 0.1, Billow Scale 300) with the hero alone and the camera at 4.2 km.
+
+- **Billows off:** the eye socket, the nose ridge and the line of the lips are there, like a plaster cast of a face fragment.
+- **Shape Billows 0.1:** they are scrambled. The lobes are the size of the features.
+- **Shape Billows 0.03:** they survive as soft wrinkles.
+- **Overall:** none of these reads as a face the way the frontal test card did (brow, two eye sockets, nose, from above). The crop has no head outline and only one eye. The outline is the strongest cue, and build 21's silhouettes (a face, a word, a dog) read from it alone.
+
+**Guidance given to the user:**
+- Use a whole head, ideally in profile, inside the frame against a plain background, and its depth map, for both sources.
+- Draw a feathered mask on the depth layer and set the Shape Source dropdown to Effects & Masks; Source ignores masks and effects.
+- Shape Billows 0 to 0.05.
+- Light from above and in front.
+
+### Known limits
+
+- **Shape Billows is still the legibility knob.** Features smaller than the shape's billow lobes do not survive them. `kShapeLobeFloor` keeps the lobes at 0.3 of the hero's even at low Shape Billows, so the amount goes down but the size does not.
+- **Viewing angle:** the plane stands vertical. A camera on the ground looking up sees the relief from below, foreshortened. Tilting the plane towards the lens is still open (see build 21).
+
+## 2026-10-02 — PAREIDOLIA RELIEF: A DEPTH MAP CARVES THE SHAPE'S FACE TOWARDS THE EYE. Build 27, still minor 15. A second layer, Relief Source, pushes the camera-facing side of the shape forward: brighter is nearer. A figure can now read from forms inside its outline that the sun models, not from the outline alone. On a face test card lit from above, the brow, the eye sockets and the nose read in the cloud; with the silhouette alone the same card is an oval of lobes. The clouds stay water: relief changes where the cloud is, never what it is made of. With no Relief Source a frame is byte-identical to build 26. Relief costs 0.6% on the default hero and 5% on a large dense face. INSTALLED (2026-10-02, 10:46), 28/28 tests, NOT YET SEEN IN THE HOST.
+
+### What was asked
+
+The user showed a sunset photo of a huge cloud mass whose figure reads from its inner forms: a brow, bulges catching the low sun, and a dark hollow in the middle. They said build 21's pareidolia could not do it, and doubted that "luminance as a depth map" would. They were right about the mechanism. The silhouette is cut at Threshold, and everything inside it becomes one cushion of even thickness, so only the outline carries the figure. An Absorption control (soot, for the photo's brown smoke-like shadows) was offered and declined: **"it's fine to build the relief if we keep our clouds as water (Very important)"**. Nothing in this build touches the medium.
+
+### What was built
+
+- **Params.h**: Relief Source (LAYER, 651), Relief From (Luminance | Inverted Luminance, 652), Relief Depth (653, default 0.25) and Relief Softness (654, default 0.35). They were inserted in the Pareidolia group before its spares. `PareidoliaParams` gained `reliefChannel`, `reliefDepth` and `reliefSoftness`, all hashed (sizes 28 → 40, 176 → 188, 384 → 396).
+- **Pareidolia.cpp, `buildShapeMap(..., const ReliefSource*)`**:
+  - The depth map is read at the silhouette's texels, matched to the matte by fraction of the frame, so a depth pass at another resolution lines up. It is read as Rec. 709 luma of the straight colour, so a half-transparent edge reads as its depth.
+  - Its range inside the silhouette is stretched to 0..1, because depth tools put a subject anywhere in their range.
+  - The outside is filled outward from the inside (each ring takes the mean of its filled neighbours), then blurred by a Gaussian of up to `kReliefBlurMax` = 16 texels at Softness 1. Without the fill, the blur would sink the rim towards the background, and the slope at the edge would be a cliff that loosened the bound everywhere.
+  - The result goes in the map's fourth float, which was unused. The steepest step between neighbouring texels is stored as `reliefSlope`.
+  - The hash takes the relief only when there is one, so a map without relief hashes as build 21's. One flat grey is no relief.
+- **`resolveShape`**: the relief height is Relief Depth × the shape's smaller side. The slope is height × √2 × step ÷ texel × 1.001: bilinear interpolation can step along both axes at once, and the 0.1% covers rounding. `extent` now reaches past the lifted face.
+- **ConvectionLib.slang**:
+  - `cvReliefHeight` and `cvReliefSlope`. The shape texel is read as a `float4`, and `convShapeDistance` returns the relief beside the distance.
+  - `convReliefLift`: height × relief × smoothstep(0, height, D). The lift fades in from the silhouette's edge over the relief's own height, so the rim stays round and the relief rises off it at no more than about 56°.
+  - In `convShapeSurface`, in front of the plane only, the distance from the plane counts from the lifted face: m = max(n − lift, 0). The whole rounded profile moves out towards the eye, and the slab behind the lifted face is solid. It is continuous at the plane, and the back is the old cushion. This is not build 21's rejected thickness height field: the profile's distance stays exact at the rim, where the lift is zero. On a steep relief the distance overstates the true one by up to √(1 + slope²), which only makes the billows there a little shallower.
+  - `convShapeBound`: a box wholly in front is nearer the face by at most min(height, height × relief(centre) + slope × half diagonal). This is the same argument as the distance's own Lipschitz bound, and the fade only lowers the lift. `convShapeReach` and SlangBridge.h's hero box add the height.
+- **Mistytune.cpp**: the two-step whole-layer checkout became `checkoutWholeLayer()`, used for both layers. The relief layer is checked out (7003/7004) only when a shape was, read in the same breath as the shape's source, and checked back in on every path. The log says `pareidolia: ... map in N s, with relief`, `relief flat -- none`, or why the depth map was unreadable.
+- **CLI**: `--relief <file|dome>`, `--relief-from luma|inv-luma`, `--relief-depth`, `--relief-softness` and `--relief-dump`. The shape line prints the relief's height and slope.
+- **Version**: build 27, MINOR STILL 15. AE's packed version gives the minor four bits. `PF_VERSION` masked minor 16 to 0, and the only symptom was EffectCommon.h's mismatch assert. CMakeLists.txt now refuses a minor past 15 or a build past 511 at configure time, in plain words. The build number is what tells AE its registration is stale, so it carries parameter changes from here.
+
+### Tests
+
+- **TestPareidolia, 7 new tests**:
+  - No relief, an invalid view and one flat grey all give build 21's texels and hash.
+  - A 0.3..0.7 ramp is stretched to 0..1 the right way round, and the inverse under Inverted.
+  - A half-transparent depth pass reads its depth.
+  - A pass at half the resolution builds the same relief to 0.03.
+  - `reliefSlope` is the steepest step, and Softness 1 brings a hard step under 1/(16 × 2.5) a texel.
+  - The rim keeps the subject's depth after the blur.
+  - The fit, the slope, the extent and NaN or out-of-range Relief Depth are covered.
+- **TestFingerprint**: the three new members.
+- **slang.convection**:
+  - The bound sweep gained three relief cases: a gentle ripple with the field (200 m), alone at 37° with decay 0.4 (500 m), and a sharp ripple (steps of 0.25 a texel) alone at full billows (900 m). All had 0 violations and a worst ratio of 1.0000.
+  - Section 8 gained (d): with no billows, through three points deep in the face, the cloud reaches R + height × relief in front (550.0 / 528.8 / 570.0 m against 550.2 / 529.7 / 570.5) and R behind (398.8 against 400, the 1.25 m probe step).
+  - It also gained (e): relief height 0 over a map whose fourth float is a ripple gives the same densities and bounds, bit for bit, as the map without one (0 of 102,000 differ).
+- **ctest**: 28/28 on the dev build and on the installed main build (267 unit tests).
+
+### Measured
+
+- **Unchanged without relief:** 320x180 at 16 spp against build 26's installed CLI, byte-identical with the smiley, with the face silhouette and with no shape.
+- **CPU against GPU with relief** (face card, facing 57°, 128x72 at 4 spp): max channel difference 0.
+- **Cost**, 1280x720 at 32 spp, three interleaved pairs: the default backlit hero with the face card took 54.4 s against 54.8 s with relief (+0.6%, noise). The large dense face (Inversion 7000, Hero Width 6000, Density 0.1) took 17.9 s against 18.9 s (+5.4%: the relief adds cloud).
+- **Map build**: a 512x640 matte with a depth map takes 21 ms, against 9 ms without.
+
+### What it takes to read: scale and density, and that is physics
+
+The first look renders at the defaults showed nothing inside the face. There was no bug: the side views showed the profile, brow, nose and chin standing proud exactly as built. The reason is that at Density 0.03 /m the mean free path is about 33 m, and with the droplets' forward-peaked phase function (g ≈ 0.85) light diffuses about 220 m before it forgets its direction. Any form smaller than a few hundred metres is lit as if it were not there. The test face was 1.2 km wide, so its nose and eye sockets were under that scale.
+
+At Hero Width 6000, Inversion 7000 and Density 0.1, the forms read. Light from above (sun at 50°) puts the brow's shadow into the eye sockets. Pure side light reads the big forms (the dome's ridge, the nose) but not the sockets. Shape Billows 0.1 reads better than 0.2 at this scale, because the hero's billows grow with it. The look renders are in build/tmp/b27/ (`relief-before-after.png`, `p1..p6-montage.png`), with the scripts that make them and the face cards (`make_face*.py`).
+
+So the guidance for a figure like the reference: a big hero (several km), Density near 0.1, Relief Depth 0.4 to 0.6, a sun that rakes across the forms, and Shape Billows down to about 0.1. That is the photo's own situation: a mass many kilometres across.
+
+### Known limits
+
+- One-sided: a carving seen from the front. Turn to Camera keeps it there. Orbited far round under Fixed Bearing, it is a relief seen from the side.
+- No overhangs beyond what the billows give: the depth is a height over the plane.
+- Animated depth maps are normalized per frame, so a depth map whose range changes over time will pump. Per-frame AI depth usually is normalized anyway.
+- Depth and silhouette are matched by fraction of their frames, so a depth layer of a different aspect is stretched to fit.
+- Not verified in the host: the second layer checkout, and an animated relief source.
+
+## 2026-10-02 — RENDER QUALITY: THE EFFECT'S OWN DRAFT/BEST SWITCH, AND A DRAFT THAT IS AS BRIGHT AS BEST. Build 26, minor 15. Draft traces one path per 2x2 block at one sample, with build 25's shadow hand-off and a full denoise, and leaves Max Bounces alone. Against Best at the same size, at 1 spp on the RTX 2070 SUPER: 3.4 to 3.9x less trace time at 480x270, 4.2 to 6.3x at 1920x1080. Its cloud is within 2 levels of a 64-spp reference. Through build 25, Draft capped Max Bounces at 16, and that left a close hero 27 levels dark. INSTALLED (2026-10-02, 09:12), 28/28 tests, NOT YET SEEN IN THE HOST.
 
 ### What was reported, and what the log says
 
@@ -99,8 +276,8 @@ of a second.
   block's centre with the jitter spread over the block. The frame is not halved, so framing and
   field of view are exact at odd sizes; halving `widthPx` would round. The seed is the block's
   first frame pixel. The CUDA band offset moves `rowBegin * stride`. STRIDE ONE TAKES THE OLD
-  EXPRESSION, ROUNDING INCLUDED: the dev build's 32-spp renders of A and close came out
-  byte-identical to build 25's, and the goldens pass unchanged.
+  EXPRESSION, ROUNDING INCLUDED: 32-spp renders of A and close came out byte-identical to
+  build 25's, from both the dev build and the installed one, and the goldens pass unchanged.
 - **`src/engine/Upscale.h`**: `strideExtent` and `upscaleFromStride`, bilinear between block
   centres, clamped at the edges, honouring both pitches. It works in linear light, after the
   denoise and before the output transform. `smartRenderHost` traces into a buffer the stride's

@@ -69,6 +69,11 @@ add_library(plugin_engine STATIC
     Pareidolia.h
     Pareidolia.cpp
 
+    # Local lights (build 29): the comp's lights and a light layer, mapped through the
+    # camera and packed for the kernel's next-event estimator beside the sun.
+    LocalLights.h
+    LocalLights.cpp
+
     # The classifier readout: the sky the parameters describe, named by genus and
     # species. Rule-based and host-free, per PLAN.md, so every rule has a test.
     Classifier.h

@@ -86,6 +86,13 @@ math(EXPR MT_EFFECT_OUT_FLAGS "4 | 33554432 | 67108864")
 #      and a stale-cache hunt, while setting it early costs only some redundant
 #      re-renders during development. Nothing has shipped, so it is free now.
 #
+# PF_OutFlag2_I_USE_3D_LIGHTS              (1 << 2)  = 4
+#   -- build 29. The comp's lights light the clouds (src/engine/LocalLights.h), read at
+#      pre-render through the layer suite. The SDK says this bit must be set by an effect
+#      that reads light layers, and it is what makes AE re-render when one moves, changes
+#      intensity or is switched off -- without it a keyframed lightning flash would play
+#      back from the cache unlit.
+#
 # PF_OutFlag2_SUPPORTS_SMART_RENDER        (1 << 10) = 1024
 # PF_OutFlag2_FLOAT_COLOR_AWARE            (1 << 12) = 4096
 #   -- 32 bpc float. Legal ONLY alongside SUPPORTS_SMART_RENDER, and the format
@@ -133,7 +140,7 @@ math(EXPR MT_EFFECT_OUT_FLAGS "4 | 33554432 | 67108864")
 # exactly as much as one that is right -- and this one will otherwise be re-tested
 # by the next person who reads the pre-render log.
 #
-math(EXPR MT_EFFECT_OUT_FLAGS2 "2 | 1024 | 4096 | 33554432 | 134217728")
+math(EXPR MT_EFFECT_OUT_FLAGS2 "2 | 4 | 1024 | 4096 | 33554432 | 134217728")
 
 # AE's packed version field: major<<19 | minor<<15 | bug<<11 | stage<<9 | build.
 #

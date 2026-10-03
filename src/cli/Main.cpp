@@ -27,11 +27,13 @@
 #include "FieldCache.h"
 #include "Denoiser.h"
 #include "Fingerprint.h"
+#include "LocalLights.h"
 #include "OrbitCamera.h"
 #include "Pareidolia.h"
 #include "SunPlacement.h"
 #include "Upscale.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -191,6 +193,34 @@ void printUsage() {
         "  --shape-facing <camera|deg>  turn to the camera, or face a fixed orbit bearing\n"
         "                   (default camera)\n"
         "  --shape-dump <path>   also write the distance map as a PGM, to look at\n"
+        "  --relief <file|dome>  a depth map (build 27) that carves the shape's face towards\n"
+        "                   the eye, read like --shape; dome is a built-in round bulge\n"
+        "  --relief-from <luma|inv-luma>  brighter is nearer, or darker (default luma)\n"
+        "  --relief-depth <x>    the nearest part's lift over the smaller side (default 0.25)\n"
+        "  --relief-softness <0..1>  the depth map's blur (default 0.35)\n"
+        "  --relief-detail <0..1>  build 28: how much of the large form is taken away (default 0.5)\n"
+        "  --relief-dump <path>  also write the built relief as a PGM, to look at\n"
+        "\n"
+        "  Local lights (build 29): AE's comp lights and a light layer, beside the sun.\n"
+        "  --light <spec>   a light in WORLD metres, repeatable:\n"
+        "                     point:x,y,z[,intensity[,radius]]\n"
+        "                     spot:x,y,z,dx,dy,dz[,intensity[,radius[,cone[,feather]]]]\n"
+        "                     parallel:dx,dy,dz[,intensity]  (the way its light travels)\n"
+        "                   intensity is AE's over 100: 1 lights the cloud inside the\n"
+        "                   radius as the sun at intensity 1 does (default radius 500 m)\n"
+        "  --comp-light <spec>  the same in COMP PIXELS, through AE's default camera for a\n"
+        "                   comp the frame's size, mapped as the effect maps a comp light\n"
+        "                   under the orbit rig; radius in pixels (default 500, AE's)\n"
+        "  --light-color <r,g,b>  linear, for the lights given after it (default 1,1,1)\n"
+        "  --light-smooth <m>     AE's Smooth falloff past the radius, for the lights after it\n"
+        "  --ambient <k>    AE's ambient light at intensity k (1 is 100%)\n"
+        "  --sun-intensity <k>  the effect's Sun Intensity (default 1); 0 is a night sky\n"
+        "  --light-layer <file|bolt>  a picture that glows, read like --shape, or a built-in\n"
+        "                   lightning bolt. It covers the frame, laid on the cloud it shows.\n"
+        "  --light-layer-strength <k>  (default 1)\n"
+        "  --light-layer-depth <m>     behind (+) or in front of (-) the cloud's face (default 0)\n"
+        "  --light-layer-flat          the sheet as one plane through the hero, as before (A/B)\n"
+        "  --light-layer-dump <path>   also write the layer as a PPM, to look at\n"
         "\n"
         "  --device         print what the renderer would use, and exit\n"
         "  --fingerprint    print the field and view hashes, and exit\n"
@@ -342,6 +372,27 @@ bool loadShapeImage(const char* path, ShapeImage& img) {
     return true;
 }
 
+// THE BUILT-IN RELIEF (build 27): DOME, a round bulge over the whole frame, brightest in the
+// middle and black at the corners -- opaque grey, so it is read as luminance. On a smiley
+// it lifts the face's middle and leaves the eyes and mouth as they were cut.
+bool builtinRelief(const char* name, ShapeImage& img) {
+    if (!argIs(name, "dome")) return false;
+    const int n = 512;
+    img.width = n;
+    img.height = n;
+    img.argb.assign(static_cast<size_t>(n) * n * 4, 0.0f);
+    for (int y = 0; y < n; ++y) {
+        for (int x = 0; x < n; ++x) {
+            const double cx = (x + 0.5) / n - 0.5, cy = (y + 0.5) / n - 0.5;
+            const double r2 = (cx * cx + cy * cy) / 0.5;
+            const float v = static_cast<float>(r2 < 1.0 ? std::sqrt(1.0 - r2) : 0.0);
+            float* p = img.argb.data() + (static_cast<size_t>(y) * n + x) * 4;
+            p[0] = 1.0f; p[1] = v; p[2] = v; p[3] = v;
+        }
+    }
+    return true;
+}
+
 // THE BUILT-IN MATTES, drawn in alpha at 512 x 512 with 4 x 4 coverage per pixel, so the
 // tests and the look renders need no file. A SMILEY is pareidolia's own test card: a face
 // read from two holes and an arc. THE LETTER F is asymmetric both ways, so a mirrored or
@@ -386,6 +437,133 @@ bool builtinShape(const char* name, ShapeImage& img) {
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Local lights (build 29)
+// ---------------------------------------------------------------------------
+
+// A LIGHT AS TYPED: its numbers in world metres or, for --comp-light, comp pixels, and the
+// colour and Smooth falloff in force when it was given.
+struct LightSpec {
+    cloud::LightKind kind = cloud::LightKind::Point;
+    double p[3] = { 0.0, 0.0, 0.0 };
+    double d[3] = { 0.0, -1.0, 0.0 };
+    float  intensity = 1.0f;
+    float  radius    = 500.0f;
+    float  cone      = 90.0f;
+    float  feather   = 0.5f;
+    float  color[3]  = { 1.0f, 1.0f, 1.0f };
+    float  smooth    = 0.0f;
+};
+
+// point:x,y,z[,i[,r]]  spot:x,y,z,dx,dy,dz[,i[,r[,cone[,feather]]]]  parallel:dx,dy,dz[,i]
+bool parseLightSpec(const char* text, LightSpec& s) {
+    const char* colon = std::strchr(text, ':');
+    if (!colon) return false;
+    const std::string kind(text, colon);
+    double v[10];
+    int n = 0;
+    const char* at = colon + 1;
+    while (*at && n < 10) {
+        char* end = nullptr;
+        v[n++] = std::strtod(at, &end);
+        if (end == at) return false;
+        at = *end == ',' ? end + 1 : end;
+        if (*end != ',' && *end != 0) return false;
+    }
+    if (kind == "point" && n >= 3) {
+        s.kind = cloud::LightKind::Point;
+        for (int k = 0; k < 3; ++k) s.p[k] = v[k];
+        if (n > 3) s.intensity = static_cast<float>(v[3]);
+        if (n > 4) s.radius    = static_cast<float>(v[4]);
+        return true;
+    }
+    if (kind == "spot" && n >= 6) {
+        s.kind = cloud::LightKind::Spot;
+        for (int k = 0; k < 3; ++k) { s.p[k] = v[k]; s.d[k] = v[3 + k]; }
+        if (n > 6) s.intensity = static_cast<float>(v[6]);
+        if (n > 7) s.radius    = static_cast<float>(v[7]);
+        if (n > 8) s.cone      = static_cast<float>(v[8]);
+        if (n > 9) s.feather   = static_cast<float>(v[9]);
+        return true;
+    }
+    if (kind == "parallel" && n >= 3) {
+        s.kind = cloud::LightKind::Parallel;
+        for (int k = 0; k < 3; ++k) s.d[k] = v[k];
+        if (n > 3) s.intensity = static_cast<float>(v[3]);
+        return true;
+    }
+    return false;
+}
+
+// THE BUILT-IN BOLT: a forked lightning channel, white-blue with a glow, over black, the
+// size of the frame -- what Saber on a black solid hands the effect. Deterministic: a
+// fixed stream of jitter, so the tests and the look renders see one bolt.
+bool builtinBolt(const char* name, int w, int h, ShapeImage& img) {
+    if (!argIs(name, "bolt")) return false;
+    img.width = w;
+    img.height = h;
+    img.argb.assign(static_cast<size_t>(w) * h * 4, 0.0f);
+    for (size_t p = 0; p < static_cast<size_t>(w) * h; ++p) img.argb[p * 4] = 1.0f;
+
+    unsigned state = 0x5eedb017u;
+    auto jitter = [&]() {
+        state = state * 747796405u + 2891336453u;
+        return static_cast<double>((state >> 8) & 0xffffff) / 16777216.0 - 0.5;
+    };
+
+    // A CHANNEL: from a to b in `steps` legs, each kink pushed sideways by up to `wander`.
+    struct Seg { double x0, y0, x1, y1, core; };
+    std::vector<Seg> segs;
+    auto channel = [&](double ax, double ay, double bx, double by, int steps, double wander,
+                       double core) {
+        double px = ax, py = ay;
+        for (int i = 1; i <= steps; ++i) {
+            const double t = static_cast<double>(i) / steps;
+            double x = ax + (bx - ax) * t, y = ay + (by - ay) * t;
+            if (i < steps) x += jitter() * wander * w;
+            segs.push_back({ px, py, x, y, core });
+            px = x; py = y;
+        }
+    };
+    channel(0.55 * w, 0.30 * h, 0.44 * w, 1.00 * h, 48, 0.035, 1.0);
+    channel(0.52 * w, 0.52 * h, 0.66 * w, 0.78 * h, 18, 0.03, 0.55);
+    channel(0.49 * w, 0.70 * h, 0.36 * w, 0.86 * h, 14, 0.025, 0.4);
+
+    const double sigma = 0.004 * w;      // the glow
+    const double coreR = 0.0012 * w;     // the channel
+    const double reach = 6.0 * sigma;
+    for (const Seg& s : segs) {
+        const int x0 = std::max(0, static_cast<int>(std::floor(std::min(s.x0, s.x1) - reach)));
+        const int x1 = std::min(w - 1, static_cast<int>(std::ceil(std::max(s.x0, s.x1) + reach)));
+        const int y0 = std::max(0, static_cast<int>(std::floor(std::min(s.y0, s.y1) - reach)));
+        const int y1 = std::min(h - 1, static_cast<int>(std::ceil(std::max(s.y0, s.y1) + reach)));
+        const double dx = s.x1 - s.x0, dy = s.y1 - s.y0;
+        const double len2 = dx * dx + dy * dy;
+        for (int y = y0; y <= y1; ++y) {
+            for (int x = x0; x <= x1; ++x) {
+                const double qx = x + 0.5 - s.x0, qy = y + 0.5 - s.y0;
+                const double t = len2 > 0.0 ? std::min(1.0, std::max(0.0, (qx * dx + qy * dy) / len2)) : 0.0;
+                const double ex = qx - dx * t, ey = qy - dy * t;
+                const double d = std::sqrt(ex * ex + ey * ey);
+                const double v = s.core * (d < coreR ? 1.0 : 0.0) + 0.45 * s.core * std::exp(-d / sigma);
+                float* p = img.argb.data() + (static_cast<size_t>(y) * w + x) * 4;
+                const float r = static_cast<float>(std::min(1.0, v * 0.85));
+                const float g = static_cast<float>(std::min(1.0, v * 0.90));
+                const float b = static_cast<float>(std::min(1.0, v * 1.00));
+                p[1] = std::max(p[1], r);
+                p[2] = std::max(p[2], g);
+                p[3] = std::max(p[3], b);
+            }
+        }
+    }
+    return true;
+}
+
+bool dumpLightLayer(const char* path, const ShapeImage& img) {
+    std::vector<float> argb = img.argb;
+    return writePpm(path, argb, img.width, img.height);
+}
+
 // The distance map as a picture: mid-grey at the edge, lighter inside, 4 texels a level.
 bool dumpShapeMap(const char* path, const cloud::ShapeMap& m) {
     FILE* f = std::fopen(path, "wb");
@@ -397,6 +575,22 @@ bool dumpShapeMap(const char* path, const cloud::ShapeMap& m) {
             float v = 128.0f + d * 4.0f;
             v = v < 0.0f ? 0.0f : (v > 255.0f ? 255.0f : v);
             std::fputc(static_cast<int>(v), f);
+        }
+    }
+    std::fclose(f);
+    return true;
+}
+
+// The relief as a picture: black is the cushion's face, white the nearest part.
+bool dumpReliefMap(const char* path, const cloud::ShapeMap& m) {
+    FILE* f = std::fopen(path, "wb");
+    if (!f) return false;
+    std::fprintf(f, "P5\n%d %d\n255\n", m.width, m.height);
+    for (int j = m.height - 1; j >= 0; --j) {       // row 0 of the map is the bottom
+        for (int i = 0; i < m.width; ++i) {
+            const float r = m.texels[(static_cast<size_t>(j) * m.width + i) * 4 + 3];
+            const float v = r < 0.0f ? 0.0f : (r > 1.0f ? 1.0f : r);
+            std::fputc(static_cast<int>(v * 255.0f + 0.5f), f);
         }
     }
     std::fclose(f);
@@ -593,6 +787,20 @@ int main(int argc, char** argv) {
     // PAREIDOLIA: the picture, and where to write its map for a look.
     const char* shapePath = nullptr;
     const char* shapeDump = nullptr;
+    const char* reliefPath = nullptr;
+    const char* reliefDump = nullptr;
+
+    // LOCAL LIGHTS (build 29): as typed, placed after the camera.
+    std::vector<LightSpec> worldLights;
+    std::vector<LightSpec> compLights;
+    float lightColor[3] = { 1.0f, 1.0f, 1.0f };
+    float lightSmooth = 0.0f;
+    float ambientIntensity = 0.0f;
+    const char* lightLayerPath = nullptr;
+    const char* lightLayerDump = nullptr;
+    float lightLayerStrength = 1.0f;
+    float lightLayerDepth = 0.0f;
+    bool  lightLayerFlat = false;
 
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
@@ -606,6 +814,7 @@ int main(int argc, char** argv) {
         else if (argIs(a, "--sun-el") && hasNext)    req.field.atmosphere.sunElevation = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--sun-az") && hasNext)    req.field.atmosphere.sunAzimuth   = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--turbidity") && hasNext) req.field.atmosphere.turbidity    = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--sun-intensity") && hasNext) req.field.atmosphere.sunIntensity = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--ev") && hasNext)        req.view.exposureEV = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--agx"))                  req.view.agxTonemap = true;
         else if (argIs(a, "--denoise"))              req.quality.denoise = true;
@@ -694,8 +903,39 @@ int main(int argc, char** argv) {
         else if (argIs(a, "--velum") && hasNext)         req.field.convection.velum       = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--velum-height") && hasNext)  req.field.convection.velumHeight = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--render-distance") && hasNext) req.view.renderDistance = static_cast<float>(std::atof(argv[++i]));
+        else if ((argIs(a, "--light") || argIs(a, "--comp-light")) && hasNext) {
+            LightSpec s;
+            for (int k = 0; k < 3; ++k) s.color[k] = lightColor[k];
+            s.smooth = lightSmooth;
+            const bool comp = argIs(a, "--comp-light");
+            if (!parseLightSpec(argv[++i], s)) {
+                std::fprintf(stderr, "could not read %s %s\n", a, argv[i]);
+                return 2;
+            }
+            (comp ? compLights : worldLights).push_back(s);
+        }
+        else if (argIs(a, "--light-color") && hasNext) {
+            if (std::sscanf(argv[++i], "%f,%f,%f", &lightColor[0], &lightColor[1], &lightColor[2]) != 3) {
+                std::fprintf(stderr, "--light-color wants r,g,b\n");
+                return 2;
+            }
+        }
+        else if (argIs(a, "--light-smooth") && hasNext)          lightSmooth        = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--ambient") && hasNext)               ambientIntensity   = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--light-layer") && hasNext)           lightLayerPath     = argv[++i];
+        else if (argIs(a, "--light-layer-dump") && hasNext)      lightLayerDump     = argv[++i];
+        else if (argIs(a, "--light-layer-strength") && hasNext)  lightLayerStrength = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--light-layer-depth") && hasNext)     lightLayerDepth    = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--light-layer-flat"))                  lightLayerFlat     = true;
         else if (argIs(a, "--shape") && hasNext)           shapePath = argv[++i];
         else if (argIs(a, "--shape-dump") && hasNext)      shapeDump = argv[++i];
+        else if (argIs(a, "--relief") && hasNext)          reliefPath = argv[++i];
+        else if (argIs(a, "--relief-dump") && hasNext)     reliefDump = argv[++i];
+        else if (argIs(a, "--relief-from") && hasNext)
+            req.field.convection.pareidolia.reliefChannel = argIs(argv[++i], "inv-luma") ? 1 : 0;
+        else if (argIs(a, "--relief-depth") && hasNext)    req.field.convection.pareidolia.reliefDepth    = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--relief-softness") && hasNext) req.field.convection.pareidolia.reliefSoftness = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--relief-detail") && hasNext)   req.field.convection.pareidolia.reliefDetail   = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--shape-channel") && hasNext) {
             const char* v = argv[++i];
             req.field.convection.pareidolia.channel = argIs(v, "luma") ? 1 : argIs(v, "inv-alpha") ? 2
@@ -832,10 +1072,25 @@ int main(int argc, char** argv) {
         }
         const cloud::ShapeChannel channel =
             static_cast<cloud::ShapeChannel>(req.field.convection.pareidolia.channel & 3);
+        // THE RELIEF'S DEPTH MAP (build 27), when one is named. It must outlive the build only.
+        ShapeImage reliefImage;
+        cloud::ReliefSource relief;
+        if (reliefPath) {
+            if (!builtinRelief(reliefPath, reliefImage) && !loadShapeImage(reliefPath, reliefImage)) {
+                std::fprintf(stderr, "could not read --relief %s (binary PGM, PPM or PAM, or dome)\n",
+                             reliefPath);
+                return 2;
+            }
+            relief.view     = reliefImage.view();
+            relief.inverted = req.field.convection.pareidolia.reliefChannel == 1;
+            relief.softness = req.field.convection.pareidolia.reliefSoftness;
+            relief.detail   = req.field.convection.pareidolia.reliefDetail;
+        }
         // TIMED, because the effect pays this on every frame of an animated source.
         const auto buildStart = std::chrono::steady_clock::now();
         const bool built = cloud::buildShapeMap(shapeImage.view(), channel,
-                                                req.field.convection.pareidolia.threshold, shapeMap);
+                                                req.field.convection.pareidolia.threshold, shapeMap,
+                                                reliefPath ? &relief : nullptr);
         const double buildMs = std::chrono::duration<double, std::milli>(
                                    std::chrono::steady_clock::now() - buildStart).count();
         std::printf("shape: %dx%d source -> map in %.1f ms\n", shapeImage.width, shapeImage.height,
@@ -845,6 +1100,12 @@ int main(int argc, char** argv) {
         } else {
             req.shapeMap = &shapeMap;
             if (shapeDump) dumpShapeMap(shapeDump, shapeMap);
+            if (reliefDump) dumpReliefMap(reliefDump, shapeMap);
+            if (reliefPath) {
+                std::printf("relief: %s, steepest step %.4f a texel\n",
+                            shapeMap.hasRelief ? "built" : "FLAT -- none",
+                            static_cast<double>(shapeMap.reliefSlope));
+            }
         }
         cloud::Real heroX = 0, heroZ = 0;
         cloud::heroPositionNow(req.field, heroX, heroZ);
@@ -854,10 +1115,12 @@ int main(int argc, char** argv) {
         cloud::deriveConvection(req.field, cd);
         const cloud::ShapeGeometry g = cloud::resolveShape(req.shapeMap,
                                                            req.field.convection.pareidolia, cd);
-        std::printf("shape: %dx%d map, %.0f x %.0f m, rims %.0f m, facing %.1f deg%s\n",
+        std::printf("shape: %dx%d map, %.0f x %.0f m, rims %.0f m, relief %.0f m (slope %.3f), "
+                    "facing %.1f deg%s\n",
                     shapeMap.width, shapeMap.height,
                     static_cast<double>(g.widthMetres), static_cast<double>(g.heightMetres),
                     static_cast<double>(g.round),
+                    static_cast<double>(g.reliefHeight), static_cast<double>(g.reliefSlope),
                     static_cast<double>(req.field.convection.pareidolia.bearing),
                     g.on ? "" : " (OFF: no map or no hero)");
     }
@@ -868,6 +1131,127 @@ int main(int argc, char** argv) {
     if (sunPlacement != cloud::SunPlacement::Manual) {
         std::printf("sun: azimuth %.1f deg from the placement\n",
                     static_cast<double>(req.field.atmosphere.sunAzimuth));
+    }
+
+    // THE LOCAL LIGHTS (build 29), after the camera, as the effect places them: comp lights
+    // through AE's default camera for a comp the frame's size, under the orbit rig's
+    // mapping, and the light layer at the hero's depth.
+    ShapeImage lightImage;
+    cloud::LightSheet lightSheet;
+    cloud::SheetPlacement lightPlace;
+    cloud::LightSet lightSet;
+    if (!worldLights.empty() || !compLights.empty() || ambientIntensity > 0.0f || lightLayerPath) {
+        const cloud::LightAnchor anchor = cloud::lightAnchor(req.field, req.view);
+        double cam[16];
+        double zoom = 0.0;
+        cloud::defaultCompCamera(req.view.widthPx, req.view.heightPx, cam, zoom);
+        const cloud::CompLightFrame frame = cloud::compLightFrame(
+            cam, zoom, req.view.heightPx, false, 1.0, req.view, anchor);
+
+        std::vector<cloud::LocalLight> lights;
+        auto add = [&](const LightSpec& s, bool comp) {
+            cloud::LocalLight L;
+            L.kind = s.kind;
+            L.intensity = s.intensity;
+            L.coneAngleDeg = s.cone;
+            L.coneFeather = s.feather;
+            for (int k = 0; k < 3; ++k) L.color[k] = s.color[k];
+            if (comp) {
+                cloud::compPointToWorld(frame, req.view, s.p, L.position);
+                cloud::compDirectionToWorld(frame, req.view, s.d, L.direction);
+                L.radius = static_cast<float>(s.radius * frame.along);
+                L.smoothFalloff = static_cast<float>(s.smooth * frame.along);
+            } else {
+                for (int k = 0; k < 3; ++k) {
+                    L.position[k] = static_cast<float>(s.p[k]);
+                    L.direction[k] = static_cast<float>(s.d[k]);
+                }
+                L.radius = s.radius;
+                L.smoothFalloff = s.smooth;
+            }
+            std::printf("light: %s at (%.0f, %.0f, %.0f) m, intensity %.2f, radius %.0f m\n",
+                        L.kind == cloud::LightKind::Spot ? "spot"
+                        : L.kind == cloud::LightKind::Parallel ? "parallel" : "point",
+                        static_cast<double>(L.position[0]), static_cast<double>(L.position[1]),
+                        static_cast<double>(L.position[2]), static_cast<double>(L.intensity),
+                        static_cast<double>(L.radius));
+            lights.push_back(L);
+        };
+        for (const LightSpec& s : worldLights) add(s, false);
+        for (const LightSpec& s : compLights) add(s, true);
+
+        bool haveSheet = false;
+        if (lightLayerPath) {
+            if (!builtinBolt(lightLayerPath, req.view.widthPx, req.view.heightPx, lightImage) &&
+                !loadShapeImage(lightLayerPath, lightImage)) {
+                std::fprintf(stderr, "could not read --light-layer %s (binary PGM, PPM or PAM, or bolt)\n",
+                             lightLayerPath);
+                return 2;
+            }
+            if (lightLayerDump) dumpLightLayer(lightLayerDump, lightImage);
+            haveSheet = cloud::buildLightSheet(lightImage.view(), req.view.encodeSrgb,
+                                               cloud::kLightSheetMaxSide, lightSheet);
+            std::printf("light layer: %dx%d -> %dx%d sheet%s\n",
+                        lightImage.width, lightImage.height, lightSheet.width, lightSheet.height,
+                        haveSheet ? "" : " -- NOTHING GLOWS, no sheet");
+            if (haveSheet && lightLayerFlat) {
+                lightPlace = cloud::placeLightSheet(req.view,
+                                                    std::max(10.0f, anchor.depth + lightLayerDepth),
+                                                    lightSheet.width, lightSheet.height);
+                std::printf("light layer: flat, at %.0f m\n",
+                            static_cast<double>(lightPlace.planeDepth));
+            } else if (haveSheet) {
+                // LAID ON THE CLOUD, as the effect lays it: probed from this request's field,
+                // the shape included, before it renders.
+                lightPlace = cloud::placeLightSheet(req.view, anchor.depth, lightSheet.width,
+                                                    lightSheet.height);
+                const auto probeStart = std::chrono::steady_clock::now();
+                cloud::SurfaceProbe probe;
+                cloud::surfaceProbeGrid(lightSheet, probe.width, probe.height);
+                probe.farDepth = anchor.depth + anchor.reach;
+                const std::vector<unsigned char> need =
+                    cloud::surfaceProbeMask(lightSheet, probe.width, probe.height);
+                kernel::probeSurfaceCpu(req, need, probe, threads);
+                cloud::conformLightSheet(lightSheet, probe, anchor.depth, lightLayerDepth,
+                                         lightPlace);
+                const double probeMs = std::chrono::duration<double, std::milli>(
+                                           std::chrono::steady_clock::now() - probeStart).count();
+
+                // WHERE THE LIT TEXELS STAND, as a range of depths: the face the probe found.
+                int asked = 0, seen = 0;
+                for (size_t k = 0; k < need.size(); ++k) {
+                    if (!need[k]) continue;
+                    ++asked;
+                    if (probe.hit[k] > 0.5f) ++seen;
+                }
+                std::vector<float> depths;
+                for (size_t t = 0; t < lightPlace.scale.size(); ++t) {
+                    const float* c = &lightSheet.rgb[t * 3];
+                    if (c[0] + c[1] + c[2] > 0.0f)
+                        depths.push_back(lightPlace.scale[t] * lightPlace.planeDepth);
+                }
+                std::sort(depths.begin(), depths.end());
+                const auto at = [&](double f) {
+                    return depths.empty() ? 0.0
+                         : static_cast<double>(depths[static_cast<size_t>(f * (depths.size() - 1))]);
+                };
+                std::printf("light layer: laid on the cloud from %d of %dx%d probe points (%d see it)"
+                            " in %.1f ms; lit texels %.0f / %.0f / %.0f m deep (min / median / max),"
+                            " the plane at %.0f m, none past %.0f m\n",
+                            asked, probe.width, probe.height, seen, probeMs, at(0.0), at(0.5),
+                            at(1.0), static_cast<double>(lightPlace.planeDepth),
+                            static_cast<double>(probe.farDepth));
+            }
+        }
+
+        const float ambient[3] = { ambientIntensity * cloud::kAmbientRadiancePerIntensity,
+                                   ambientIntensity * cloud::kAmbientRadiancePerIntensity,
+                                   ambientIntensity * cloud::kAmbientRadiancePerIntensity };
+        cloud::packLightSet(lights, ambient, haveSheet ? &lightSheet : nullptr,
+                            haveSheet ? &lightPlace : nullptr, lightLayerStrength, anchor, lightSet);
+        req.lightSet = &lightSet;
+        std::printf("lights: %d packed, anchor %.0f m deep, %zu floats\n", lightSet.count,
+                    static_cast<double>(anchor.depth), lightSet.packed.size());
     }
 
     // THE WINDOW, WHICH IS WHAT AFTER EFFECTS ACTUALLY ASKS FOR MOST OF THE TIME.

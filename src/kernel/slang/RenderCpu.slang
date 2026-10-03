@@ -13,6 +13,8 @@
 // THAT IS THE PROPERTY PLAN.md CALLS "ONE KERNEL SOURCE", and slang.cpuParity is
 // what keeps it honest: the same library through both targets, over the same inputs,
 // compared.
+//
+// ONE ENTRY POINT HERE HAS NO TWIN: cpuSurfaceProbe, at the bottom. See it.
 
 #include "RenderLib.slang"
 
@@ -50,4 +52,28 @@ void cpuBuildAirMap(uint3 tid : SV_DispatchThreadID,
     if (i >= count) return;
 
     layerMapColumn(medium, drift, map, i, outTexels);
+}
+
+// THE FACE THE CAMERA SEES (build 29), for the light layer's sheet -- and C++ ONLY. The sheet
+// is laid on the cloud on the host before the frame renders, from at most a few thousand
+// rays (probeSurfaceCpu in CpuRender.cpp), and the GPU path never has a light layer: the
+// layer withdraws the offer. So Render.slang has nothing to match it with. This entry point
+// is what makes slangc emit sceneFirstScatter at all; CpuRender.cpp calls the function
+// itself, as it calls renderSample.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cpuSurfaceProbe(uint3 tid : SV_DispatchThreadID,
+                     uniform Scene scene,
+                     uniform StructuredBuffer<float> bounds,
+                     uniform StructuredBuffer<float2> drift,
+                     uniform StructuredBuffer<float3> origins,
+                     uniform StructuredBuffer<float3> directions,
+                     uniform RWStructuredBuffer<float2> outMoments,
+                     uniform float tMax,
+                     uniform int count)
+{
+    int i = int(tid.x);
+    if (i >= count) return;
+
+    outMoments[i] = sceneFirstScatter(scene, bounds, drift, origins[i], directions[i], tMax);
 }

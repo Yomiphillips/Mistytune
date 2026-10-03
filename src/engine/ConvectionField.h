@@ -252,6 +252,13 @@ struct ShapeGeometry {
     Real decay  = 0;   // 0..1
     Real billow = 1;   // the shape's billows over the hero's, 0..1
 
+    // RELIEF (build 27): the most the face towards the eye stands proud of the cushion, in
+    // metres -- 0 IS NONE -- and the most it can change per metre across the plane, which
+    // the kernel's bound needs. See Pareidolia.h.
+    Real reliefHeight = 0;
+    Real reliefSlope  = 0;
+    Real reliefFade   = 1;   // m inside the edge over which the lift comes in (build 28)
+
     // The silhouette's size once fitted, for the log and the tests.
     Real widthMetres  = 0;
     Real heightMetres = 0;

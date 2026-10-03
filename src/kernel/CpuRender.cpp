@@ -342,6 +342,100 @@ void renderCpu(const RenderRequest& req, int threads, int rowBegin, int rowEnd) 
 }
 
 // ---------------------------------------------------------------------------
+// The face the camera sees, for the light layer (build 29)
+// ---------------------------------------------------------------------------
+
+void probeSurfaceCpu(const RenderRequest& req, const std::vector<unsigned char>& need,
+                     cloud::SurfaceProbe& probe, int threads) {
+    namespace be = mistytune_cpu_backend;
+
+    const int    gw = probe.width;
+    const int    gh = probe.height;
+    const size_t n  = gw > 0 && gh > 0 ? static_cast<size_t>(gw) * gh : 0;
+    probe.depth.assign(n, 0.0f);
+    probe.hit.assign(n, 0.0f);
+    if (n == 0 || need.size() != n || req.view.widthPx <= 0 || req.view.heightPx <= 0) return;
+
+    std::vector<size_t> todo;
+    for (size_t k = 0; k < n; ++k) {
+        if (need[k]) todo.push_back(k);
+    }
+    if (todo.empty()) return;
+
+    // THE FRAME'S OWN SCENE, derived as renderCpu derives it. No shadow maps: the march
+    // reads the density and nothing else.
+    RenderRequest work = req;
+    deriveRenderInputs(work);
+    work.driftBuffer = work.drift.xz;
+
+    be::Scene_0      scene{};
+    be::PhaseInput_0 phase{};
+    fillSlangScene<CpuVectors>(work, scene, phase);
+
+    be::StructuredBuffer<float> bounds;
+    bounds.data  = nullptr;
+    bounds.count = 0;
+
+    be::StructuredBuffer<be::Vector<float, 2>> drift;
+    drift.data  = reinterpret_cast<be::Vector<float, 2>*>(work.drift.xz);
+    drift.count = static_cast<size_t>(cloud::kDriftKnots);
+
+    // IN FRAME PIXELS, whatever window of the frame this request renders into: the grid
+    // covers the frame, as the sheet does.
+    cloud::ViewParams view = work.view;
+    view.originX = 0;
+    view.originY = 0;
+    const Vec3   eye = primaryRayOrigin(view);
+    const float* m   = view.cameraToWorld;
+    const Vec3   fwd = vec3(-m[2], -m[6], -m[10]);
+    const float  far = probe.farDepth > 0.0f ? probe.farDepth : 1e30f;
+
+    const auto points = [&](size_t i0, size_t i1) {
+        be::Scene_0 s = scene;
+        for (size_t i = i0; i < i1; ++i) {
+            const size_t k = todo[i];
+            float fx = 0.0f, fy = 0.0f;
+            cloud::surfaceProbePixel(static_cast<int>(k % gw), static_cast<int>(k / gw), gw, gh,
+                                     view.widthPx, view.heightPx, fx, fy);
+            const Vec3  dir   = primaryRayDirection(view, 0, 0, fx - 0.5f, fy - 0.5f);
+            const float along = dir.x * fwd.x + dir.y * fwd.y + dir.z * fwd.z;
+            // THE FAR DEPTH AS A DISTANCE ALONG THIS RAY. A ray at right angles to the view
+            // axis or behind it reaches no depth at all, and is a ray the frame cannot have.
+            const float tMax = along > 1e-6f ? far / along : 0.0f;
+            const be::Vector<float, 2> r =
+                be::sceneFirstScatter_0(&s, bounds, drift, CpuVectors::v3(eye.x, eye.y, eye.z),
+                                        CpuVectors::v3(dir.x, dir.y, dir.z), tMax);
+            probe.hit[k]   = r.y;
+            probe.depth[k] = r.x * along;
+        }
+    };
+
+    if (threads <= 0) {
+        const unsigned int hw = std::thread::hardware_concurrency();
+        threads = hw == 0 ? 1 : static_cast<int>(hw);
+    }
+    const size_t count = todo.size();
+    if (static_cast<size_t>(threads) > count) threads = static_cast<int>(count);
+
+    if (threads <= 1) {
+        points(0, count);
+        return;
+    }
+
+    // EVERY POINT WRITES ONLY ITS OWN TWO FLOATS, so any split gives the same bytes.
+    std::vector<std::thread> pool;
+    pool.reserve(static_cast<size_t>(threads));
+    const size_t run = (count + threads - 1) / threads;
+    for (int t = 0; t < threads; ++t) {
+        const size_t i0 = static_cast<size_t>(t) * run;
+        const size_t i1 = std::min(i0 + run, count);
+        if (i0 >= i1) break;
+        pool.emplace_back(points, i0, i1);
+    }
+    for (std::thread& th : pool) th.join();
+}
+
+// ---------------------------------------------------------------------------
 // The output transform over a finished frame
 // ---------------------------------------------------------------------------
 

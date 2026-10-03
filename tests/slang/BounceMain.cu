@@ -51,6 +51,9 @@
 
 #include "Bounce.cu"
 
+// The local lights' buffer, packed as the effect packs it (build 29).
+#include "LocalLights.h"
+
 namespace {
 
 double kahanSum(const std::vector<float>& v) {
@@ -236,6 +239,169 @@ double neeAnalytic(double albedo, double phase, double E,
         geom = (1.0 - std::exp(-tau * k)) / (1.0 - mu);
     }
     return albedo * phase * E * std::exp(-tau) * geom;
+}
+
+
+// ---------------------------------------------------------------------------
+// LOCAL LIGHTS (build 29): the same single-scatter integral, by quadrature
+// ---------------------------------------------------------------------------
+//
+// THE KERNEL DRAWS ONE LIGHT PER EVENT, AND FOR A SHEET ONE TEXEL AND ONE POINT IN IT, and
+// divides by the probability of each draw. The reference below draws nothing: it sums every
+// light, integrates every texel's area, and marches the camera ray -- so a wrong pick
+// probability, a texel weighted twice, a shadow ray that walks past its light or one that
+// stops short, and a phase cosine of the wrong sign all show up as a difference. The phase
+// is a forward-peaked Henyey-Greenstein for exactly that last reason: an isotropic phase
+// cannot tell a cosine from its negative.
+//
+// IT READS THE SAME PACKED BUFFER THE KERNEL DOES, made by src/engine/LocalLights.h, and
+// TestLights.cpp checks the packer's numbers against AE's meaning. This checks the kernel's
+// reading of them.
+struct SlabRef {
+    double bottom, top, sigma;
+};
+
+double len3(const double v[3]) { return std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); }
+
+// Optical depth along the straight segment a -> b: sigma times its length inside the slab.
+double slabDepth(const SlabRef& s, const double a[3], const double b[3]) {
+    const double d[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] };
+    const double len = len3(d);
+    if (!(len > 0.0)) return 0.0;
+    if (std::fabs(d[1]) < 1e-12) return (a[1] >= s.bottom && a[1] <= s.top) ? s.sigma * len : 0.0;
+    double s0 = (s.bottom - a[1]) / d[1];
+    double s1 = (s.top - a[1]) / d[1];
+    if (s0 > s1) std::swap(s0, s1);
+    const double lo = std::max(0.0, s0), hi = std::min(1.0, s1);
+    return hi > lo ? s.sigma * len * (hi - lo) : 0.0;
+}
+
+// ...and from a point inside the slab out along a unit direction, for good.
+double slabDepthOut(const SlabRef& s, const double x[3], const double d[3]) {
+    if (d[1] > 1e-12)  return s.sigma * (s.top - x[1]) / d[1];
+    if (d[1] < -1e-12) return s.sigma * (x[1] - s.bottom) / -d[1];
+    return 1e30;
+}
+
+double lightEdgeHost(double lo, double hi, double x) {
+    if (!(hi > lo)) return x >= lo ? 1.0 : 0.0;
+    const double t = std::min(1.0, std::max(0.0, (x - lo) / (hi - lo)));
+    return t * t * (3.0 - 2.0 * t);
+}
+
+// The phase function off the GPU, tabulated over the cosine and read back linearly.
+struct PhaseTable {
+    std::vector<double> v;
+    double at(double mu) const {
+        const double x = (std::min(1.0, std::max(-1.0, mu)) + 1.0) * 0.5 * (v.size() - 1);
+        const size_t i = std::min(static_cast<size_t>(x), v.size() - 2);
+        const double f = x - static_cast<double>(i);
+        return v[i] * (1.0 - f) + v[i + 1] * f;
+    }
+};
+
+PhaseTable phaseTable(PhaseInput_0 p, int n) {
+    std::vector<float> mus(n);
+    for (int i = 0; i < n; ++i) mus[i] = static_cast<float>(-1.0 + 2.0 * i / (n - 1));
+    float* dIn = nullptr;
+    float* dOut = nullptr;
+    cudaMalloc(&dIn, n * sizeof(float));
+    cudaMalloc(&dOut, n * sizeof(float));
+    cudaMemcpy(dIn, mus.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+    StructuredBuffer<float>   bIn;  bIn.data  = dIn;  bIn.count  = static_cast<size_t>(n);
+    RWStructuredBuffer<float> bOut; bOut.data = dOut; bOut.count = static_cast<size_t>(n);
+    phaseValueTrial<<<(n + 63) / 64, 64>>>(p, bIn, bOut, n);
+    std::vector<float> h(n);
+    cudaMemcpy(h.data(), dOut, n * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaFree(dIn);
+    cudaFree(dOut);
+    PhaseTable t;
+    t.v.assign(h.begin(), h.end());
+    return t;
+}
+
+// Every light's phase-weighted irradiance at x, through the slab: what one next event
+// estimates, summed rather than drawn. Channel x of the packed colours.
+double lightsAt(const std::vector<float>& b, const SlabRef& slab, const double x[3],
+                const double camDir[3], const PhaseTable& ph) {
+    const int count = static_cast<int>(b[0]);
+    double total = 0.0;
+    for (int k = 0; k < count; ++k) {
+        const int r = plugin::cloud::kLightHeaderFloats + k * plugin::cloud::kLightRecordFloats;
+        const int kind = static_cast<int>(b[r]);
+
+        if (kind == 2) {
+            const double toL[3] = { b[r + 6], b[r + 7], b[r + 8] };
+            const double mu = camDir[0] * toL[0] + camDir[1] * toL[1] + camDir[2] * toL[2];
+            total += ph.at(mu) * b[r + 9] * std::exp(-slabDepthOut(slab, x, toL));
+            continue;
+        }
+
+        if (kind == 3) {
+            const int w = static_cast<int>(b[r + 13]), h = static_cast<int>(b[r + 14]);
+            const int off = static_cast<int>(b[r + 15]);
+            const int n = w * h;
+            const int tf = plugin::cloud::kSheetTexelFloats;
+            const double eye[3] = { b[r + 9], b[r + 10], b[r + 11] };
+            const int sub = 16;
+            for (int t = 0; t < n; ++t) {
+                const double L = b[off + tf * t];
+                if (!(L > 0.0)) continue;
+                // WHERE THE TEXEL STANDS: its patch of the plane pushed along the eye's rays by
+                // its scale, and s^2 times the area.
+                const double s = b[off + tf * t + 3];
+                const double area = b[r + 12] * s * s;
+                const int iu = t % w, iv = t / w;
+                for (int j = 0; j < sub; ++j) {
+                    for (int i = 0; i < sub; ++i) {
+                        const double fu = iu + (i + 0.5) / sub, fv = iv + (j + 0.5) / sub;
+                        double q[3], d[3];
+                        for (int c = 0; c < 3; ++c) {
+                            const double onPlane = b[r + 3 + c] + b[r + 6 + c] * fu + b[r + 16 + c] * fv;
+                            q[c] = eye[c] + (onPlane - eye[c]) * s;
+                            d[c] = q[c] - x[c];
+                        }
+                        const double dist = len3(d);
+                        const double d2 = dist * dist;
+                        const double mu = (camDir[0] * d[0] + camDir[1] * d[1] + camDir[2] * d[2]) / dist;
+                        // the integral of L / max(d^2, A) over the texel, one sub-patch of it
+                        const double e = L * (area / (sub * sub)) / std::max(d2, area);
+                        total += ph.at(mu) * e * std::exp(-slabDepth(slab, x, q));
+                    }
+                }
+            }
+            continue;
+        }
+
+        const double q[3] = { b[r + 3], b[r + 4], b[r + 5] };
+        const double d[3] = { q[0] - x[0], q[1] - x[1], q[2] - x[2] };
+        const double dist = len3(d);
+        double e = b[r + 9] / std::max(dist * dist, static_cast<double>(b[r + 12]));
+        if (kind == 1) {
+            const double c = -(d[0] * b[r + 6] + d[1] * b[r + 7] + d[2] * b[r + 8]) / dist;
+            e *= lightEdgeHost(b[r + 13], b[r + 14], c);
+        }
+        if (b[r + 16] > 0.0f) e *= 1.0 - lightEdgeHost(b[r + 15], b[r + 16], dist);
+        const double mu = (camDir[0] * d[0] + camDir[1] * d[1] + camDir[2] * d[2]) / dist;
+        total += ph.at(mu) * e * std::exp(-slabDepth(slab, x, q));
+    }
+    return total;
+}
+
+// Single scatter along the camera ray from `o` until it leaves the slab's top: the first
+// collision's density times the albedo times what the lights send there.
+double lightsReference(const std::vector<float>& b, const SlabRef& slab, double albedo,
+                       const double o[3], const double dir[3], const PhaseTable& ph) {
+    const double tExit = (slab.top - o[1]) / dir[1];
+    const int steps = 1500;
+    const double dt = tExit / steps;
+    double sum = 0.0;
+    for (int i = 0; i < steps; ++i) {
+        const double t = (i + 0.5) * dt;
+        const double x[3] = { o[0] + dir[0] * t, o[1] + dir[1] * t, o[2] + dir[2] * t };
+        sum += slab.sigma * std::exp(-slab.sigma * t) * lightsAt(b, slab, x, dir, ph) * dt;
+    }
+    return albedo * sum;
 }
 
 } // namespace
@@ -827,6 +993,229 @@ int main() {
                         "          something besides the first next event was dropped\n");
             ++failures;
         }
+    }
+
+
+    // -----------------------------------------------------------------------
+    // 7. LOCAL LIGHTS (build 29): one light per event against every light summed
+    // -----------------------------------------------------------------------
+    //
+    // Two points (one inside the slab, one below it), a spot with a feathered cone and a
+    // Smooth falloff, a parallel light, and a six-texel sheet inside the slab. Single
+    // scatter, black sky, no sun: what is measured is the lights' next event alone, against
+    // lightsReference above. Each light alone as well, so a failure names its kind.
+    std::printf("\nLOCAL LIGHTS -- one light drawn per event, against every light summed\n");
+    {
+        using namespace plugin::cloud;
+
+        PhaseInput_0 hg{};
+        hg.hgG_0 = 0.5f;
+        hg.useIce_0 = 0;
+        const PhaseTable table = phaseTable(hg, 8193);
+
+        const SlabRef slab{ slabBottom, slabTop, sigma };
+        const double lightAlbedo = 0.8;
+        const double mu = 0.7;
+        const double sa = std::sqrt(1.0 - mu * mu);
+        const double o[3]   = { 0.0, slabBottom, 0.0 };
+        const double dir[3] = { sa, mu, 0.0 };
+        const float3 dirF   = make_float3(static_cast<float>(sa), static_cast<float>(mu), 0.0f);
+
+        std::vector<LocalLight> all;
+        LocalLight a;
+        a.kind = LightKind::Point;
+        a.position[0] = 500.0f; a.position[1] = 1550.0f; a.position[2] = 150.0f;
+        a.intensity = 0.02f;
+        a.radius = 60.0f;
+        all.push_back(a);
+
+        LocalLight below = a;
+        below.position[0] = -300.0f; below.position[1] = 700.0f; below.position[2] = -100.0f;
+        below.intensity = 0.05f;
+        below.radius = 40.0f;
+        all.push_back(below);
+
+        LocalLight spot;
+        spot.kind = LightKind::Spot;
+        spot.position[0] = 600.0f; spot.position[1] = 2400.0f; spot.position[2] = 0.0f;
+        spot.direction[0] = 0.0f; spot.direction[1] = -1.0f; spot.direction[2] = 0.0f;
+        spot.intensity = 0.03f;
+        spot.radius = 80.0f;
+        spot.coneAngleDeg = 70.0f;
+        spot.coneFeather = 0.4f;
+        spot.smoothFalloff = 900.0f;
+        all.push_back(spot);
+
+        LocalLight par;
+        par.kind = LightKind::Parallel;
+        par.direction[0] = -0.3f; par.direction[1] = -0.8f; par.direction[2] = -0.2f;
+        par.intensity = 0.002f;
+        all.push_back(par);
+
+        LightSheet sheet;
+        sheet.width = 3;
+        sheet.height = 2;
+        sheet.rgb = { 0.002f, 0.002f, 0.002f,   0.0f, 0.0f, 0.0f,         0.005f, 0.005f, 0.005f,
+                      0.001f, 0.001f, 0.001f,   0.003f, 0.003f, 0.003f,   0.0f, 0.0f, 0.0f };
+        SheetPlacement place;
+        place.origin[0] = 200.0f; place.origin[1] = 1150.0f; place.origin[2] = -250.0f;
+        place.axisU[0] = 150.0f;
+        place.axisV[1] = 120.0f; place.axisV[2] = 60.0f;
+
+        LightAnchor anchor;
+        anchor.point[0] = 500.0f; anchor.point[1] = 1500.0f;
+        const float noAmbient[3] = { 0.0f, 0.0f, 0.0f };
+
+        float* dLights = nullptr;
+        auto run = [&](const LightSet& set, float neeScale, unsigned seed, int n,
+                       double& measured, double& reference) {
+            cudaFree(dLights);
+            cudaMalloc(&dLights, set.packed.size() * sizeof(float));
+            cudaMemcpy(dLights, set.packed.data(), set.packed.size() * sizeof(float),
+                       cudaMemcpyHostToDevice);
+            Scene_0 s = nee;
+            s.sunIrradiance_0 = make_float3(0.0f, 0.0f, 0.0f);
+            s.albedo_0 = make_float3(static_cast<float>(lightAlbedo), static_cast<float>(lightAlbedo),
+                                     static_cast<float>(lightAlbedo));
+            s.medium_0.majorant_0 = sigma * 2.0f;
+            s.neeTentativeScale_0 = neeScale;
+            s.ltCount_0 = set.count;
+            s.ltBuffer_0.data = dLights;
+            s.ltBuffer_0.count = set.packed.size();
+            measured  = runTrace(scratch, s, hg, bottom, dirF, seed, n).meanRadiance;
+            reference = lightsReference(set.packed, slab, lightAlbedo, o, dir, table);
+        };
+
+        const int lightTrials = 1 << 21;
+        std::printf("  HG phase g 0.5, albedo %.1f, mu %.1f, %d trials\n\n", lightAlbedo, mu, lightTrials);
+        std::printf("  %-22s %14s %14s %10s\n", "light", "measured", "quadrature", "rel err");
+
+        const char* names[] = { "point, in the slab", "point, below it", "spot, feathered",
+                                "parallel" };
+        for (int i = 0; i < 4; ++i) {
+            LightSet one;
+            packLightSet({ all[i] }, noAmbient, nullptr, nullptr, 1.0f, anchor, one);
+            double m = 0.0, ref = 0.0;
+            run(one, 0.0f, 0x11A0u + i, lightTrials, m, ref);
+            const double rel = (m - ref) / ref;
+            std::printf("  %-22s %14.8f %14.8f %+9.3f%%\n", names[i], m, ref, rel * 100.0);
+            if (std::fabs(rel) > 0.02) {
+                std::printf("    FAIL: the %s is off by %.2f%%\n", names[i], rel * 100.0);
+                ++failures;
+            }
+        }
+        {
+            LightSet one;
+            packLightSet({}, noAmbient, &sheet, &place, 1.0f, anchor, one);
+            double m = 0.0, ref = 0.0;
+            run(one, 0.0f, 0x11A9u, lightTrials, m, ref);
+            const double rel = (m - ref) / ref;
+            std::printf("  %-22s %14.8f %14.8f %+9.3f%%\n", "sheet, six texels", m, ref, rel * 100.0);
+            if (std::fabs(rel) > 0.02) {
+                std::printf("    FAIL: the sheet is off by %.2f%%\n", rel * 100.0);
+                ++failures;
+            }
+        }
+
+        // A BOLT ACROSS A 16 x 10 SHEET WHOSE PLANE THE CAMERA RAY CROSSES, so the points near
+        // it draw from the window round their projection as well as from the whole sheet --
+        // and the mixture's probability is what the answer rests on. A diagonal channel, a
+        // bright texel near the crossing and a brighter one far from it.
+        {
+            LightSheet bolt;
+            bolt.width = 16;
+            bolt.height = 10;
+            bolt.rgb.assign(16 * 10 * 3, 0.0f);
+            auto lit = [&](int iu, int iv, float v) {
+                for (int c = 0; c < 3; ++c) bolt.rgb[(iv * 16 + iu) * 3 + c] = v;
+            };
+            for (int iu = 2; iu <= 14; ++iu) lit(iu, 1 + (iu - 2) * 7 / 12, 0.003f);
+            lit(4, 3, 0.01f);
+            lit(15, 0, 0.02f);
+            SheetPlacement across;
+            across.origin[0] = -100.0f; across.origin[1] = 1050.0f; across.origin[2] = -60.0f;
+            across.axisU[0] = 70.0f;
+            across.axisV[1] = 60.0f; across.axisV[2] = 20.0f;
+
+            LightSet one;
+            packLightSet({}, noAmbient, &bolt, &across, 1.0f, anchor, one);
+            double m = 0.0, ref = 0.0;
+            run(one, 0.0f, 0x11AAu, lightTrials, m, ref);
+            const double rel = (m - ref) / ref;
+            std::printf("  %-22s %14.8f %14.8f %+9.3f%%\n", "sheet, a bolt crossed", m, ref, rel * 100.0);
+            if (std::fabs(rel) > 0.02) {
+                std::printf("    FAIL: the crossed sheet is off by %.2f%% -- the window's\n"
+                            "          probability is not what the kernel divides by\n", rel * 100.0);
+                ++failures;
+            }
+
+            // THE SAME BOLT LAID ON A FACE: every texel pushed along an eye's rays by its own
+            // scale, as conformLightSheet lays it on the cloud, so the texels are off one
+            // plane, of different sizes, and the tree's cells are where they stand.
+            SheetPlacement laid = across;
+            laid.eye[0] = -400.0f; laid.eye[1] = 600.0f; laid.eye[2] = -1500.0f;
+            laid.scale.assign(16 * 10, 1.0f);
+            for (int t = 0; t < 16 * 10; ++t)
+                laid.scale[t] = 0.75f + 0.5f * static_cast<float>((t * 37) % 11) / 10.0f;
+
+            LightSet onFace;
+            packLightSet({}, noAmbient, &bolt, &laid, 1.0f, anchor, onFace);
+            run(onFace, 0.0f, 0x11ABu, lightTrials, m, ref);
+            const double relLaid = (m - ref) / ref;
+            std::printf("  %-22s %14.8f %14.8f %+9.3f%%\n", "sheet, laid on a face", m, ref,
+                        relLaid * 100.0);
+            if (std::fabs(relLaid) > 0.02) {
+                std::printf("    FAIL: the laid sheet is off by %.2f%% -- its texels are not\n"
+                            "          where the kernel draws them, or not the size\n",
+                            relLaid * 100.0);
+                ++failures;
+            }
+        }
+
+        // ALL FIVE AT ONCE, which is where the pick probabilities are divided by -- and once
+        // more through the camera segment's walk, which is how the renderer finds the first
+        // event.
+        LightSet set;
+        packLightSet(all, noAmbient, &sheet, &place, 1.0f, anchor, set);
+        const float scales[] = { 0.0f, 1.0f };
+        for (float k : scales) {
+            double m = 0.0, ref = 0.0;
+            run(set, k, 0x11B0u + static_cast<unsigned>(k), lightTrials, m, ref);
+            const double rel = (m - ref) / ref;
+            std::printf("  %-22s %14.8f %14.8f %+9.3f%%\n",
+                        k > 0.0f ? "all five, segment walk" : "all five", m, ref, rel * 100.0);
+            if (std::fabs(rel) > 0.015) {
+                std::printf("    FAIL: the lights together are off by %.2f%% -- the picks are\n"
+                            "          not what the kernel divides by\n", rel * 100.0);
+                ++failures;
+            }
+        }
+
+        // AE's AMBIENT LIGHT: a uniform dome every scattered path sees on its way out, and
+        // the camera does not. In a conservative medium a path that scatters returns exactly
+        // the ambient radiance or is capped, so the mean is an identity, as the furnace's is:
+        // A x (P(the camera ray scatters) - P(capped)).
+        {
+            LightSet amb;
+            const float A[3] = { 0.25f, 0.25f, 0.25f };
+            packLightSet({}, A, nullptr, nullptr, 1.0f, anchor, amb);
+            Scene_0 s = base;
+            s.environment_0.uniformRadiance_0 = make_float3(0.0f, 0.0f, 0.0f);
+            s.maxBounces_0 = 128;
+            s.ltCount_0 = amb.count;
+            s.ltAmbient_0 = make_float3(amb.ambient[0], amb.ambient[1], amb.ambient[2]);
+            const Run r = runTrace(scratch, s, iso, bottom, dirF, 0xA3B1u, trials);
+            const double scatter = 1.0 - std::exp(-static_cast<double>(sigma * thickness) / mu);
+            const double expect = 0.25 * (scatter - r.cappedFraction);
+            const double se = 0.25 * std::sqrt(scatter * (1.0 - scatter) / trials);
+            std::printf("  %-22s %14.8f %14.8f   (%.1f standard errors)\n", "ambient dome",
+                        r.meanRadiance, expect, (r.meanRadiance - expect) / se);
+            if (std::fabs(r.meanRadiance - expect) > 5.0 * se) {
+                std::printf("    FAIL: the ambient light is not what a scattered path sees\n");
+                ++failures;
+            }
+        }
+        cudaFree(dLights);
     }
 
     std::printf("\n%s\n", failures == 0

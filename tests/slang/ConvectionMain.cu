@@ -243,6 +243,51 @@ void addShape(ConvectionInput_0& c, const Device<float>& map, float bearingDeg, 
     c.cvShapeBillow_0    = billow;
 }
 
+// RELIEF (build 27): a smooth ripple in the map's fourth float, 0..1. Defined everywhere, so
+// past the silhouette it is the function's own -- as the host's fill makes it continue.
+float reliefAt(float x, float y, float wavelength) {
+    return 0.5f + 0.5f * std::sin(x / wavelength) * std::cos(y / (1.6f * wavelength));
+}
+
+// The shape's texels with a ripple on the fourth float, and its steepest step between
+// neighbouring texels, which is what the host measures.
+std::vector<float> reliefTexels(float wavelength, float& steepest) {
+    std::vector<float> t = shapeTexels();
+    for (int j = 0; j < kShapeH; ++j)
+        for (int i = 0; i < kShapeW; ++i)
+            t[(static_cast<size_t>(j) * kShapeW + i) * 4 + 3] = reliefAt(i + 0.5f, j + 0.5f, wavelength);
+    steepest = 0.0f;
+    auto at = [&](int i, int j) { return t[(static_cast<size_t>(j) * kShapeW + i) * 4 + 3]; };
+    for (int j = 0; j < kShapeH; ++j) {
+        for (int i = 0; i < kShapeW; ++i) {
+            if (i + 1 < kShapeW) steepest = std::max(steepest, std::fabs(at(i + 1, j) - at(i, j)));
+            if (j + 1 < kShapeH) steepest = std::max(steepest, std::fabs(at(i, j + 1) - at(i, j)));
+        }
+    }
+    return t;
+}
+
+// The relief at `height` metres, with the slope bound resolveShape would hand over.
+void addRelief(ConvectionInput_0& c, float height, float steepest) {
+    c.cvReliefHeight_0 = height;
+    c.cvReliefSlope_0  = height * 1.41421356f * steepest / kShapeTexel * 1.001f;
+    c.cvReliefFade_0   = 0.25f * std::min(c.cvShapeRound_0, height);   // kReliefFadeOfRim
+}
+
+// The relief the kernel reads at plane point (u, y): its bilinear, the same steps as
+// convShapeDistance, from the same texels.
+float reliefBilinear(const std::vector<float>& t, float u, float y) {
+    const float sx = std::min(std::max(u / kShapeTexel + kShapeOffsetU - 0.5f, 0.0f), float(kShapeW - 1));
+    const float sy = std::min(std::max(y / kShapeTexel + kShapeOffsetY - 0.5f, 0.0f), float(kShapeH - 1));
+    const int i0 = static_cast<int>(sx), j0 = static_cast<int>(sy);
+    const int i1 = std::min(i0 + 1, kShapeW - 1), j1 = std::min(j0 + 1, kShapeH - 1);
+    const float fx = sx - i0, fy = sy - j0;
+    auto at = [&](int i, int j) { return t[(static_cast<size_t>(j) * kShapeW + i) * 4 + 3]; };
+    const float a = at(i0, j0) + (at(i1, j0) - at(i0, j0)) * fx;
+    const float b = at(i0, j1) + (at(i1, j1) - at(i0, j1)) * fx;
+    return a + (b - a) * fy;
+}
+
 // A hero with room for the map: 1640 m tall at most, 800 m either side of its axis.
 ConvectionInput_0 shapeHero(float polarity, bool alone) {
     ConvectionInput_0 c = defaults(polarity);
@@ -376,6 +421,33 @@ int main() {
         c = shapeHero(0.0f, true);
         addShape(c, shapeMap, 123.0f, 1.0f, 0.2f);
         cases.push_back({ "shape alone, decay 1", c });
+    }
+
+    // RELIEF (build 27): a gentle ripple and a sharp one, lifting the face by up to half
+    // and more than twice the rims' radius, with the field, alone, blended and at full
+    // billows. THE RELIEF MAPS' BUFFERS OUTLIVE EVERY CASE, like the shape's.
+    float rippleSteep = 0.0f, sharpSteep = 0.0f;
+    const std::vector<float> rippleHost = reliefTexels(7.0f, rippleSteep);
+    const std::vector<float> sharpHost  = reliefTexels(1.5f, sharpSteep);
+    Device<float> rippleMap(rippleHost.size());
+    rippleMap.put(rippleHost);
+    Device<float> sharpMap(sharpHost.size());
+    sharpMap.put(sharpHost);
+    {
+        ConvectionInput_0 c = shapeHero(0.0f, false);
+        addShape(c, rippleMap, 0.0f, 0.0f, 0.2f);
+        addRelief(c, 200.0f, rippleSteep);
+        cases.push_back({ "relief, facing 0", c });
+
+        c = shapeHero(0.0f, true);
+        addShape(c, rippleMap, 37.0f, 0.4f, 0.2f);
+        addRelief(c, 500.0f, rippleSteep);
+        cases.push_back({ "relief alone, 37 deg, decay .4", c });
+
+        c = shapeHero(0.5f, true);
+        addShape(c, sharpMap, 200.0f, 0.0f, 1.0f);
+        addRelief(c, 900.0f, sharpSteep);
+        cases.push_back({ "sharp relief alone, billow 1", c });
     }
 
     // HERO CONNECTION (build 22): the group's domes, and the moat's slope term in the
@@ -1179,6 +1251,87 @@ int main() {
                             pr.u, reach, pr.expect);
                 check(std::fabs(reach - pr.expect) < 8.0f, "the rim is not the profile");
             }
+        }
+
+        // (d) RELIEF LIFTS THE FRONT AND ONLY THE FRONT (build 27). No billows, points deep
+        // in the cushion's face -- over 500 m inside the edge, past the fade -- and the cloud
+        // reaches R + height x relief towards the eye (+n at bearing 0), and R behind.
+        {
+            ConvectionInput_0 c = shapeHero(0.0f, true);
+            c.cvBillow_0 = 0.0f;
+            addShape(c, rippleMap, 0.0f, 0.0f, 0.0f);
+            addRelief(c, 300.0f, rippleSteep);
+            const float R = c.cvShapeRound_0;
+            // THREE DEEP IN THE FACE, ONE ON THE RIM AND ONE INSIDE THE FADE (build 28): the
+            // disc's left edge on the row through its centre is at u = -800 m, so -600 is
+            // 200 m in, on the rounded rim, and -760 is 40 m in, part way up the fade.
+            struct Probe { float u, y, tol; };
+            const Probe probes[] = { { 200.0f, 740.0f, 4.0f }, { 140.0f, 740.0f, 4.0f },
+                                     { 260.0f, 740.0f, 4.0f }, { -600.0f, 840.0f, 4.0f },
+                                     { -760.0f, 840.0f, 6.0f } };
+            for (const Probe& pr : probes) {
+                const float u = pr.u, y = pr.y;
+                const float D = shapeSdf(u / kShapeTexel + kShapeOffsetU, y / kShapeTexel + kShapeOffsetY) * kShapeTexel;
+                const float prof = D >= R ? R : std::sqrt(std::max(D * (2.0f * R - D), 0.0f));
+                const float t = std::min(std::max(D / c.cvReliefFade_0, 0.0f), 1.0f);
+                const float expectFront = prof + c.cvReliefHeight_0 * reliefBilinear(rippleHost, u, y) *
+                                                 t * t * (3.0f - 2.0f * t);
+                float front = 0.0f, back = 0.0f;
+                for (int side = 0; side < 2; ++side) {
+                    std::vector<float3> pts;
+                    for (int k = 0; k < 800; ++k) {
+                        const float n = (side == 0 ? 1.0f : -1.0f) * k * 1.25f;   // 0 .. 1000 m
+                        pts.push_back(make_float3(c.cvHeroAt_0.x + u, c.cvBase_0 + y, c.cvHeroAt_0.y + n));
+                    }
+                    const std::vector<float> den = densities(c, pts);
+                    float reach = 0.0f;
+                    for (int k = 0; k < 800; ++k) if (den[k] > 0.0f) reach = k * 1.25f;
+                    (side == 0 ? front : back) = reach;
+                }
+                std::printf("  relief through u = %4.0f m (D %5.0f m): front %6.1f m (expected %6.1f), back %6.1f m (profile %5.1f)\n",
+                            u, D, front, expectFront, back, prof);
+                check(std::fabs(front - expectFront) < pr.tol, "the relief does not lift the front face");
+                check(std::fabs(back - prof) < pr.tol, "the relief moved the back");
+            }
+        }
+
+        // (e) A RELIEF OF HEIGHT ZERO IS NONE, whatever the map's fourth float says: the same
+        // densities and the same bounds, bit for bit, as the map without one.
+        {
+            ConvectionInput_0 plain = shapeHero(0.0f, true);
+            addShape(plain, shapeMap, 37.0f, 0.0f, 0.2f);
+            ConvectionInput_0 zero = shapeHero(0.0f, true);
+            addShape(zero, rippleMap, 37.0f, 0.0f, 0.2f);
+
+            std::vector<float3> pts(100000);
+            for (float3& q : pts) {
+                q = make_float3(-300.0f + rng.range(-1500.0f, 1500.0f),
+                                plain.cvBase_0 + rng.range(-50.0f, 2400.0f),
+                                700.0f + rng.range(-1500.0f, 1500.0f));
+            }
+            const std::vector<float> a = densities(plain, pts);
+            const std::vector<float> b = densities(zero, pts);
+            std::vector<float3> lo, hi;
+            for (int k = 0; k < 2000; ++k) {
+                const float3 l = make_float3(-300.0f + rng.range(-1500.0f, 1500.0f),
+                                             plain.cvBase_0 + rng.range(-50.0f, 2000.0f),
+                                             700.0f + rng.range(-1500.0f, 1500.0f));
+                const float e = rng.range(10.0f, 600.0f);
+                lo.push_back(l);
+                hi.push_back(make_float3(l.x + e, l.y + e, l.z + e));
+            }
+            const std::vector<float> ba = bounds(plain, lo, hi);
+            const std::vector<float> bb = bounds(zero, lo, hi);
+            int differ = 0, cloudy = 0;
+            for (size_t i = 0; i < a.size(); ++i) {
+                if (a[i] != b[i]) ++differ;
+                if (a[i] > 0.0f) ++cloudy;
+            }
+            for (size_t i = 0; i < ba.size(); ++i) if (ba[i] != bb[i]) ++differ;
+            std::printf("  relief 0 against no relief: %d of %zu densities and bounds differ (%d cloud)\n",
+                        differ, a.size() + ba.size(), cloudy);
+            check(differ == 0, "a relief of height zero changed the shape");
+            check(cloudy > 1000, "too little of the shape was sampled to mean anything");
         }
     }
 

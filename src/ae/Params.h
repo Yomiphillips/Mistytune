@@ -206,6 +206,42 @@ namespace ae {
     SPARE   (CameraSpare4,      706)                                                    \
     ENDTOPIC(CameraGroupEnd,    707)                                                    \
                                                                                         \
+    /* ---------------- Lights ---------------- */                                      \
+    /* BUILD 29. Asked for from the host: the clouds lit by AE's lights or a layer, "in \
+     * case I want to use saber lighting for thunder". The comp's point, spot, parallel  \
+     * and ambient lights, and a Light Layer whose pixels glow, each go through the      \
+     * sun's own next-event estimator: a shadow ray through the cloud, the phase         \
+     * function, the albedo. The clouds stay water; a light only adds light. See        \
+     * src/engine/LocalLights.h. INSERTED after Camera, still minor 15 (Build.h). */     \
+    TOPIC   (LightsGroup,       800, "Lights")                                          \
+    /* AE's lights, placed where AE's viewer shows them -- through the comp camera, or  \
+     * onto the orbit rig with the comp plane at the hero's depth. ON BY DEFAULT: a     \
+     * light added to the comp is the ask. */                                           \
+    CHECK   (UseCompLights,     801, "Use Comp Lights", true)                           \
+    /* Times every comp light's Intensity. At 1 a light at 100% lights the cloud inside \
+     * its falloff Radius as the sun at Sun Intensity 1 does, and falls off by the      \
+     * inverse square past it, whatever its Falloff says: a light that reached          \
+     * kilometres undimmed would light the whole sky. */                                \
+    FLOAT   (CompLightStrength, 802, "Comp Light Strength",                             \
+             0.0, 10000.0,  0.0, 10.0,      1.0,     2)                                 \
+    /* A LAYER WHOSE PIXELS GLOW: Saber on a black solid, or any bolt over black. It    \
+     * covers the frame laid on the cloud the render shows, each pixel shining every    \
+     * way from where that pixel of the render looks, so a flicker in the layer         \
+     * flickers the cloud. Read in its own frame, transforms off: a comp-sized layer    \
+     * lines up. */                                                                     \
+    LAYER   (LightLayer,        803, "Light Layer")                                     \
+    FLOAT   (LightLayerStrength, 804, "Light Layer Strength",                           \
+             0.0, 100000.0, 0.0, 10.0,      1.0,     2)                                 \
+    /* Metres behind (+) or in front of (-) the cloud's face, where the camera sees     \
+     * it; deeper is a softer, wider glow. Where no cloud is behind the layer, from the \
+     * hero's middle. */                                                                \
+    FLOAT   (LightLayerDepth,   805, "Light Layer Depth",                               \
+             -100000.0, 100000.0, -1000.0, 1000.0, 0.0, 0)                              \
+    SPARE   (LightsSpare1,      806)                                                    \
+    SPARE   (LightsSpare2,      807)                                                    \
+    SPARE   (LightsSpare3,      808)                                                    \
+    ENDTOPIC(LightsGroupEnd,    809)                                                    \
+                                                                                        \
     /* ---------------- Ice and fallstreaks ---------------- */                         \
     /* THE FIRST GENERATOR, AND UNTIL NOW NOT ONE OF ITS PARAMETERS REACHED THE PANEL.  \
      * The kernel has marched a real cirrus field since 2026-09-28 -- IceParams is      \
@@ -486,6 +522,25 @@ namespace ae {
      * an eye standing at Facing Bearing on the Orbit dial: 0 is the default camera. */ \
     POPUP   (PareidoliaFacing,  647, "Facing", 2, 1, "Turn to Camera|Fixed Bearing")    \
     ANGLE   (PareidoliaBearing, 648, "Facing Bearing", 0.0)                             \
+    /* RELIEF (build 27): A DEPTH MAP CARVES THE FACE TOWARDS THE EYE. Brighter is      \
+     * nearer, or darker under Inverted (a Z pass). Its range inside the silhouette is  \
+     * stretched to Relief Depth, a fraction of the shape's smaller side. NO SOURCE IS  \
+     * NO RELIEF, and the shape is build 21's to the bit. The same layer as Shape       \
+     * Source is fine: alpha for the outline, grey for the depth. Inserted before the   \
+     * spares; minor 16. The clouds stay water: relief moves where the water is. */     \
+    LAYER   (PareidoliaReliefSource, 651, "Relief Source")                              \
+    POPUP   (PareidoliaReliefFrom, 652, "Relief From", 2, 1,                            \
+             "Luminance|Inverted Luminance")                                            \
+    FLOAT   (PareidoliaReliefDepth, 653, "Relief Depth",                                \
+             0.0, 2.0,        0.0, 1.0,          0.25,    3)                            \
+    /* BUILD 28: how much of the depth map's large form -- a head's turn -- is taken    \
+     * away, so the nose, the lips and the brow spend Relief Depth. 0 is the map as it  \
+     * is. Inserted beside Relief Depth, which it shares the range with. */             \
+    FLOAT   (PareidoliaReliefDetail, 655, "Relief Detail",                              \
+             0.0, 1.0,        0.0, 1.0,          0.5,     3)                            \
+    /* 1 blurs the depth map to the size of the shape's own billow lobes. */           \
+    FLOAT   (PareidoliaReliefSoftness, 654, "Relief Softness",                          \
+             0.0, 1.0,        0.0, 1.0,          0.35,    3)                            \
     SPARE   (PareidoliaSpare1,  649)                                                    \
     SPARE   (PareidoliaSpare2,  650)                                                    \
     ENDTOPIC(PareidoliaGroupEnd, 659)                                                   \
@@ -1162,6 +1217,11 @@ inline cloud::ConvectionParams toConvection(const ParamValues& p) {
     out.pareidolia.billows   = static_cast<float>(p.v[kMistytunePareidoliaBillows]);
     out.pareidolia.facing    = std::lround(p.v[kMistytunePareidoliaFacing]) == 1 ? 1 : 0;
     out.pareidolia.bearing   = static_cast<float>(p.v[kMistytunePareidoliaBearing]);
+    // RELIEF (build 27): the layer is checked out at pre-render, as the shape's is.
+    out.pareidolia.reliefChannel  = std::lround(p.v[kMistytunePareidoliaReliefFrom]) == 1 ? 1 : 0;
+    out.pareidolia.reliefDepth    = static_cast<float>(p.v[kMistytunePareidoliaReliefDepth]);
+    out.pareidolia.reliefSoftness = static_cast<float>(p.v[kMistytunePareidoliaReliefSoftness]);
+    out.pareidolia.reliefDetail   = static_cast<float>(p.v[kMistytunePareidoliaReliefDetail]);
 
     // Polarity and coverage are clamped to [0, 1] in SlangBridge.h, where the kernel's
     // bound needs them to be; billow octaves have no control and keep the default.
@@ -1228,6 +1288,29 @@ inline cloud::QualityParams toQuality(const ParamValues& p) {
     if (out.samplesPerPixel < 1) out.samplesPerPixel = 1;
     if (out.maxBounces < 1)      out.maxBounces = 1;
     return out;
+}
+
+// LOCAL LIGHTS (build 29): the panel's half. The comp's lights are read in AEBridge.h.
+// CLAMPED AND NaN-PROOF like the quality values: an expression drives a slider anywhere.
+inline bool usesCompLights(const ParamValues& p) {
+    return p.v[kMistytuneUseCompLights] > 0.5;
+}
+
+inline float nonNegative(double v) {
+    return v > 0.0 ? static_cast<float>(v) : 0.0f;   // NaN is not > 0
+}
+
+inline float compLightStrengthOf(const ParamValues& p) {
+    return nonNegative(p.v[kMistytuneCompLightStrength]);
+}
+
+inline float lightLayerStrengthOf(const ParamValues& p) {
+    return nonNegative(p.v[kMistytuneLightLayerStrength]);
+}
+
+inline float lightLayerDepthOf(const ParamValues& p) {
+    const double v = p.v[kMistytuneLightLayerDepth];
+    return std::isfinite(v) ? static_cast<float>(v) : 0.0f;
 }
 
 // RENDER QUALITY: Draft is item 0 once the popup is 0-based, Best is 1. Anything else an

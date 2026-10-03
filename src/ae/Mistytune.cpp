@@ -116,6 +116,21 @@ struct PreRenderData {
     // PAREIDOLIA'S SOURCE WAS CHECKED OUT, whole, under kShapeCheckout -- so smart render
     // may ask for its pixels. False for no layer picked, which is no shape.
     bool shapeCheckedOut = false;
+
+    // ...AND THE RELIEF'S, under kReliefCheckout (build 27). Only ever with a shape: a depth
+    // map without a silhouette to carve is nothing.
+    bool reliefCheckedOut = false;
+
+    // LOCAL LIGHTS (build 29). The comp's lights are read and placed HERE, where the layer
+    // suite is called with the camera and the colour settings; the light layer is checked out
+    // under kLightLayerCheckout and turned into a sheet at smart render, where its pixels are.
+    // The anchor is where the layer's sheet stands: the hero's depth.
+    std::vector<cloud::LocalLight> compLights;
+    float              compAmbient[3]     = { 0.0f, 0.0f, 0.0f };
+    cloud::LightAnchor lightAnchor;
+    float              lightLayerStrength = 1.0f;
+    float              lightLayerDepth    = 0.0f;
+    bool               lightLayerCheckedOut = false;
 };
 
 // ===========================================================================
@@ -129,12 +144,113 @@ struct PreRenderData {
 constexpr A_long kShapeProbeCheckout = 7001;
 constexpr A_long kShapeCheckout      = 7002;
 
+// THE RELIEF'S DEPTH MAP (build 27), checked out the same two-step way.
+constexpr A_long kReliefProbeCheckout = 7003;
+constexpr A_long kReliefCheckout      = 7004;
+
+// THE LIGHT LAYER (build 29): a probe for its size, then its own bounds. See
+// checkoutLayerBounds.
+constexpr A_long kLightLayerProbeCheckout = 7005;
+constexpr A_long kLightLayerCheckout      = 7006;
+
 // A SOURCE LARGER THAN THIS ON A SIDE IS CROPPED TO IT. The map is 256 texels across
 // whatever the source is, so a bigger checkout only costs AE a render nobody reads.
 constexpr A_long kShapeMaxSide = 8192;
 
 void disposePreRenderData(void* p) {
     delete static_cast<PreRenderData*>(p);
+}
+
+// ===========================================================================
+// ANOTHER LAYER, WHOLE: the probe for its extent, then exactly that, as kShapeProbeCheckout
+// explains. True when there are pixels to ask for at smart render under `wholeId`. NO
+// LAYER PICKED, AN EMPTY ONE OR A FAILED CHECKOUT ARE ALL FALSE, NOT A FAILED FRAME: the
+// sky renders without it and the log says which, under `what`.
+//
+// A layer parameter's pixels arrive in that layer's own space, masks and effects on,
+// transforms off -- the picture as its author made it. WHOLE, because the silhouette is
+// cropped to its own box and a partial checkout would crop a different shape.
+// ===========================================================================
+bool checkoutWholeLayer(PF_InData* in_data, PF_PreRenderExtra* extra, A_long param,
+                        A_long probeId, A_long wholeId, const char* what) {
+    PF_CheckoutResult probe;
+    AEFX_CLR_STRUCT(probe);
+    PF_RenderRequest probeRequest = extra->input->output_request;
+    PF_Err err = extra->cb->checkout_layer(in_data->effect_ref, param, probeId, &probeRequest,
+                                           in_data->current_time, in_data->time_step,
+                                           in_data->time_scale, &probe);
+    bool got = false;
+    const PF_LRect& whole = probe.max_result_rect;
+    if (!err && whole.right > whole.left && whole.bottom > whole.top) {
+        PF_RenderRequest wholeRequest = extra->input->output_request;
+        wholeRequest.rect = whole;
+        if (wholeRequest.rect.right - wholeRequest.rect.left > kShapeMaxSide)
+            wholeRequest.rect.right = wholeRequest.rect.left + kShapeMaxSide;
+        if (wholeRequest.rect.bottom - wholeRequest.rect.top > kShapeMaxSide)
+            wholeRequest.rect.bottom = wholeRequest.rect.top + kShapeMaxSide;
+        wholeRequest.channel_mask = PF_ChannelMask_ARGB;
+        wholeRequest.preserve_rgb_of_zero_alpha = FALSE;
+
+        PF_CheckoutResult result;
+        AEFX_CLR_STRUCT(result);
+        err = extra->cb->checkout_layer(in_data->effect_ref, param, wholeId, &wholeRequest,
+                                        in_data->current_time, in_data->time_step,
+                                        in_data->time_scale, &result);
+        got = !err && result.result_rect.right > result.result_rect.left &&
+              result.result_rect.bottom > result.result_rect.top;
+        diagLog("  %s: source [%d,%d %dx%d]%s", what,
+                static_cast<int>(result.result_rect.left), static_cast<int>(result.result_rect.top),
+                static_cast<int>(result.result_rect.right - result.result_rect.left),
+                static_cast<int>(result.result_rect.bottom - result.result_rect.top),
+                got ? "" : " -- EMPTY, not used");
+    }
+    if (err) diagLog("  %s: source checkout failed (err %d) -- not used", what, static_cast<int>(err));
+    return got;
+}
+
+// ===========================================================================
+// ANOTHER LAYER, AS IT COVERS THE FRAME (build 29): the light layer. Not checkoutWholeLayer,
+// because a glow grows a layer past its own bounds and a whole-extent checkout would then
+// squeeze the picture into the frame off true. The probe's ref_width/ref_height is the
+// layer's own size at full resolution; the checkout asks for exactly that rect at this
+// downsample, so its pixel (x, y) is the frame's pixel (x, y) for a comp-sized layer.
+// False is no light layer, never a failed frame.
+// ===========================================================================
+bool checkoutLayerBounds(PF_InData* in_data, PF_PreRenderExtra* extra, A_long param,
+                         A_long probeId, A_long id, const char* what) {
+    PF_CheckoutResult probe;
+    AEFX_CLR_STRUCT(probe);
+    PF_RenderRequest probeRequest = extra->input->output_request;
+    PF_Err err = extra->cb->checkout_layer(in_data->effect_ref, param, probeId, &probeRequest,
+                                           in_data->current_time, in_data->time_step,
+                                           in_data->time_scale, &probe);
+    if (err) {
+        diagLog("  %s: checkout failed (err %d) -- not used", what, static_cast<int>(err));
+        return false;
+    }
+    if (probe.ref_width <= 0 || probe.ref_height <= 0) return false;   // no layer picked
+
+    PF_RenderRequest want = extra->input->output_request;
+    want.rect.left   = 0;
+    want.rect.top    = 0;
+    want.rect.right  = downsampledExtent(std::min<A_long>(probe.ref_width, kShapeMaxSide),
+                                         in_data->downsample_x);
+    want.rect.bottom = downsampledExtent(std::min<A_long>(probe.ref_height, kShapeMaxSide),
+                                         in_data->downsample_y);
+    want.channel_mask = PF_ChannelMask_ARGB;
+    want.preserve_rgb_of_zero_alpha = FALSE;
+
+    PF_CheckoutResult result;
+    AEFX_CLR_STRUCT(result);
+    err = extra->cb->checkout_layer(in_data->effect_ref, param, id, &want, in_data->current_time,
+                                    in_data->time_step, in_data->time_scale, &result);
+    const bool got = !err && result.result_rect.right > result.result_rect.left &&
+                     result.result_rect.bottom > result.result_rect.top;
+    diagLog("  %s: layer %dx%d, asked [0,0 %dx%d]%s", what,
+            static_cast<int>(probe.ref_width), static_cast<int>(probe.ref_height),
+            static_cast<int>(want.rect.right), static_cast<int>(want.rect.bottom),
+            got ? "" : " -- EMPTY, not used");
+    return got;
 }
 
 // ---------------------------------------------------------------------------
@@ -458,6 +574,19 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
             static_cast<double>(data->field.atmosphere.sunAzimuth),
             static_cast<double>(data->field.atmosphere.sunElevation));
 
+    // LOCAL LIGHTS (build 29), placed relative to the camera just resolved, as the sun is.
+    // The anchor is the hero's depth: the comp plane lands there under the orbit rig, and
+    // the light layer's sheet stands there. The comp's lights are read here and carried to
+    // smart render, which packs them with the layer's sheet.
+    data->lightAnchor        = cloud::lightAnchor(data->field, data->view);
+    data->lightLayerStrength = lightLayerStrengthOf(values);
+    data->lightLayerDepth    = lightLayerDepthOf(values);
+    if (usesCompLights(values)) {
+        readCompLights(in_data, data->view, compCamera, values.v[kMistytuneCameraTravel],
+                       data->lightAnchor, compLightStrengthOf(values), data->view.encodeSrgb,
+                       data->compLights, data->compAmbient);
+    }
+
     // WHICH CAMERA, NAMED RATHER THAN INFERRED FROM THE PICTURE. "No camera,
     // defaulting" and "the comp's camera, and it points there" produce different
     // skies, and telling them apart by looking is exactly the diagnosis this
@@ -524,61 +653,38 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
     data->renderOriginValid = (rr.right > rr.left && rr.bottom > rr.top);
 
     // -----------------------------------------------------------------------
-    // PAREIDOLIA'S SOURCE, WHOLE (build 21).
+    // PAREIDOLIA'S SOURCE, WHOLE (build 21), AND ITS RELIEF (build 27).
     //
-    // A layer parameter's pixels arrive in that layer's own space, masks and effects on,
-    // transforms off -- the picture as its author made it. WHOLE, because the silhouette is
-    // cropped to its own box and a partial checkout would crop a different shape.
-    //
-    // NOT UNIONED INTO THE RESULT RECT: it shapes the cloud, not where our pixels lie.
+    // NOT UNIONED INTO THE RESULT RECT: they shape the cloud, not where our pixels lie.
+    // THE RELIEF ONLY WITH A SHAPE: without a silhouette it carves nothing, and checking it
+    // out would only cost AE a render nobody reads.
     // -----------------------------------------------------------------------
-    {
-        PF_CheckoutResult probe;
-        AEFX_CLR_STRUCT(probe);
-        PF_RenderRequest probeRequest = extra->input->output_request;
-        PF_Err shapeErr = extra->cb->checkout_layer(in_data->effect_ref, kMistytunePareidoliaSource,
-                                                    kShapeProbeCheckout, &probeRequest,
-                                                    in_data->current_time, in_data->time_step,
-                                                    in_data->time_scale, &probe);
-        const PF_LRect& whole = probe.max_result_rect;
-        if (!shapeErr && whole.right > whole.left && whole.bottom > whole.top) {
-            PF_RenderRequest wholeRequest = extra->input->output_request;
-            wholeRequest.rect = whole;
-            if (wholeRequest.rect.right - wholeRequest.rect.left > kShapeMaxSide)
-                wholeRequest.rect.right = wholeRequest.rect.left + kShapeMaxSide;
-            if (wholeRequest.rect.bottom - wholeRequest.rect.top > kShapeMaxSide)
-                wholeRequest.rect.bottom = wholeRequest.rect.top + kShapeMaxSide;
-            wholeRequest.channel_mask = PF_ChannelMask_ARGB;
-            wholeRequest.preserve_rgb_of_zero_alpha = FALSE;
+    data->shapeCheckedOut = checkoutWholeLayer(in_data, extra, kMistytunePareidoliaSource,
+                                               kShapeProbeCheckout, kShapeCheckout, "pareidolia");
+    if (data->shapeCheckedOut) {
+        data->reliefCheckedOut = checkoutWholeLayer(in_data, extra, kMistytunePareidoliaReliefSource,
+                                                    kReliefProbeCheckout, kReliefCheckout, "relief");
+    }
 
-            PF_CheckoutResult got;
-            AEFX_CLR_STRUCT(got);
-            shapeErr = extra->cb->checkout_layer(in_data->effect_ref, kMistytunePareidoliaSource,
-                                                 kShapeCheckout, &wholeRequest,
-                                                 in_data->current_time, in_data->time_step,
-                                                 in_data->time_scale, &got);
-            data->shapeCheckedOut = !shapeErr && got.result_rect.right > got.result_rect.left &&
-                                    got.result_rect.bottom > got.result_rect.top;
-            diagLog("  pareidolia: source [%d,%d %dx%d]%s",
-                    static_cast<int>(got.result_rect.left), static_cast<int>(got.result_rect.top),
-                    static_cast<int>(got.result_rect.right - got.result_rect.left),
-                    static_cast<int>(got.result_rect.bottom - got.result_rect.top),
-                    data->shapeCheckedOut ? "" : " -- EMPTY, no shape");
-        }
-        // A FAILED CHECKOUT OF THE SOURCE IS NO SHAPE, NOT A FAILED FRAME: the sky renders
-        // without it and the log says so.
-        if (shapeErr) diagLog("  pareidolia: source checkout failed (err %d) -- no shape",
-                              static_cast<int>(shapeErr));
+    // THE LIGHT LAYER (build 29), as it covers the frame -- and not at all at strength 0,
+    // which would only cost AE a render nobody reads.
+    if (data->lightLayerStrength > 0.0f) {
+        data->lightLayerCheckedOut = checkoutLayerBounds(in_data, extra, kMistytuneLightLayer,
+                                                         kLightLayerProbeCheckout,
+                                                         kLightLayerCheckout, "light layer");
     }
 
     // THE GPU OFFER, and a picture withdraws it. PF_Cmd_SMART_RENDER_GPU would hand the
     // source over as a GPU world, which the map builder cannot read; the host path reads it
     // and still renders on the card through renderCudaToHost. AE has never taken the offer
     // on this effect anyway (see smartRenderHost), so nothing is lost that was being used.
+    // The light layer's pixels are read on the host the same way.
     if (!kernel::cudaAvailable()) {
         diagLog("  no GPU path in this build -- not offering GPU_RENDER_POSSIBLE.");
     } else if (data->shapeCheckedOut) {
         diagLog("  pareidolia source present -- not offering GPU_RENDER_POSSIBLE.");
+    } else if (data->lightLayerCheckedOut) {
+        diagLog("  light layer present -- not offering GPU_RENDER_POSSIBLE.");
     } else {
         extra->output->flags |= PF_RenderOutputFlag_GPU_RENDER_POSSIBLE;
     }
@@ -632,7 +738,8 @@ void applyRenderOrigin(const PreRenderData& data, const PF_EffectWorld* output,
 
 PF_Err smartRenderGpu(PF_InData* in_data, PF_OutData* out_data,
                       PF_PixelFormat format, PF_EffectWorld* output,
-                      PF_SmartRenderExtra* extra, const PreRenderData& data) {
+                      PF_SmartRenderExtra* extra, const PreRenderData& data,
+                      const cloud::LightSet* lights) {
     PF_Err err = PF_Err_NONE;
 
     // THE ONLY GPU FORMAT AE OFFERS IS BGRA128. Anything else is a host we do not
@@ -665,6 +772,10 @@ PF_Err smartRenderGpu(PF_InData* in_data, PF_OutData* out_data,
     req.quality = data.quality;
     req.dest    = toSurface(output, format);
     req.dest.data = destMem;
+
+    // THE COMP'S LIGHTS, packed by smartRender (build 29). Never a light layer here: it
+    // withdraws the GPU offer, as a shape does.
+    req.lightSet = lights;
 
     // EVERY PIXEL HERE, EVEN IN DRAFT: this buffer is AE's device memory and nothing on this
     // path scales a smaller one up into it. Draft keeps its other savings. Measured in AE
@@ -795,7 +906,8 @@ PF_Err smartRenderGpu(PF_InData* in_data, PF_OutData* out_data,
 // into an integer buffer would clamp the sun to white before the tonemap ever saw it.
 PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
                        PF_PixelFormat format, PF_EffectWorld* output,
-                       const PreRenderData& data, const cloud::ShapeMap* shape) {
+                       const PreRenderData& data, const cloud::ShapeMap* shape,
+                       const cloud::LightSet* lights) {
     (void)out_data;
 
     diagLog("SMART_RENDER_HOST: format=%d output=%dx%d rowbytes=%d samples=%d",
@@ -830,6 +942,17 @@ PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
         sim::Fingerprint fp;
         fp.add(key.field);
         fp.add(shape->hash);
+        key.field = fp.value();
+    }
+
+    // THE LIGHTS ARE IN THE KEY TOO (build 29), for the same reason: a light that moved, or a
+    // bolt that flickered, changes no parameter of ours. Packed by smartRender, which owns
+    // them for the length of this call.
+    req.lightSet = lights;
+    if (lights) {
+        sim::Fingerprint fp;
+        fp.add(key.field);
+        fp.add(lights->hash);
         key.field = fp.value();
     }
 
@@ -1302,13 +1425,38 @@ PF_Err smartRender(PF_InData* in_data, PF_OutData* out_data,
             if (!pixelFormatOf(in_data, out_data, source, srcFormat) &&
                 toSourceView(source, srcFormat, view)) {
                 const cloud::PareidoliaParams& pp = data->field.convection.pareidolia;
+
+                // THE RELIEF'S DEPTH MAP (build 27), read in the same breath. Unreadable is
+                // no relief, and the shape stands without it.
+                cloud::ReliefSource relief;
+                bool haveRelief = false;
+                PF_EffectWorld* depth = nullptr;
+                if (data->reliefCheckedOut) {
+                    const PF_Err depthErr = extra->cb->checkout_layer_pixels(in_data->effect_ref,
+                                                                             kReliefCheckout, &depth);
+                    PF_PixelFormat depthFormat = PF_PixelFormat_INVALID;
+                    if (!depthErr && depth && !pixelFormatOf(in_data, out_data, depth, depthFormat) &&
+                        toSourceView(depth, depthFormat, relief.view)) {
+                        relief.inverted = pp.reliefChannel == 1;
+                        relief.softness = pp.reliefSoftness;
+                        relief.detail   = pp.reliefDetail;
+                        haveRelief = true;
+                    } else {
+                        diagLog("  relief: depth map unreadable (err %d, format %d) -- no relief",
+                                static_cast<int>(depthErr), static_cast<int>(depthFormat));
+                    }
+                }
+
                 haveShape = cloud::buildShapeMap(view, static_cast<cloud::ShapeChannel>(pp.channel),
-                                                 pp.threshold, shapeMap);
-                diagLog("  pareidolia: %dx%d source -> %dx%d map in %.3f s%s",
+                                                 pp.threshold, shapeMap,
+                                                 haveRelief ? &relief : nullptr);
+                diagLog("  pareidolia: %dx%d source -> %dx%d map in %.3f s%s%s",
                         static_cast<int>(source->width), static_cast<int>(source->height),
                         static_cast<int>(shapeMap.width), static_cast<int>(shapeMap.height),
                         diagSeconds() - tShape,
-                        haveShape ? "" : " -- nothing reaches the threshold, no shape");
+                        haveShape ? "" : " -- nothing reaches the threshold, no shape",
+                        !haveRelief ? "" : shapeMap.hasRelief ? ", with relief"
+                                                              : ", relief flat -- none");
             } else {
                 diagLog("  pareidolia: source format %d not readable -- no shape",
                         static_cast<int>(srcFormat));
@@ -1322,6 +1470,89 @@ PF_Err smartRender(PF_InData* in_data, PF_OutData* out_data,
         diagLog("  pareidolia: source on the GPU path -- not read, no shape");
         extra->cb->checkin_layer_pixels(in_data->effect_ref, kShapeCheckout);
     }
+    // THE RELIEF IS CHECKED BACK IN ON EVERY PATH, read or not, as the source is: the map
+    // that read it is built by now.
+    if (data->reliefCheckedOut) extra->cb->checkin_layer_pixels(in_data->effect_ref, kReliefCheckout);
+
+    // ---------------------------------------------------------------------
+    // THE LIGHT LAYER'S SHEET (build 29), read once and checked straight back in, as
+    // pareidolia's source is. UNREADABLE OR DARK IS NO SHEET, never a failed frame: a bolt
+    // between strikes is black, and the comp's lights still light the cloud.
+    // ---------------------------------------------------------------------
+    cloud::LightSheet lightSheet;
+    bool haveSheet = false;
+    if (data->lightLayerCheckedOut && !isGpu) {
+        PF_EffectWorld* glow = nullptr;
+        const double tSheet = diagSeconds();
+        const PF_Err glowErr = extra->cb->checkout_layer_pixels(in_data->effect_ref,
+                                                                kLightLayerCheckout, &glow);
+        PF_PixelFormat glowFormat = PF_PixelFormat_INVALID;
+        ConstImageView glowView;
+        if (!glowErr && glow && !pixelFormatOf(in_data, out_data, glow, glowFormat) &&
+            toSourceView(glow, glowFormat, glowView)) {
+            haveSheet = cloud::buildLightSheet(glowView, data->view.encodeSrgb,
+                                               cloud::kLightSheetMaxSide, lightSheet);
+            diagLog("  light layer: %dx%d -> %dx%d sheet in %.3f s%s",
+                    static_cast<int>(glow->width), static_cast<int>(glow->height),
+                    lightSheet.width, lightSheet.height, diagSeconds() - tSheet,
+                    haveSheet ? "" : " -- nothing glows, no sheet");
+        } else {
+            diagLog("  light layer: pixels unreadable (err %d, format %d) -- no sheet",
+                    static_cast<int>(glowErr), static_cast<int>(glowFormat));
+        }
+        extra->cb->checkin_layer_pixels(in_data->effect_ref, kLightLayerCheckout);
+    } else if (data->lightLayerCheckedOut) {
+        diagLog("  light layer: on the GPU path -- not read, no sheet");
+        extra->cb->checkin_layer_pixels(in_data->effect_ref, kLightLayerCheckout);
+    }
+
+    // THE LIGHTS, PACKED: the comp's, the ambient dome and the sheet laid on the cloud, Light
+    // Layer Depth behind the face the camera sees. Built here so both render paths get the
+    // same set.
+    cloud::LightSet lightSet;
+    {
+        cloud::SheetPlacement place;
+        if (haveSheet) {
+            // THE PLANE AT THE ANCHOR, then every lit texel pushed to the cloud under it --
+            // probed from this frame's own field, the shape included, before it renders. On
+            // the CPU whichever path renders: a few thousand rays. See conformLightSheet.
+            const double tProbe = diagSeconds();
+            place = cloud::placeLightSheet(data->view, data->lightAnchor.depth,
+                                           lightSheet.width, lightSheet.height);
+            kernel::RenderRequest probeReq;
+            probeReq.field    = data->field;
+            probeReq.view     = data->view;
+            probeReq.quality  = data->quality;
+            probeReq.shapeMap = haveShape ? &shapeMap : nullptr;
+            cloud::SurfaceProbe probe;
+            cloud::surfaceProbeGrid(lightSheet, probe.width, probe.height);
+            probe.farDepth = data->lightAnchor.depth + data->lightAnchor.reach;
+            const std::vector<unsigned char> need =
+                cloud::surfaceProbeMask(lightSheet, probe.width, probe.height);
+            kernel::probeSurfaceCpu(probeReq, need, probe);
+            cloud::conformLightSheet(lightSheet, probe, data->lightAnchor.depth,
+                                     data->lightLayerDepth, place);
+            int asked = 0, seen = 0;
+            for (size_t k = 0; k < need.size(); ++k) {
+                if (!need[k]) continue;
+                ++asked;
+                if (probe.hit[k] > 0.5f) ++seen;
+            }
+            diagLog("  light layer: laid on the cloud from %d of %dx%d probe points (%d see it)"
+                    " in %.3f s", asked, probe.width, probe.height, seen, diagSeconds() - tProbe);
+        }
+        cloud::packLightSet(data->compLights, data->compAmbient,
+                            haveSheet ? &lightSheet : nullptr, haveSheet ? &place : nullptr,
+                            data->lightLayerStrength, data->lightAnchor, lightSet);
+        if (!lightSet.empty()) {
+            diagLog("  lights: %d packed (%d from the comp%s), ambient %.3f, anchor %.0f m deep",
+                    lightSet.count, static_cast<int>(data->compLights.size()),
+                    haveSheet ? ", and the light layer" : "",
+                    static_cast<double>(lightSet.ambient[1]),
+                    static_cast<double>(data->lightAnchor.depth));
+        }
+    }
+    const cloud::LightSet* lights = lightSet.empty() ? nullptr : &lightSet;
 
     err = extra->cb->checkout_output(in_data->effect_ref, &output);
     if (err || !output) diagLog("  checkout_output failed: err=%d", static_cast<int>(err));
@@ -1332,10 +1563,10 @@ PF_Err smartRender(PF_InData* in_data, PF_OutData* out_data,
 
         if (!err) {
             if (isGpu) {
-                err = smartRenderGpu(in_data, out_data, format, output, extra, *data);
+                err = smartRenderGpu(in_data, out_data, format, output, extra, *data, lights);
             } else {
                 err = smartRenderHost(in_data, out_data, format, output, *data,
-                                      haveShape ? &shapeMap : nullptr);
+                                      haveShape ? &shapeMap : nullptr, lights);
             }
         }
     }

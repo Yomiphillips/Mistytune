@@ -11,6 +11,7 @@
 // cuda_runtime.h to ask whether CUDA existed would defeat the point.
 
 #include "RenderRequest.h"
+#include "../engine/LocalLights.h"
 #include "../engine/Pareidolia.h"
 
 #include <vector>
@@ -111,6 +112,17 @@ inline void deriveRenderInputs(RenderRequest& req) {
 
     // THE HERO'S SHOULDERS GIVE WAY TO THE PICTURE, which stands where they would.
     cloud::fitTurretsToShape(req.shape, req.field.convection.windBearing, req.convection);
+
+    // THE LOCAL LIGHTS (build 29): the packed buffer's HOST address, which renderCuda swaps
+    // for a device copy, and the counts the kernel reads by. No set, or an empty one, is
+    // no buffer -- and the kernel then draws nothing it did not draw before.
+    const cloud::LightSet* ls = req.lightSet;
+    const bool lights = ls && ls->count > 0 && !ls->packed.empty();
+    req.lightBuffer = lights ? ls->packed.data() : nullptr;
+    req.lightCount  = lights ? ls->count : 0;
+    req.lightFloats = lights ? static_cast<int>(ls->packed.size()) : 0;
+    req.lightHash   = lights ? ls->hash : 0;
+    for (int c = 0; c < 3; ++c) req.ambientLight[c] = ls ? ls->ambient[c] : 0.0f;
 }
 
 // Was this binary built with a CUDA toolkit, and is a usable device present?
@@ -180,6 +192,18 @@ bool renderCuda(const RenderRequest& req);
 // count per call is the caller's business and the row range is not.
 void renderCpu(const RenderRequest& req, int threads = 0,
                int rowBegin = 0, int rowEnd = 0);
+
+// THE FACE THE CAMERA SEES, FOR THE LIGHT LAYER (build 29). At every point of the grid that
+// `need` marks: the depth along the view axis at which the camera's light first scatters,
+// on average, and the probability that it scatters at all. See cloud::SurfaceProbe and
+// conformLightSheet. probe.width, probe.height and probe.farDepth are the grid and how far
+// it looks, the frame is req.view's, and an unmarked point is left at zero.
+//
+// ON THE CPU WHATEVER RENDERS THE FRAME, and cheap: a deterministic march
+// (sceneFirstScatter in BounceLib.slang) along at most a few thousand rays, threaded. It
+// marches the density the render sees, so it takes the frame's own request.
+void probeSurfaceCpu(const RenderRequest& req, const std::vector<unsigned char>& need,
+                     cloud::SurfaceProbe& probe, int threads = 0);
 
 // Renders on the GPU into HOST memory: reserves a device buffer, launches into it,
 // copies the result back. req.dest.data is ordinary host memory.

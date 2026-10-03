@@ -212,6 +212,40 @@
 //
 // A MINOR BUMP BECAUSE THE PARAMETER LIST CHANGED: Render Quality was inserted directly
 // under the classifier readout, outside every group.
+// BUILD 27 -- PAREIDOLIA RELIEF. A second layer, a depth map, pushes the shape's face
+// towards the eye: brighter is nearer, stretched to Relief Depth, blurred by Relief
+// Softness, faded in from the silhouette's edge. A figure now reads from forms inside its
+// outline that the sun can model, not from the outline alone. The back stays flat, and the
+// clouds stay water: relief moves where the water is, never what it is. With no Relief
+// Source the shape is build 21's to the bit.
+//
+// THE PARAMETER LIST CHANGED -- Relief Source, Relief From, Relief Depth and Relief
+// Softness were inserted in the Pareidolia group, before its spares -- BUT STILL MINOR 15.
+// AE's packed version gives the minor FOUR BITS, so 15 is the last one: minor 16 was
+// masked to 0 and the build failed on EffectCommon.h's version assert. The build number
+// is what tells AE its cached registration is stale (CHANGELOG.md), so it carries every
+// change from here; CMakeLists.txt now refuses a minor past 15 in so many words. The next
+// minor is the major's business: 1.0 is PLAN.md's v1, not a counter.
+// BUILD 28 -- RELIEF THAT KEEPS THE FEATURES. Reported from the host with a three-quarter
+// face's depth map: "just something sculpted like a head. don't see nose or any face
+// feature". Two causes, both build 27's. The lift faded in from the outline over the relief's
+// whole height -- 1.1 km on a 2.2 km face -- which kept 38% of the depth map and lost the
+// nose, which sits on the outline; it now fades over a quarter of the rims' radius and keeps
+// 91%. And the head's own turn spent the whole depth range: RELIEF DETAIL (new, default 0.5)
+// takes that much of the large form away before the map is stretched to Relief Depth.
+//
+// THE PARAMETER LIST CHANGED: Relief Detail was inserted after Relief Depth. Still minor 15.
+// BUILD 29 -- LOCAL LIGHTS. Asked for from the host: "making the clouds work with AE light or
+// layers (in case I want to use saber lighting for thunder)". The comp's point, spot, parallel
+// and ambient lights now light the clouds, and so does a Light Layer -- Saber on a solid --
+// as a glowing sheet at the hero's depth. Both go through the sun's own next-event estimator:
+// a shadow ray through the cloud to the light, the phase function, the albedo. The clouds stay
+// water: a light adds illumination and never changes the medium. With no lights a frame is
+// build 28's to the bit.
+//
+// THE PARAMETER LIST AND THE FLAGS CHANGED: a Lights topic was inserted after Camera, and
+// out_flags2 gained PF_OutFlag2_I_USE_3D_LIGHTS, without which AE would not re-render when a
+// light moves. Still minor 15.
 #define PLUGIN_MAJOR 0
 #define PLUGIN_MINOR 15
-#define PLUGIN_BUILD 26
+#define PLUGIN_BUILD 29

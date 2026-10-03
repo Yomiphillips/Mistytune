@@ -25,6 +25,14 @@ endforeach()
 if(NOT DEFINED _plugin_major OR NOT DEFINED _plugin_minor OR NOT DEFINED _plugin_build)
     message(FATAL_ERROR "Could not read PLUGIN_MAJOR/MINOR/BUILD from ${_build_h}")
 endif()
+# AE PACKS THE VERSION INTO BIT FIELDS (AE_Effect.h): minor is 4 bits, build 9. A
+# larger number does not fail -- PF_VERSION masks it, so minor 16 registers as
+# minor 0 -- and the only symptom was EffectCommon.h's mismatch assert. Said
+# plainly here instead.
+if(_plugin_minor GREATER 15 OR _plugin_build GREATER 511)
+    message(FATAL_ERROR "PLUGIN_MINOR must be 0..15 and PLUGIN_BUILD 0..511: AE's "
+                        "packed version masks anything wider (${_build_h})")
+endif()
 
 # THIS BLOCK MUST STAY ABOVE project(). CMAKE_OSX_* are consumed while project()
 # probes the compiler, so setting them afterwards silently does nothing at all

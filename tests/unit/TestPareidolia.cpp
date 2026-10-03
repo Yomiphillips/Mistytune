@@ -364,6 +364,279 @@ PL_TEST(TheHashFollowsThePicture) {
     PL_CHECK(a.hash != c.hash);
 }
 
+// ===========================================================================
+// RELIEF (build 27): a depth map on the map's fourth float.
+// ===========================================================================
+
+namespace {
+
+// An opaque grey depth map: nearness from a function of the pixel centre's FRACTION of the
+// frame, so the same function at two sizes is the same picture.
+Picture depthMap(int w, int h, const std::function<double(double, double)>& nearness,
+                 float alpha = 1.0f) {
+    return Picture(w, h, [&](int x, int y, float* p) {
+        const float v = static_cast<float>(nearness((x + 0.5) / w, (y + 0.5) / h));
+        p[0] = alpha; p[1] = v * alpha; p[2] = v * alpha; p[3] = v * alpha;   // premultiplied
+    });
+}
+
+Picture discMatte() {
+    return alphaShape(200, 200, [](double x, double y) {
+        return (x - 100) * (x - 100) + (y - 100) * (y - 100) < 80 * 80;
+    });
+}
+
+// The steepest step between neighbouring texels of the relief.
+float steepestOf(const ShapeMap& m) {
+    float worst = 0.0f;
+    for (int j = 0; j < m.height; ++j) {
+        for (int i = 0; i < m.width; ++i) {
+            if (i + 1 < m.width) worst = std::max(worst, std::fabs(mapAt(m, i + 1, j, 3) - mapAt(m, i, j, 3)));
+            if (j + 1 < m.height) worst = std::max(worst, std::fabs(mapAt(m, i, j + 1, 3) - mapAt(m, i, j, 3)));
+        }
+    }
+    return worst;
+}
+
+} // namespace
+
+// NO RELIEF IS BUILD 21 TO THE BIT: no source, an invalid one, and one flat grey all leave
+// the fourth float zero, hasRelief false, and the hash the shape's alone.
+PL_TEST(NoReliefIsTheShapeAsItWas) {
+    const Picture matte = discMatte();
+    ShapeMap plain;
+    PL_CHECK(buildShapeMap(matte.view(), ShapeChannel::Alpha, 0.5f, plain));
+
+    ReliefSource invalid;   // a default view is not valid
+    const Picture flat = depthMap(200, 200, [](double, double) { return 0.5; });
+    ReliefSource grey;
+    grey.view = flat.view();
+
+    const ReliefSource* sources[] = { nullptr, &invalid, &grey };
+    for (const ReliefSource* r : sources) {
+        ShapeMap m;
+        PL_CHECK(buildShapeMap(matte.view(), ShapeChannel::Alpha, 0.5f, m, r));
+        PL_CHECK(!m.hasRelief);
+        PL_CHECK(m.hash == plain.hash);
+        PL_CHECK(m.texels == plain.texels);
+    }
+    PL_CHECK(resolveShape(&plain, PareidoliaParams{}, heroOf(1500.0f, 1700.0f)).reliefHeight == 0.0f);
+}
+
+// THE RELIEF IS THE DEPTH MAP, STRETCHED: a left-to-right ramp from 0.3 to 0.7 comes out 0 at
+// the silhouette's left and 1 at its right, rising across it; inverted, the other way.
+PL_TEST(TheReliefIsTheDepthMapStretched) {
+    const Picture matte = discMatte();
+    const Picture ramp = depthMap(200, 200, [](double fx, double) { return 0.3 + 0.4 * fx; });
+
+    ReliefSource r;
+    r.view = ramp.view();
+    r.softness = 0.0f;
+    r.detail = 0.0f;
+    ShapeMap m;
+    PL_CHECK(buildShapeMap(matte.view(), ShapeChannel::Alpha, 0.5f, m, &r));
+    PL_CHECK(m.hasRelief);
+
+    float lo = 1.0f, hi = 0.0f;
+    for (int j = 0; j < m.height; ++j) {
+        for (int i = 0; i < m.width; ++i) {
+            if (mapAt(m, i, j) <= 0.0f) continue;
+            lo = std::min(lo, mapAt(m, i, j, 3));
+            hi = std::max(hi, mapAt(m, i, j, 3));
+        }
+    }
+    PL_CHECK_NEAR(lo, 0.0, 1e-4);
+    PL_CHECK_NEAR(hi, 1.0, 1e-4);
+
+    const int mj = static_cast<int>(0.5f * (m.boxLoY + m.boxHiY));
+    const int il = static_cast<int>(m.boxLoU + 0.2f * (m.boxHiU - m.boxLoU));
+    const int ir = static_cast<int>(m.boxLoU + 0.8f * (m.boxHiU - m.boxLoU));
+    PL_CHECK(mapAt(m, il, mj, 3) < 0.3f);
+    PL_CHECK(mapAt(m, ir, mj, 3) > 0.7f);
+
+    r.inverted = true;
+    ShapeMap inv;
+    PL_CHECK(buildShapeMap(matte.view(), ShapeChannel::Alpha, 0.5f, inv, &r));
+    PL_CHECK(mapAt(inv, il, mj, 3) > 0.7f);
+    PL_CHECK_NEAR(mapAt(inv, il, mj, 3), 1.0 - mapAt(m, il, mj, 3), 1e-4);
+    PL_CHECK(inv.hash != m.hash);
+}
+
+// THE DEPTH IS THE STRAIGHT COLOUR: a half-transparent depth pass reads the same nearness
+// as an opaque one, not half of it.
+PL_TEST(AHalfTransparentDepthPassReadsItsDepth) {
+    const Picture matte = discMatte();
+    auto bump = [](double fx, double fy) {
+        return 0.2 + 0.6 * std::exp(-((fx - 0.5) * (fx - 0.5) + (fy - 0.4) * (fy - 0.4)) / 0.02);
+    };
+    const Picture opaque = depthMap(200, 200, bump, 1.0f);
+    const Picture half   = depthMap(200, 200, bump, 0.5f);
+
+    ReliefSource a, b;
+    a.view = opaque.view();
+    b.view = half.view();
+    ShapeMap ma, mb;
+    PL_CHECK(buildShapeMap(matte.view(), ShapeChannel::Alpha, 0.5f, ma, &a));
+    PL_CHECK(buildShapeMap(matte.view(), ShapeChannel::Alpha, 0.5f, mb, &b));
+    double worst = 0.0;
+    for (size_t q = 3; q < ma.texels.size(); q += 4)
+        worst = std::max(worst, double(std::fabs(ma.texels[q] - mb.texels[q])));
+    PL_CHECK_NEAR(worst, 0.0, 1e-4);
+}
+
+// A DEPTH PASS AT ANOTHER SIZE LINES UP: the frames are matched by fraction, so the same
+// depth at half the resolution builds nearly the same relief.
+PL_TEST(ADepthPassAtAnotherSizeLinesUp) {
+    const Picture matte = discMatte();
+    auto bumps = [](double fx, double fy) {
+        const double a = std::exp(-((fx - 0.35) * (fx - 0.35) + (fy - 0.4) * (fy - 0.4)) / 0.01);
+        const double b = std::exp(-((fx - 0.65) * (fx - 0.65) + (fy - 0.6) * (fy - 0.6)) / 0.02);
+        return 0.1 + 0.5 * a + 0.4 * b;
+    };
+    const Picture full = depthMap(400, 400, bumps);
+    const Picture small = depthMap(200, 200, bumps);
+    ReliefSource a, b;
+    a.view = full.view();
+    b.view = small.view();
+    ShapeMap ma, mb;
+    PL_CHECK(buildShapeMap(matte.view(), ShapeChannel::Alpha, 0.5f, ma, &a));
+    PL_CHECK(buildShapeMap(matte.view(), ShapeChannel::Alpha, 0.5f, mb, &b));
+    double worst = 0.0;
+    for (size_t q = 3; q < ma.texels.size(); q += 4)
+        worst = std::max(worst, double(std::fabs(ma.texels[q] - mb.texels[q])));
+    PL_CHECK(worst < 0.03);
+}
+
+// THE SLOPE THE KERNEL'S BOUND TAKES IS THE STEEPEST STEP THERE IS, and Softness lowers it:
+// a hard step in the depth map is a cliff at softness 0 and a slope at 1.
+PL_TEST(TheReliefSlopeIsTheSteepestStep) {
+    const Picture matte = discMatte();
+    const Picture step = depthMap(200, 200, [](double fx, double) { return fx < 0.5 ? 0.2 : 0.8; });
+
+    ReliefSource r;
+    r.view = step.view();
+    r.softness = 0.0f;
+    r.detail = 0.0f;
+    ShapeMap hard;
+    PL_CHECK(buildShapeMap(matte.view(), ShapeChannel::Alpha, 0.5f, hard, &r));
+    PL_CHECK_NEAR(hard.reliefSlope, steepestOf(hard), 1e-6);
+    PL_CHECK(hard.reliefSlope > 0.5f);
+
+    r.softness = 1.0f;
+    ShapeMap soft;
+    PL_CHECK(buildShapeMap(matte.view(), ShapeChannel::Alpha, 0.5f, soft, &r));
+    PL_CHECK_NEAR(soft.reliefSlope, steepestOf(soft), 1e-6);
+    // A unit step through a Gaussian of sigma 16 is at most 1 / (sigma sqrt(2 pi)) a texel.
+    PL_CHECK(soft.reliefSlope < 1.0f / (kReliefBlurMax * 2.5f) + 1e-3f);
+    PL_CHECK(soft.hash != hard.hash);
+}
+
+// THE OUTSIDE IS FILLED FROM THE INSIDE, so the rim keeps the subject's depth rather than
+// sinking towards the background: a depth map that is near at the disc's rim and far in
+// its middle (and black, far, outside it) leaves the rim near after the blur.
+PL_TEST(TheOutsideIsFilledFromTheInside) {
+    const Picture matte = discMatte();
+    const Picture ring = depthMap(200, 200, [](double fx, double fy) {
+        const double r = std::hypot(fx - 0.5, fy - 0.5);
+        return r > 0.4 ? 0.0 : 0.2 + 0.6 * (r / 0.4);
+    });
+    ReliefSource rs;
+    rs.view = ring.view();
+    rs.softness = 1.0f;
+    rs.detail = 0.0f;
+    ShapeMap m;
+    PL_CHECK(buildShapeMap(matte.view(), ShapeChannel::Alpha, 0.5f, m, &rs));
+
+    // Just inside the rim, and a few texels outside it, on the middle row.
+    const int mj = static_cast<int>(0.5f * (m.boxLoY + m.boxHiY));
+    int edge = -1;
+    for (int i = 0; i < m.width; ++i) if (mapAt(m, i, mj) > 0.0f) { edge = i; break; }
+    PL_CHECK(edge > 0);
+    PL_CHECK(mapAt(m, edge + 1, mj, 3) > 0.75f);
+    PL_CHECK(mapAt(m, edge - 4, mj, 3) > 0.75f);
+}
+
+// RELIEF DETAIL TAKES THE LARGE FORM AWAY AND KEEPS THE FEATURES (build 28). A depth map
+// that is mostly a slope -- a head turned three-quarters -- with a small bump on it: as it
+// is, the far end of the slope is the nearest thing; with the form taken away, the bump is.
+PL_TEST(ReliefDetailKeepsTheFeatures) {
+    const Picture matte = discMatte();
+    const Picture turned = depthMap(200, 200, [](double fx, double fy) {
+        const double bump = std::exp(-((fx - 0.4) * (fx - 0.4) + (fy - 0.5) * (fy - 0.5)) / (2.0 * 0.05 * 0.05));
+        return 0.2 + 0.6 * fx + 0.15 * bump;
+    });
+    auto reliefAt = [](const ShapeMap& m, double fx, double fy) {   // fractions of the frame
+        // The disc spans 20..180 of the 200-pixel frame; the map's box is the disc's.
+        const double bu = (fx * 200.0 - 20.0) / 160.0, by = 1.0 - (fy * 200.0 - 20.0) / 160.0;
+        const int i = static_cast<int>(m.boxLoU + bu * (m.boxHiU - m.boxLoU));
+        const int j = static_cast<int>(m.boxLoY + by * (m.boxHiY - m.boxLoY));
+        return mapAt(m, i, j, 3);
+    };
+
+    ReliefSource r;
+    r.view = turned.view();
+    r.softness = 0.0f;
+    r.detail = 0.0f;
+    ShapeMap asIs;
+    PL_CHECK(buildShapeMap(matte.view(), ShapeChannel::Alpha, 0.5f, asIs, &r));
+    PL_CHECK(reliefAt(asIs, 0.85, 0.5) > reliefAt(asIs, 0.4, 0.5));
+
+    r.detail = 1.0f;
+    ShapeMap detail;
+    PL_CHECK(buildShapeMap(matte.view(), ShapeChannel::Alpha, 0.5f, detail, &r));
+    PL_CHECK(reliefAt(detail, 0.4, 0.5) > reliefAt(detail, 0.85, 0.5) + 0.3f);
+    PL_CHECK(detail.hash != asIs.hash);
+
+    // Still stretched to 0..1 inside the silhouette.
+    float lo = 1.0f, hi = 0.0f;
+    for (int j = 0; j < detail.height; ++j) {
+        for (int i = 0; i < detail.width; ++i) {
+            if (mapAt(detail, i, j) <= 0.0f) continue;
+            lo = std::min(lo, mapAt(detail, i, j, 3));
+            hi = std::max(hi, mapAt(detail, i, j, 3));
+        }
+    }
+    PL_CHECK_NEAR(lo, 0.0, 1e-4);
+    PL_CHECK_NEAR(hi, 1.0, 1e-4);
+}
+
+// THE FIT: Relief Depth of the smaller side, the slope in metres per metre, the extent out
+// past the lifted face -- and none of it without a relief, or with NaN for a depth.
+PL_TEST(TheReliefIsFittedWithTheShape) {
+    const ConvectionDerived cd = heroOf(1500.0f, 1700.0f);
+    const Picture matte = alphaShape(100, 200, [](double, double) { return true; });
+    const Picture ramp = depthMap(100, 200, [](double, double fy) { return fy; });
+    ReliefSource r;
+    r.view = ramp.view();
+    ShapeMap m;
+    PL_CHECK(buildShapeMap(matte.view(), ShapeChannel::Alpha, 0.5f, m, &r));
+    PL_CHECK(m.hasRelief);
+
+    PareidoliaParams p;
+    p.reliefDepth = 0.5f;
+    const ShapeGeometry g = resolveShape(&m, p, cd);
+    PL_CHECK(g.on);
+    PL_CHECK_NEAR(g.reliefHeight, 0.5 * g.widthMetres, 1.0);
+    PL_CHECK_NEAR(g.reliefSlope,
+                  g.reliefHeight * std::sqrt(2.0) * m.reliefSlope / g.texelMetres * 1.001,
+                  1e-3 * g.reliefSlope + 1e-6);
+    PL_CHECK_NEAR(g.extent, std::hypot(0.5 * g.widthMetres, g.round + g.reliefHeight), 1.0);
+    // The fade from the edge: a quarter of the rims or of the relief, whichever is less.
+    PL_CHECK_NEAR(g.reliefFade, kReliefFadeOfRim * std::min(g.round, g.reliefHeight), 1e-3);
+
+    p.reliefDepth = 0.0f;
+    PL_CHECK(resolveShape(&m, p, cd).reliefHeight == 0.0f);
+    PL_CHECK(resolveShape(&m, p, cd).reliefSlope == 0.0f);
+
+    for (float bad : { std::numeric_limits<float>::quiet_NaN(), -3.0f, 1e30f }) {
+        p.reliefDepth = bad;
+        const ShapeGeometry b = resolveShape(&m, p, cd);
+        PL_CHECK(std::isfinite(b.reliefHeight) && b.reliefHeight >= 0.0f);
+        PL_CHECK(b.reliefHeight <= 2.0f * std::min(b.widthMetres, b.heightMetres) + 1e-3f);
+        PL_CHECK(std::isfinite(b.reliefSlope) && b.reliefSlope >= 0.0f);
+    }
+}
+
 // WITH NO PICTURE, A RENDER IS WHAT IT WAS: deriveRenderInputs leaves the shape off and
 // points the kernel at nothing. With one, it points at the caller's texels and hash.
 PL_TEST(NoPictureIsTheHeroAsItWas) {

@@ -685,6 +685,110 @@ int main() {
         cudaFree(dr.dev);
     }
 
+    // -----------------------------------------------------------------------
+    // THE FACE THE CAMERA SEES (build 29): firstScatterMoments against closed forms
+    // -----------------------------------------------------------------------
+    //
+    // A deterministic march, so one ray each and no noise. Through a constant slab the
+    // mean first-scatter distance and the probability of scattering are closed forms: at
+    // two majorants, stopped short by tMax, and through a slab thick enough to stop the
+    // march early. Then the sharp core, walked through the stored grid, against a fine host
+    // quadrature of the same density.
+    {
+        std::printf("\n\nFIRST SCATTER -- the march that lays the light layer on the cloud\n");
+        std::printf("  %-26s %10s %12s %9s %12s\n", "case", "mean t", "closed form", "P",
+                    "closed form");
+
+        float2* dOut = nullptr;
+        cudaMalloc(&dOut, sizeof(float2));
+        auto march = [&](const Medium_0& m, const Grid& g, float3 o, float3 d, float tMax) {
+            RWStructuredBuffer<float2> out;
+            out.data  = dOut;
+            out.count = 1;
+            firstScatterTrial<<<1, 64>>>(m, g.desc, g.buffer(), noDrift.buffer(), o, d, tMax,
+                                         out, 1);
+            float2 h = make_float2(0.0f, 0.0f);
+            cudaMemcpy(&h, dOut, sizeof(float2), cudaMemcpyDeviceToHost);
+            return h;
+        };
+        // A constant slab entered at t0 for L metres: P = 1 - e^-sL, mean = t0 + 1/s - L e^-sL / P.
+        auto closed = [](double s, double t0, double L, double& mean, double& p) {
+            const double e = std::exp(-s * L);
+            p    = 1.0 - e;
+            mean = t0 + 1.0 / s - L * e / p;
+        };
+        // THE MARCH RETURNS THE MOMENT, the integral of t against the first-scatter density;
+        // the mean is that over the probability, as sceneFirstScatter takes it.
+        auto check = [&](const char* name, float2 got, double mean, double p, double tolT,
+                         double tolP) {
+            const double t = got.y > 0.0f ? static_cast<double>(got.x) / got.y : 0.0;
+            std::printf("  %-26s %10.2f %12.2f %9.5f %12.5f\n", name, t, mean,
+                        static_cast<double>(got.y), p);
+            if (!(std::fabs(t - mean) <= tolT) || !(std::fabs(got.y - p) <= tolP)) {
+                std::printf("    FAIL: the march is off by %+.2f m and %+.5f in probability\n",
+                            t - mean, got.y - p);
+                ++failures;
+            }
+        };
+
+        // THE MIDPOINT STANDS FOR A STEP'S MEAN, which is 2% of the step early: at 1x the
+        // majorant that is half a percent of a free path, so the tolerance is one percent.
+        double mean = 0.0, p = 0.0;
+        closed(sigma, 1000.0, thickness, mean, p);
+        const float scales[] = { 1.0f, 20.0f };
+        for (float k : scales) {
+            Medium_0 m = base;
+            m.majorant_0 = sigma * k;
+            char name[64];
+            std::snprintf(name, sizeof name, "slab, majorant %.0fx", static_cast<double>(k));
+            check(name, march(m, noGrid, origin, up, 1e30f), mean, p, 0.01 / sigma, 1e-4);
+        }
+        {
+            Medium_0 m = base;
+            m.majorant_0 = sigma;
+            closed(sigma, 1000.0, 500.0, mean, p);
+            check("slab, stopped at tMax", march(m, noGrid, origin, up, 1500.0f), mean, p,
+                  0.01 / sigma, 1e-4);
+        }
+        {
+            // THE MARCH STOPS WITH HALF A PERCENT LEFT, and the tail it drops moves the mean
+            // by under 3% of a free path.
+            Medium_0 thick = base;
+            thick.density_0  = sigma * 8.0f;
+            thick.majorant_0 = thick.density_0;
+            closed(thick.density_0, 1000.0, thickness, mean, p);
+            check("thick slab, stopped early", march(thick, noGrid, origin, up, 1e30f), mean, p,
+                  0.03 / thick.density_0, 0.0051);
+        }
+        {
+            Medium_0 spiky = base;
+            spiky.mode_0        = 1;
+            spiky.density_0     = sigma * 0.1f;
+            spiky.coreCentre_0  = make_float3(0.0f, base.slabBottom_0 + thickness * 0.5f, 0.0f);
+            spiky.coreRadius_0  = 60.0f;
+            spiky.coreDensity_0 = sigma * 40.0f;
+            spiky.majorant_0    = spiky.density_0 + spiky.coreDensity_0;
+            Grid g = buildGrid(spiky, make_float3(-500.0f, base.slabBottom_0, -500.0f),
+                               make_float3(500.0f, base.slabTop_0, 500.0f), make_int3(16, 16, 16));
+
+            // THE SAME INTEGRAL ON THE HOST, at 5 cm, straight up through the core.
+            double tr = 1.0, sp = 0.0, st = 0.0;
+            const double dt = 0.05;
+            for (double t = base.slabBottom_0 + 0.5 * dt; t < base.slabTop_0; t += dt) {
+                const double r = (t - spiky.coreCentre_0.y) / spiky.coreRadius_0;
+                const double s = spiky.density_0 + spiky.coreDensity_0 * std::exp(-r * r);
+                const double a = 1.0 - std::exp(-s * dt);
+                sp += tr * a;
+                st += tr * a * t;
+                tr *= 1.0 - a;
+            }
+            check("core, through the grid", march(spiky, g, origin, up, 1e30f), st / sp, sp, 2.0,
+                  0.0051);
+            cudaFree(g.dev);
+        }
+        cudaFree(dOut);
+    }
+
     std::printf("\n%s\n", failures == 0
         ? "transport is unbiased, and neither the majorant nor the grid reaches the answer"
         : "TRANSPORT CHECKS FAILED");

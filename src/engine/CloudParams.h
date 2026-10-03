@@ -276,6 +276,28 @@ struct PareidoliaParams {
     // camera's own bearing before the fingerprint is taken, as the sun placement does
     // with the sun, so a camera move that turns the shape is a field change.
     Real bearing = 0.0f;
+
+    // RELIEF (build 27): a second picture, a DEPTH MAP, pushes the side of the shape that
+    // faces the eye out towards it -- brighter is nearer -- so the inside of the silhouette
+    // has forms the sun can model, not one even cushion. NO RELIEF SOURCE IS NO RELIEF, and
+    // the shape is build 21's, bit for bit. Pareidolia.h has the whole story.
+    //
+    // 0 reads the depth map's luminance as nearness, 1 its inverse (a Z pass: dark is near).
+    int32_t reliefChannel = 0;
+
+    // How far the nearest part of the relief stands proud of the cushion's face, as a
+    // fraction of the shape's smaller side. The depth map's own range inside the
+    // silhouette is stretched to fill it.
+    Real reliefDepth = 0.25f;
+
+    // 0..1: how far the depth map is blurred before it is built, up to kReliefBlurMax
+    // texels. Soft relief reads as cloud lobes; hard relief reads as a plaster cast.
+    Real reliefSoftness = 0.35f;
+
+    // 0..1 (build 28): how much of the depth map's LARGE FORM is taken away before it is
+    // stretched to Relief Depth, so the features -- a nose, lips, a brow -- spend the range
+    // rather than the head's own turn. 0 is the depth map as it is.
+    Real reliefDetail = 0.5f;
 };
 
 // ---------------------------------------------------------------------------

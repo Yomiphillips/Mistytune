@@ -49,6 +49,7 @@
 #include "PhaseLib.slang"
 #include "SkyLib.slang"
 #include "AirMapLib.slang"
+#include "LightLib.slang"
 
 // ---------------------------------------------------------------------------
 // The environment
@@ -234,6 +235,22 @@ public struct Scene
     // the map. Zero is the exact ray, which is what a zeroed struct and every final render
     // get. Only with the maps (airMapOn). See transmittanceHandoff in AirMapLib.slang.
     float          shadowHandoff;
+
+    // ===================================================================
+    // LOCAL LIGHTS (build 29): the comp's lights and a light layer, packed by
+    // src/engine/LocalLights.h and read by LightLib.slang. One is drawn at every
+    // scattering event beside the sun -- see pathScatter -- on a stream of its own, so the
+    // path draws exactly what it drew without them.
+    //
+    // ltAmbient IS AE's AMBIENT LIGHT: a uniform dome every BOUNCED path that leaves the
+    // medium sees, and the camera does not. See pathEnvironment.
+    //
+    // ZERO IN A ZEROED STRUCT, so every scene a test builds by hand has none, and a frame
+    // with no lights runs exactly the arithmetic it ran before build 29.
+    // ===================================================================
+    int                     ltCount;
+    StructuredBuffer<float> ltBuffer;
+    float3                  ltAmbient;
 };
 
 // A STRUCTURAL CEILING, SEPARATE FROM THE PARAMETER. A GPU loop wants a bound the
@@ -348,6 +365,22 @@ float sceneTransmittance(Scene s, StructuredBuffer<float> bounds, StructuredBuff
     return tr;
 }
 
+// How much light survives from p along dir for tMax metres, through every layer: the shadow
+// ray to a local light (build 29). NO HAND-OFF: the shadow maps are columns towards the SUN,
+// and a light's ray is not one, so it is walked exactly whatever the quality.
+float sceneTransmittanceUpTo(Scene s, StructuredBuffer<float> bounds,
+                             StructuredBuffer<float2> drift, inout Rng rng, float3 p,
+                             float3 dir, float tMax, inout int steps)
+{
+    float tr = transmittanceUpTo(s.medium, s.grid, bounds, drift, rng, p, dir, tMax, steps);
+    if (s.layer2On != 0 && tr > 0.0f)
+    {
+        MajorantGrid g2 = gridFor(s.medium2, s.grid2, p);
+        tr *= transmittanceUpTo(s.medium2, g2, bounds, drift, rng, p, dir, tMax, steps);
+    }
+    return tr;
+}
+
 // Where the path next scatters, in whichever layer it scatters in.
 //
 // ===========================================================================
@@ -406,6 +439,36 @@ bool sceneFreeFlight(Scene s, StructuredBuffer<float> bounds, StructuredBuffer<f
 
     scatterAt = float3(0.0f, 0.0f, 0.0f);
     return false;
+}
+
+// THE FACE THE CAMERA SEES, through every layer (build 29): float2(the mean distance at which
+// the ray's light first scatters, the probability that it does), up to tMax. See
+// firstScatterMoments in TransportLib.slang; it only places the light layer's sheet, and
+// nothing renders with it.
+//
+// THE NEARER SLAB FIRST, and the farther seen through what the nearer lets by. Exact when the
+// two slabs' stretches of the ray do not overlap, which is any two layers one above the
+// other, and a fair placement where they do.
+public float2 sceneFirstScatter(Scene s, StructuredBuffer<float> bounds,
+                                StructuredBuffer<float2> drift, float3 ro, float3 rd,
+                                float tMax)
+{
+    float2 a = firstScatterMoments(s.medium, s.grid, bounds, drift, ro, rd, tMax);
+    if (s.layer2On != 0)
+    {
+        MajorantGrid g2 = gridFor(s.medium2, s.grid2, ro);
+        float2 b = firstScatterMoments(s.medium2, g2, bounds, drift, ro, rd, tMax);
+
+        float a0, a1, b0, b1;
+        bool reachA = slabRange(s.medium,  ro, rd, a0, a1);
+        bool reachB = slabRange(s.medium2, ro, rd, b0, b1);
+        bool secondFirst = reachB && (!reachA || max(b0, 0.0f) < max(a0, 0.0f));
+
+        float2 nearer  = secondFirst ? b : a;
+        float2 farther = secondFirst ? a : b;
+        a = nearer + farther * (1.0f - nearer.y);
+    }
+    return float2(a.y > 0.0f ? a.x / a.y : 0.0f, a.y);
 }
 
 // One layer's walk along the camera segment, advanced to its next tentative collision.
@@ -837,7 +900,12 @@ float3 pathEnvironment(Scene s, float3 ro, float3 rd, bool first)
     // clear, and brightened the deck's own underside.
     float groundLit = s.airMapOn != 0
                     ? groundShadow(s.airMapIce, s.airMapCu, ro, rd) : 1.0f;
-    return environmentRadiance(s.environment, ro, rd, first, groundLit);
+    float3 env = environmentRadiance(s.environment, ro, rd, first, groundLit);
+
+    // AE's AMBIENT LIGHT (build 29), for a path that has scattered: the cloud is lit by it
+    // and the sky behind the cloud is not brightened by it. Zero without one.
+    if (!first) env += s.ltAmbient;
+    return env;
 }
 
 // What happens at a real collision at p in `layer`, after the free flight found it: the
@@ -886,6 +954,36 @@ bool pathScatter(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
             // `shadow` is the cloud's own transmittance along the shadow ray;
             // sunIrradianceAt is the air's, and says why both are needed.
             st.psRadiance += st.psThroughput * matterAlbedo * ph0 * shadow * sunIrradianceAt(s, p);
+        }
+    }
+
+    // ===================================================================
+    // NEXT-EVENT ESTIMATION TOWARDS ONE LOCAL LIGHT (build 29), the sun's estimator with
+    // the light drawn rather than given: LightLib.slang draws it and says what it sends,
+    // this traces the cloud in the way and applies the phase function and the albedo.
+    //
+    // AT EVERY EVENT, THE FIRST INCLUDED. The camera segment's continuous estimate is the
+    // sun's alone; a light at the first event is plain next-event estimation.
+    //
+    // ON A STREAM SPLIT FROM THE PATH'S, NOT DRAWN FROM IT. The path's own stream is
+    // untouched, so a frame with a light keeps every other photon's noise -- a lightning
+    // flash brightens the cloud without reshuffling it -- and a frame without lights draws
+    // exactly what it drew before. The light's draws, then the shadow ray's own.
+    // ===================================================================
+    if (s.ltCount > 0)
+    {
+        Rng lr = splitRng(st.psRng, 0x119u);
+        LightSample ls = sampleLocalLight(s.ltBuffer, s.ltCount, p, lr);
+        if (any(ls.lsIrradiance > float3(0.0f, 0.0f, 0.0f)))
+        {
+            float shadow = sceneTransmittanceUpTo(s, bounds, drift, lr, p, ls.lsDir,
+                                                  ls.lsDist, st.psSteps);
+            if (shadow > 0.0f)
+            {
+                // The same cosine as the sun's: the light's travel is -lsDir, the camera's -rd.
+                float phL = phaseAt(matterPhase, dot(st.psDir, ls.lsDir));
+                st.psRadiance += st.psThroughput * matterAlbedo * phL * shadow * ls.lsIrradiance;
+            }
         }
     }
 

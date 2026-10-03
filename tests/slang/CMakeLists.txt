@@ -28,6 +28,7 @@ set(SLANG_CONV_LIB   "${SLANG_DIR}/ConvectionLib.slang")
 set(SLANG_SKY_LIB    "${SLANG_DIR}/SkyLib.slang")
 set(SLANG_BOUNCE_LIB "${SLANG_DIR}/BounceLib.slang")
 set(SLANG_AIRMAP_LIB "${SLANG_DIR}/AirMapLib.slang")
+set(SLANG_LIGHT_LIB "${SLANG_DIR}/LightLib.slang")
 
 if(NOT EXISTS "${GENERATED_DIR}/MathParity.cu")
     # A MISSING GENERATED FILE IS A FAILING TEST, NOT A SKIPPED ONE -- the same rule
@@ -233,13 +234,17 @@ slang_generate("${SLANG_DIR}/Bounce.slang"
                "${GENERATED_DIR}/Bounce.cu"
                "../prelude/slang-cuda-prelude.h"
                ${SLANG_RNG} ${SLANG_PHASE_LIB} ${SLANG_XPORT_LIB} ${SLANG_GEN_LIB} ${SLANG_CONV_LIB}
-               ${SLANG_BOUNCE_LIB} ${SLANG_SKY_LIB} ${SLANG_AIRMAP_LIB})
+               ${SLANG_BOUNCE_LIB} ${SLANG_SKY_LIB} ${SLANG_AIRMAP_LIB} ${SLANG_LIGHT_LIB})
 
 add_executable(slang_bounce BounceMain.cu "${GENERATED_DIR}/Bounce.cu")
 
 set_source_files_properties("${GENERATED_DIR}/Bounce.cu" PROPERTIES HEADER_FILE_ONLY ON)
 
 target_include_directories(slang_bounce PRIVATE "${GENERATED_DIR}")
+
+# THE LOCAL LIGHTS' BUFFER IS PACKED BY THE ENGINE (build 29), so the test reads what the
+# effect would hand the kernel rather than a second copy of the layout.
+target_link_libraries(slang_bounce PRIVATE plugin_engine)
 
 set_target_properties(slang_bounce PROPERTIES
     CUDA_ARCHITECTURES "${PLUGIN_CUDA_ARCHITECTURES}"

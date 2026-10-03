@@ -31,6 +31,39 @@
 // shape-context matcher, and Decay in units of it. Decay is input strength for now.
 // ===========================================================================
 //
+// ===========================================================================
+// RELIEF (build 27): A DEPTH MAP CARVES THE FACE TOWARDS THE EYE.
+//
+// The silhouette alone makes every shape a cushion of one thickness, and a figure in a
+// real cloud reads from the forms INSIDE its outline -- a brow, a cheek, a hollow the sun
+// cannot reach. So a second picture, a depth map (brighter is nearer), pushes the cushion's
+// front face out towards the eye by up to Relief Depth. The back stays flat: this is a
+// carving in cloud, seen from the front, as the shape itself is.
+//
+//   1. The depth map is read at the silhouette's texels, in the same place in its frame as
+//      the matte -- so a depth pass of the same picture lines up whatever its resolution.
+//   2. Its range INSIDE the silhouette is stretched to 0..1: depth tools put a subject
+//      anywhere in their range, and Relief Depth should mean the nearest part.
+//   3. The outside is filled from the nearest inside texels. Filled, so the blurs that
+//      follow do not sink the rim towards the background, and the slope across the edge is
+//      the subject's, not a cliff.
+//   4. RELIEF DETAIL (build 28) flattens the large form and keeps the features, as a relief
+//      sculptor does: it takes away that much of the map blurred at kReliefFormSigma, and
+//      stretches what is left to 0..1 again. A three-quarter head's turn otherwise spends
+//      the whole range, and the nose, the lips and the brow are bumps on a slope.
+//   5. The whole is blurred by Relief Softness.
+//   6. The kernel lifts the front face by height x relief, faded in from the silhouette's
+//      edge over a quarter of the rims' radius, so the outline is not a sheer wall but a
+//      nose ON the outline keeps its height. Billows ride the lifted face as they ride the
+//      cushion, so a brow becomes one big lobe made of small ones.
+//
+// THE BOUND: the relief's largest step between neighbouring texels is measured here, and
+// the kernel bounds the face over a box from the relief at its centre plus that slope --
+// the same argument as the distance's own, which is what keeps the majorant sound.
+//
+// THE MEDIUM IS UNCHANGED. Relief moves where the water is, never what it is.
+// ===========================================================================
+//
 // NO AE HEADERS AND NO GPU HEADERS, like the rest of src/engine/. Pixels in, a map out.
 
 #include "CloudParams.h"
@@ -71,7 +104,7 @@ constexpr int kShapeMapMargin = 16;
 //   [0] signed distance to the silhouette's edge, in TEXELS, positive inside
 //   [1] its slope along u (texels per texel, so per metre per metre)
 //   [2] its slope along y
-//   [3] unused, zero
+//   [3] the relief, 0..1 (build 27); zero everywhere when there is none
 //
 // ROW 0 IS THE BOTTOM. The source's rows run downwards; the map's run up, as height does.
 // The slopes are central differences, so that bilinear interpolation of them is
@@ -88,6 +121,11 @@ struct ShapeMap {
 
     std::vector<float> texels;   // width x height x 4, row-major from the bottom
 
+    // RELIEF (build 27): whether [3] holds one, and its largest step between neighbouring
+    // texels, along either axis -- what the kernel's bound turns into metres per metre.
+    bool  hasRelief   = false;
+    float reliefSlope = 0;
+
     // A hash of everything the kernel reads from here. THE PICTURE IS NOT A PARAMETER,
     // so the fingerprint cannot see it; the effect folds this into the render key once
     // it has read the pixels, and the device caches its upload and the shadow maps
@@ -97,14 +135,40 @@ struct ShapeMap {
     bool empty() const { return width <= 0 || height <= 0 || texels.empty(); }
 };
 
+// THE RELIEF'S BLUR AT SOFTNESS 1, as a Gaussian's sigma in texels: 7% of the
+// silhouette's longer side, about 90 m on the default 3 km hero -- the size of the shape's
+// own billow lobes, which is where relief reads as cloud rather than as sculpture.
+constexpr float kReliefBlurMax = 16.0f;
+
+// THE LARGE FORM RELIEF DETAIL TAKES AWAY, as a Gaussian's sigma in texels: 12% of the
+// silhouette's longer side. Bigger than a nose or a brow on a face that fills it, smaller
+// than the head's own turn.
+constexpr float kReliefFormSigma = 0.12f * kShapeMapInner;
+
+// The lift fades in from the silhouette's edge over this much of the rims' radius (or of
+// the relief's height, if that is less). See convReliefLift for why it is short.
+constexpr float kReliefFadeOfRim = 0.25f;
+
+// The depth map, how to read it, and how soft to make it.
+struct ReliefSource {
+    ConstImageView view;
+    bool inverted = false;   // a Z pass: darker is nearer
+    Real softness = 0.35f;   // 0..1, of kReliefBlurMax
+    Real detail   = 0.5f;    // 0 the depth map as it is .. 1 its large form taken away
+};
+
 // Builds the map from `source`. RETURNS FALSE, AND LEAVES `out` EMPTY, when nothing in the
 // picture reaches the threshold -- a blank layer is no shape, and the hero stays a tower.
 //
 // PIXELS OUTSIDE THE SOURCE'S FRAME ARE OFF IN EVERY MODE, the inverted ones included, so
 // a shape always ends at the edge of its picture: an inverted matte of a small dark mark
 // on white paper is the mark, not the mark plus an infinite sheet of paper.
+//
+// `relief` IS OPTIONAL: null, or a view that is not valid, is no relief, and the map is
+// build 21's to the bit, hash included. A depth map with no range inside the silhouette --
+// one flat grey -- is no relief either.
 bool buildShapeMap(const ConstImageView& source, ShapeChannel channel, Real threshold,
-                   ShapeMap& out);
+                   ShapeMap& out, const ReliefSource* relief = nullptr);
 
 // ---------------------------------------------------------------------------
 // The fit: the map, placed and sized in the world

@@ -362,6 +362,16 @@ MT_DEVICE void fillSlangScene(const RenderRequest& req, SceneT& s, PhaseT& ph) {
 
     // DRAFT'S SHADOW HAND-OFF (build 25), which needs the maps: see QualityParams.
     s.shadowHandoff_0 = s.airMapOn_0 != 0 ? static_cast<float>(req.quality.shadowHandoff) : 0.0f;
+
+    // LOCAL LIGHTS (build 29), whichever memory the request points at, as the shape map's
+    // texels are. EVERY FIELD WRITTEN, the off case included: no buffer is a count of zero
+    // and an EMPTY buffer, and the kernel tests the count before it reads anything.
+    const bool lightsOn = req.lightBuffer != nullptr && req.lightCount > 0 && req.lightFloats > 0;
+    s.ltCount_0 = lightsOn ? req.lightCount : 0;
+    s.ltBuffer_0.data  = lightsOn ? const_cast<float*>(static_cast<const float*>(req.lightBuffer))
+                                  : nullptr;
+    s.ltBuffer_0.count = lightsOn ? static_cast<size_t>(req.lightFloats) : 0;
+    s.ltAmbient_0 = V::v3(req.ambientLight[0], req.ambientLight[1], req.ambientLight[2]);
     // -----------------------------------------------------------------------
     // The second layer: cellular convection
     // -----------------------------------------------------------------------
@@ -489,6 +499,11 @@ MT_DEVICE void fillSlangScene(const RenderRequest& req, SceneT& s, PhaseT& ph) {
     s.medium2_0.conv_0.cvShapeHalfWidth_0 = 0.5f * sg.widthMetres;
     s.medium2_0.conv_0.cvShapeDecay_0     = sg.decay;
     s.medium2_0.conv_0.cvShapeBillow_0    = sg.billow;
+    // RELIEF (build 27), and only on a shape: 0 is none, which the kernel tests first.
+    const bool reliefOn = shapeOn && sg.reliefHeight >= 1.0f;
+    s.medium2_0.conv_0.cvReliefHeight_0   = reliefOn ? sg.reliefHeight : 0.0f;
+    s.medium2_0.conv_0.cvReliefSlope_0    = reliefOn ? sg.reliefSlope : 0.0f;
+    s.medium2_0.conv_0.cvReliefFade_0     = reliefOn && sg.reliefFade >= 1.0f ? sg.reliefFade : 1.0f;
 
     // THE SLAB IS THE TALLEST THE CLOUD CAN BE: the tallest tower or the hero, plus the
     // biggest outward billow. convectionDensity() returns zero outside exactly this range.
@@ -515,7 +530,8 @@ MT_DEVICE void fillSlangScene(const RenderRequest& req, SceneT& s, PhaseT& ph) {
         if (shapeOn) {
             const float lift = 1.5f * billow * cd.heroBillow + 24.0f;
             const float a = 0.5f * sg.widthMetres + lift;
-            const float b = s.medium2_0.conv_0.cvShapeRound_0 + lift;
+            const float b = s.medium2_0.conv_0.cvShapeRound_0 +
+                            s.medium2_0.conv_0.cvReliefHeight_0 + lift;
             const float shapeReach = sqrtf(a * a + b * b) + kHeroBoxMargin;
             if (shapeReach > reach) reach = shapeReach;
         }

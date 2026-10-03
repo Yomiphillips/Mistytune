@@ -97,10 +97,121 @@ Real clampFinite(Real v, Real lo, Real hi, Real fallback) {
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
+// ===========================================================================
+// Relief (build 27)
+// ===========================================================================
+
+// THE DEPTH MAP'S NEARNESS AT ONE PIXEL, 0..1: Rec. 709 luma of the STRAIGHT colour. AE's
+// buffers are premultiplied, and a depth pass with a soft alpha edge is its depth there,
+// not further away for being half transparent. Nothing where there is no alpha.
+float nearnessOf(const Texel& t, bool inverted) {
+    double v = 0.0;
+    if (t.a > 1e-6) v = (0.2126 * t.r + 0.7152 * t.g + 0.0722 * t.b) / t.a;
+    if (!(v > 0.0)) v = 0.0;   // also NaN
+    if (v > 1.0) v = 1.0;
+    return static_cast<float>(inverted ? 1.0 - v : v);
+}
+
+// Bilinear nearness at a continuous position, pixel centres at +0.5, clamped to the frame.
+double nearnessAt(const ConstImageView& img, bool inverted, double x, double y) {
+    const double fx = std::min(std::max(x - 0.5, 0.0), double(img.width - 1));
+    const double fy = std::min(std::max(y - 0.5, 0.0), double(img.height - 1));
+    const int ix = std::min(static_cast<int>(fx), img.width - 1);
+    const int iy = std::min(static_cast<int>(fy), img.height - 1);
+    const int jx = std::min(ix + 1, img.width - 1);
+    const int jy = std::min(iy + 1, img.height - 1);
+    const double tx = fx - ix, ty = fy - iy;
+    const double a = nearnessOf(readPixel(img, ix, iy), inverted);
+    const double b = nearnessOf(readPixel(img, jx, iy), inverted);
+    const double c = nearnessOf(readPixel(img, ix, jy), inverted);
+    const double d = nearnessOf(readPixel(img, jx, jy), inverted);
+    return (a * (1.0 - tx) + b * tx) * (1.0 - ty) + (c * (1.0 - tx) + d * tx) * ty;
+}
+
+// THE OUTSIDE, FILLED FROM THE INSIDE, one ring at a time: each texel next to the filled
+// region takes the mean of its filled neighbours. So the blur that follows sees the
+// subject's own values across the edge rather than a background, and the slope across the
+// silhouette's edge is the subject's -- which is also what keeps the bound tight there.
+void fillOutward(std::vector<float>& v, std::vector<uint8_t> filled, int w, int h) {
+    std::vector<size_t> ring, next;
+    auto touches = [&](int i, int j) {
+        return (i > 0 && filled[static_cast<size_t>(j) * w + i - 1]) ||
+               (i < w - 1 && filled[static_cast<size_t>(j) * w + i + 1]) ||
+               (j > 0 && filled[static_cast<size_t>(j - 1) * w + i]) ||
+               (j < h - 1 && filled[static_cast<size_t>(j + 1) * w + i]);
+    };
+    for (int j = 0; j < h; ++j)
+        for (int i = 0; i < w; ++i)
+            if (!filled[static_cast<size_t>(j) * w + i] && touches(i, j))
+                ring.push_back(static_cast<size_t>(j) * w + i);
+
+    std::vector<uint8_t> queued(filled.size(), 0);
+    while (!ring.empty()) {
+        // Every value in a ring from the rings before it, so the order inside one is moot.
+        std::vector<float> got(ring.size());
+        for (size_t k = 0; k < ring.size(); ++k) {
+            const int i = static_cast<int>(ring[k] % w), j = static_cast<int>(ring[k] / w);
+            double sum = 0.0;
+            int n = 0;
+            if (i > 0     && filled[ring[k] - 1]) { sum += v[ring[k] - 1]; ++n; }
+            if (i < w - 1 && filled[ring[k] + 1]) { sum += v[ring[k] + 1]; ++n; }
+            if (j > 0     && filled[ring[k] - w]) { sum += v[ring[k] - w]; ++n; }
+            if (j < h - 1 && filled[ring[k] + w]) { sum += v[ring[k] + w]; ++n; }
+            got[k] = n > 0 ? static_cast<float>(sum / n) : 0.0f;
+        }
+        for (size_t k = 0; k < ring.size(); ++k) { v[ring[k]] = got[k]; filled[ring[k]] = 1; }
+        next.clear();
+        for (size_t q : ring) {
+            const int i = static_cast<int>(q % w), j = static_cast<int>(q / w);
+            const size_t around[4] = { i > 0 ? q - 1 : q, i < w - 1 ? q + 1 : q,
+                                       j > 0 ? q - w : q, j < h - 1 ? q + w : q };
+            for (size_t a : around) {
+                if (!filled[a] && !queued[a]) { queued[a] = 1; next.push_back(a); }
+            }
+        }
+        ring.swap(next);
+    }
+}
+
+// A separable Gaussian, clamped at the map's edges. Sigma under a third of a texel is none.
+void blurGaussian(std::vector<float>& v, int w, int h, double sigma) {
+    if (!(sigma >= 0.33)) return;
+    const int radius = static_cast<int>(std::ceil(3.0 * sigma));
+    std::vector<double> k(static_cast<size_t>(2 * radius + 1));
+    double norm = 0.0;
+    for (int t = -radius; t <= radius; ++t) {
+        k[static_cast<size_t>(t + radius)] = std::exp(-0.5 * (t * t) / (sigma * sigma));
+        norm += k[static_cast<size_t>(t + radius)];
+    }
+    for (double& x : k) x /= norm;
+
+    std::vector<float> tmp(v.size());
+    for (int j = 0; j < h; ++j) {
+        for (int i = 0; i < w; ++i) {
+            double s = 0.0;
+            for (int t = -radius; t <= radius; ++t) {
+                const int x = std::min(std::max(i + t, 0), w - 1);
+                s += k[static_cast<size_t>(t + radius)] * v[static_cast<size_t>(j) * w + x];
+            }
+            tmp[static_cast<size_t>(j) * w + i] = static_cast<float>(s);
+        }
+    }
+    for (int j = 0; j < h; ++j) {
+        for (int i = 0; i < w; ++i) {
+            double s = 0.0;
+            for (int t = -radius; t <= radius; ++t) {
+                const int y = std::min(std::max(j + t, 0), h - 1);
+                s += k[static_cast<size_t>(t + radius)] * tmp[static_cast<size_t>(y) * w + i];
+            }
+            v[static_cast<size_t>(j) * w + i] = static_cast<float>(s);
+        }
+    }
+}
+
 } // namespace
 
 bool buildShapeMap(const ConstImageView& source, ShapeChannel channel, Real threshold,
-                   ShapeMap& out) {
+                   ShapeMap& out, const ReliefSource* relief) {
     out = ShapeMap{};
     if (!source.valid()) return false;
 
@@ -221,12 +332,94 @@ bool buildShapeMap(const ConstImageView& source, ShapeChannel channel, Real thre
         }
     }
 
-    // THE DISTANCES ARE A FUNCTION OF THE MASK, so the mask and the box are the hash.
+    // ---------------------------------------------------------------------
+    // RELIEF (build 27): the depth map at the silhouette's texels, in the same place in its
+    // frame as the matte's samples -- the frames are matched by their FRACTION, so a depth
+    // pass rendered at another size still lines up. See Pareidolia.h for the four steps.
+    // ---------------------------------------------------------------------
+    if (relief && relief->view.valid()) {
+        const ConstImageView& rv = relief->view;
+        const double sx = double(rv.width) / double(sw);
+        const double sy = double(rv.height) / double(sh);
+        const int kr = std::min(std::max(static_cast<int>(std::ceil(texelPx * std::max(sx, sy))), 1), 4);
+
+        std::vector<float> nearness(inside.size(), 0.0f);
+        float lo = 1.0f, hi = 0.0f;
+        for (int j = 0; j < h; ++j) {
+            for (int i = 0; i < w; ++i) {
+                const size_t q = static_cast<size_t>(j) * w + i;
+                if (!inside[q]) continue;
+                double sum = 0.0;
+                for (int b = 0; b < kr; ++b) {
+                    const double ys = double(y1 + 1) - (j + (b + 0.5) / kr - kShapeMapMargin) * texelPx;
+                    for (int a = 0; a < kr; ++a) {
+                        const double xs = double(x0) + (i + (a + 0.5) / kr - kShapeMapMargin) * texelPx;
+                        sum += nearnessAt(rv, relief->inverted, xs * sx, ys * sy);
+                    }
+                }
+                nearness[q] = static_cast<float>(sum / double(kr * kr));
+                lo = std::min(lo, nearness[q]);
+                hi = std::max(hi, nearness[q]);
+            }
+        }
+
+        // ONE FLAT GREY IS NO RELIEF: there is nothing to stretch.
+        if (hi - lo > 1e-4f) {
+            const float span = hi - lo;
+            for (size_t q = 0; q < nearness.size(); ++q)
+                nearness[q] = inside[q] ? (nearness[q] - lo) / span : 0.0f;
+            fillOutward(nearness, inside, w, h);
+
+            // RELIEF DETAIL (build 28): take away that much of the large form and stretch
+            // what is left inside the silhouette to 0..1 again. The fill above is what lets
+            // the form be blurred without the background sinking the rim.
+            const Real detail = clampFinite(relief->detail, Real(0), Real(1), Real(0.5));
+            if (detail > Real(0)) {
+                std::vector<float> form = nearness;
+                blurGaussian(form, w, h, double(kReliefFormSigma));
+                float dlo = 1e30f, dhi = -1e30f;
+                for (size_t q = 0; q < nearness.size(); ++q) {
+                    nearness[q] -= static_cast<float>(detail) * form[q];
+                    if (inside[q]) { dlo = std::min(dlo, nearness[q]); dhi = std::max(dhi, nearness[q]); }
+                }
+                const float dspan = dhi - dlo > 1e-6f ? dhi - dlo : 1.0f;
+                for (float& v : nearness) v = (v - dlo) / dspan;
+            }
+
+            const Real soft = clampFinite(relief->softness, Real(0), Real(1), Real(0.35));
+            blurGaussian(nearness, w, h, double(soft) * kReliefBlurMax);
+
+            float steepest = 0.0f;
+            for (int j = 0; j < h; ++j) {
+                for (int i = 0; i < w; ++i) {
+                    const size_t q = static_cast<size_t>(j) * w + i;
+                    nearness[q] = std::min(std::max(nearness[q], 0.0f), 1.0f);
+                }
+            }
+            for (int j = 0; j < h; ++j) {
+                for (int i = 0; i < w; ++i) {
+                    const size_t q = static_cast<size_t>(j) * w + i;
+                    if (i + 1 < w) steepest = std::max(steepest, std::fabs(nearness[q + 1] - nearness[q]));
+                    if (j + 1 < h) steepest = std::max(steepest, std::fabs(nearness[q + w] - nearness[q]));
+                    out.texels[q * 4 + 3] = nearness[q];
+                }
+            }
+            out.hasRelief   = true;
+            out.reliefSlope = steepest;
+        }
+    }
+
+    // THE DISTANCES ARE A FUNCTION OF THE MASK, so the mask and the box are the hash -- and
+    // the relief, when there is one. Without it the hash is build 21's, to the bit.
     Fnv fnv;
     fnv.bytes(&out.width, sizeof out.width);
     fnv.bytes(&out.height, sizeof out.height);
     fnv.bytes(&out.boxLoU, sizeof(float) * 4);
     fnv.bytes(inside.data(), inside.size());
+    if (out.hasRelief) {
+        for (size_t q = 0; q < inside.size(); ++q) fnv.bytes(&out.texels[q * 4 + 3], sizeof(float));
+        fnv.bytes(&out.reliefSlope, sizeof out.reliefSlope);
+    }
     out.hash = fnv.h;
     return true;
 }
@@ -257,7 +450,25 @@ ShapeGeometry resolveShape(const ShapeMap* map, const PareidoliaParams& p,
 
     const Real depth = clampFinite(p.depth, Real(0.02), Real(2), Real(0.6));
     g.round  = std::max(Real(1), depth * Real(0.5) * std::min(g.widthMetres, g.heightMetres));
-    g.extent = std::sqrt(Real(0.25) * g.widthMetres * g.widthMetres + g.round * g.round);
+
+    // RELIEF (build 27): Relief Depth of the smaller side, and the slope the kernel's bound
+    // takes. The map's step is per texel along one axis; bilinear interpolation can step
+    // that along both at once, so sqrt(2) of it per texel, and a texel is `metres`. The
+    // 0.1% is rounding's share, so the bound is never a rounding short of the density.
+    if (map->hasRelief) {
+        const Real rd = clampFinite(p.reliefDepth, Real(0), Real(2), Real(0.25));
+        const Real height = rd * std::min(g.widthMetres, g.heightMetres);
+        if (height >= Real(1)) {
+            g.reliefHeight = height;
+            g.reliefSlope  = height * Real(1.41421356) * map->reliefSlope / metres * Real(1.001);
+            // THE FADE FROM THE EDGE: a quarter of the rims or of the relief, whichever is
+            // less -- enough that the outline is not a sheer wall, short enough that a nose
+            // on the outline keeps its height. See convReliefLift.
+            g.reliefFade = std::max(Real(1), kReliefFadeOfRim * std::min(g.round, height));
+        }
+    }
+    const Real front = g.round + g.reliefHeight;
+    g.extent = std::sqrt(Real(0.25) * g.widthMetres * g.widthMetres + front * front);
 
     // A DIAL KEYFRAMED ROUND ACCUMULATES REVOLUTIONS, so the angle is reduced before the
     // trig rather than trusted to it at 3600 degrees.
