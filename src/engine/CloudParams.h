@@ -765,4 +765,60 @@ inline QualityParams draftQuality(QualityParams q) {
     return q;
 }
 
+// ---------------------------------------------------------------------------
+// The look (build 32)
+// ---------------------------------------------------------------------------
+//
+// ===========================================================================
+// PHYSICAL IS THE PATH TRACE EVERY BUILD BEFORE THIS ONE DREW. STYLIZED IS A SECOND RENDERER
+// OVER THE SAME CLOUD: the field the generators make -- the wind, the time, the hero, the
+// pareidolia shape, the relief -- baked into grids once a frame, lit by grids of its own and
+// drawn by one deterministic march per pixel. No random walk, so no noise, no samples and no
+// denoise, and a frame in tens of milliseconds where the path trace takes tenths of a second.
+//
+// Asked for on 2026-10-05 with four references (a film photo, satin, cotton-wool puffs and
+// clouds shaped like flowers): "less realistic, more beautiful ... almost realtime. Does not
+// have to be realistic as long as it moves like cloud." Then: "it's important that it is fast!
+// it almost feels native to AE."
+//
+// THE PHYSICAL MEDIUM IS NOT TOUCHED. Nothing here changes what a Physical frame draws, by a
+// bit, and the cloud stays water in both: Stylized shapes and lights it, it never darkens it
+// with absorption.
+//
+// ZERO IS PHYSICAL, so a zeroed request and every project saved before build 32 draw what they
+// drew. The effect's popup lists the looks fastest first; its order is not this enum's.
+// ===========================================================================
+enum class Look : int32_t {
+    Physical = 0,
+    Stylized = 1
+};
+
+// What the Stylized look's controls say. NOT HASHED into any key: the stylized path never
+// accumulates, so it has no cache to keep honest.
+struct StylizedParams {
+    // 0 is the cloud's own soft density, wisps and all. 1 is solid puffs with a clean edge:
+    // the density is cut at a level and filled, cotton wool rather than mist.
+    Real puffiness = 0.65f;
+
+    // FIBRE ON THE EDGE, 0..1, and its size in metres: a tiling noise that frays the cut, so a
+    // puff reads as wool rather than plastic. It drifts with the wind, so it moves with the cloud.
+    Real fuzz     = 0.35f;
+    Real fuzzSize = 70.0f;
+
+    // How far the sunlight soaks in, 0..1. 0 is hard shading, a sunlit face and a dark heart;
+    // 1 is a cloud lit through, every shadow open.
+    Real softness = 0.35f;
+
+    // The bright rim round a backlit cloud, 0..1.
+    Real silverLining = 0.5f;
+
+    // THE SHADOWS' COLOUR, multiplying the skylight that fills them. White is the sky's own blue;
+    // the default is a little cooler, as the references' shadows are.
+    Real shadowTint[3] = { 0.85f, 0.95f, 1.15f };
+
+    // HOW BRIGHT THE CLOUD IS against the sky, as a gain on its own light. 1 is calibrated to
+    // sit with Physical's exposure.
+    Real brightness = 1.0f;
+};
+
 } // namespace plugin::cloud

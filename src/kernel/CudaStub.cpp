@@ -37,4 +37,6 @@ float* reserveDeviceAccumulator(int, int) { return nullptr; }
 
 const char* lastCudaError() { return ""; }
 
+bool renderStylizedCudaToHost(const RenderRequest&, StylizedTimings*) { return false; }
+
 } // namespace plugin::kernel

@@ -236,6 +236,12 @@ void printUsage() {
         "  --alpha-out <path>  also write the output's alpha as a PGM\n"
         "  --transparent    build 31: Background Transparent -- the clouds alone, premultiplied,\n"
         "                   over nothing; the sun and sky still light them\n"
+        "  --look <physical|stylized>  build 32: the path trace (default), or the Stylized\n"
+        "                   look: the same cloud baked to grids and drawn by one march per\n"
+        "                   pixel, no samples and no denoise (-s and --denoise are ignored)\n"
+        "  --puffiness <0..1>  --fuzz <0..1>  --fuzz-size <m>  --softness <0..1>\n"
+        "  --silver <0..1>  --brightness <k>  --shadow-tint <r,g,b>   the Stylized controls\n"
+        "  --style-timings  print where a stylized frame's time went\n"
         "  --hide-sun       Show Sun off: the camera does not see the disc, the clouds are\n"
         "                   lit as before\n"
         "\n"
@@ -891,6 +897,10 @@ int main(int argc, char** argv) {
     float lightLayerDepth = 0.0f;
     bool  lightLayerFlat = false;
 
+    // THE LOOK (build 32): --look stylized, and where its time went.
+    bool styleTimings = false;
+    int  styleRepeat  = 1;      // --style-repeat: render the frame this many times, for warm timings
+
     // SCENE INTEGRATION (build 30).
     const char* depthPath = nullptr;
     const char* platePath = nullptr;
@@ -900,6 +910,30 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
         const bool hasNext = (i + 1) < argc;
+
+        // THE LOOK (build 32), a chain of its own like the scene's below.
+        bool lookOption = true;
+        if (argIs(a, "--look") && hasNext) {
+            const char* v = argv[++i];
+            req.look = argIs(v, "stylized") ? cloud::Look::Stylized : cloud::Look::Physical;
+        }
+        else if (argIs(a, "--puffiness") && hasNext)  req.stylized.puffiness    = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--fuzz") && hasNext)       req.stylized.fuzz         = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--fuzz-size") && hasNext)  req.stylized.fuzzSize     = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--softness") && hasNext)   req.stylized.softness     = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--silver") && hasNext)     req.stylized.silverLining = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--brightness") && hasNext) req.stylized.brightness   = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--shadow-tint") && hasNext) {
+            float t[3] = { 1.0f, 1.0f, 1.0f };
+            if (std::sscanf(argv[++i], "%f,%f,%f", &t[0], &t[1], &t[2]) == 3) {
+                for (int c = 0; c < 3; ++c) req.stylized.shadowTint[c] = t[c];
+            }
+        }
+        else if (argIs(a, "--style-timings"))         styleTimings = true;
+        else if (argIs(a, "--style-tune") && hasNext) req.styleTune = argv[++i];
+        else if (argIs(a, "--style-repeat") && hasNext) styleRepeat = std::max(1, std::atoi(argv[++i]));
+        else lookOption = false;
+        if (lookOption) continue;
 
         // SCENE INTEGRATION (build 30), a chain of its own: MSVC stops at 128 nested blocks,
         // and the main chain below is one block per option.
@@ -1447,7 +1481,13 @@ int main(int argc, char** argv) {
 
     // DRAFT'S PIXEL STRIDE, AS THE EFFECT RUNS IT: traced into a buffer 1/stride the size,
     // denoised there, then scaled up into `pixels` before the transform. See Upscale.h.
-    const int stride = req.quality.pixelStride > 1 ? std::min(req.quality.pixelStride, 8) : 1;
+    // THE STYLIZED LOOK DRAWS EVERY PIXEL (build 32): Draft halves its grids instead.
+    const bool stylized = req.look == cloud::Look::Stylized;
+    if (stylized && resolveCheck) {
+        std::fprintf(stderr, "--resolve-check has nothing to resolve under --look stylized\n");
+        return 2;
+    }
+    const int stride = (!stylized && req.quality.pixelStride > 1) ? std::min(req.quality.pixelStride, 8) : 1;
     std::vector<float> traced;
     if (stride > 1) {
         if (resolveCheck) {
@@ -1519,7 +1559,37 @@ int main(int argc, char** argv) {
         return true;
     };
 
-    if (!forceCpu && kernel::cudaAvailable()) {
+    if (stylized) {
+        kernel::StylizedTimings timings;
+        // WARM FRAMES: a first frame pays for loading kernels and allocating; AE pays that once.
+        for (int k = 1; k < styleRepeat; ++k) {
+            const bool gpu = !forceCpu && kernel::cudaAvailable() && kernel::renderStylizedCudaToHost(req, &timings);
+            if (!gpu) kernel::renderStylizedCpu(req, threads, &timings);
+            if (styleTimings) {
+                std::printf("  frame %d: %.2f ms (tables %.2f, cirrus %.2f, density %.2f, light %.2f, march %.2f, copy %.2f)\n",
+                            k, timings.total, timings.tables, timings.cirrus, timings.density, timings.light,
+                            timings.march, timings.copy);
+            }
+        }
+        if (!forceCpu && kernel::cudaAvailable()) {
+            renderedOnGpu = kernel::renderStylizedCudaToHost(req, &timings);
+            if (!renderedOnGpu) {
+                const char* why = kernel::lastCudaError();
+                std::fprintf(stderr, "GPU stylized render failed (%s)%s\n",
+                             why && why[0] ? why : "no detail",
+                             requireGpu ? "" : " -- falling back to the CPU.");
+                if (requireGpu) return 3;
+            }
+        }
+        if (!renderedOnGpu) kernel::renderStylizedCpu(req, threads, &timings);
+        if (styleTimings) {
+            std::printf("stylized on the %s: %.2f ms (tables %.2f, cirrus %.2f, density %.2f, "
+                        "light %.2f, march %.2f, copy %.2f), %lld voxels\n",
+                        renderedOnGpu ? "GPU" : "CPU", timings.total, timings.tables, timings.cirrus,
+                        timings.density, timings.light, timings.march, timings.copy,
+                        timings.voxels);
+        }
+    } else if (!forceCpu && kernel::cudaAvailable()) {
         if (gpuBandRows <= 0) {
             renderedOnGpu = renderGpuBand(0, 0);
         } else {
@@ -1547,7 +1617,7 @@ int main(int argc, char** argv) {
         return 3;
     }
 
-    if (!renderedOnGpu) {
+    if (!renderedOnGpu && !stylized) {
         for (int s0 = 0; s0 < totalSamples; s0 += chunk) {
             req.firstSample        = s0;
             req.sampleCount        = std::min(chunk, totalSamples - s0);
@@ -1578,16 +1648,20 @@ int main(int argc, char** argv) {
     // which is the claim the effect actually relies on under multi-frame rendering.
     // BEFORE THE TRANSFORM AND AFTER EVERY SAMPLE -- see KernelApi.h. A no-op unless
     // --denoise was given, and a no-op with a reported reason if OIDN is not installed.
-    kernel::denoiseCpu(req);
-    if (stride > 1) {
-        cloud::upscaleFromStride(traced.data(), req.dest.widthPx, req.dest.heightPx,
-                                 req.dest.pitchPx, pixels.data(), destW, destH, destW, stride);
-        req.dest.data     = pixels.data();
-        req.dest.widthPx  = destW;
-        req.dest.heightPx = destH;
-        req.dest.pitchPx  = destW;
+    // A STYLIZED FRAME IS FINISHED ALREADY: no samples to denoise, and its transform ran in
+    // the march.
+    if (!stylized) {
+        kernel::denoiseCpu(req);
+        if (stride > 1) {
+            cloud::upscaleFromStride(traced.data(), req.dest.widthPx, req.dest.heightPx,
+                                     req.dest.pitchPx, pixels.data(), destW, destH, destW, stride);
+            req.dest.data     = pixels.data();
+            req.dest.widthPx  = destW;
+            req.dest.heightPx = destH;
+            req.dest.pitchPx  = destW;
+        }
+        kernel::transformCpu(req, threads);
     }
-    kernel::transformCpu(req, threads);
 
     // COMPOSITE (build 30), as the effect does it: after the transform, over the plate, in the
     // output's encoding. The window's origin is where the buffer sits on the plate.

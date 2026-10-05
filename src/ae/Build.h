@@ -265,6 +265,16 @@
 //
 // THE PARAMETER LIST CHANGED: Background was inserted under Render Quality, Show Sun after
 // Sun Intensity. Still minor 15.
+// BUILD 32 -- THE STYLIZED LOOK. Asked for from the host with four references: "less
+// realistic, more beautiful ... almost realtime. Does not have to be realistic as long as it
+// moves like cloud", and then "it's important that it is fast! it almost feels native to AE".
+// LOOK: STYLIZED (FAST) draws the same cloud -- the wind, the time, the hero, the pareidolia
+// shape -- baked to grids once a frame and drawn by one noise-free march per pixel: tens of
+// milliseconds a 1080p frame on the card, no samples, no denoise. PHYSICAL (SLOW) is the path
+// trace, and the default, so a frame at the defaults is build 31's to the bit.
+//
+// THE PARAMETER LIST CHANGED: Look was inserted above Render Quality, a Stylized Look topic
+// after Background. Still minor 15.
 #define PLUGIN_MAJOR 0
 #define PLUGIN_MINOR 15
-#define PLUGIN_BUILD 31
+#define PLUGIN_BUILD 32

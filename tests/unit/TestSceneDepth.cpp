@@ -68,7 +68,7 @@ constexpr int kW = 24, kH = 12;
 // CPU into a linear ARGB buffer -- no transform, so the numbers are radiance and alpha.
 // THE CLOUDS ALONE (build 31): Background and Show Sun, and a sun the test can aim the
 // camera at. An elevation below -90 leaves the default sun.
-struct Look {
+struct SceneLook {
     bool  transparent = false;
     bool  showSun     = true;
     float sunAz       = 0.0f;
@@ -77,7 +77,7 @@ struct Look {
 };
 
 std::vector<float> render(bool ice, const SceneDepthMap* scene, int spp,
-                          bool airShadows = true, const Look& look = Look()) {
+                          bool airShadows = true, const SceneLook& look = SceneLook()) {
     kernel::RenderRequest req;
     req.field.ice.enabled = ice;
     req.field.atmosphere.cloudShadowsInMedium = airShadows;
@@ -308,8 +308,8 @@ PL_TEST(AHalfCoveredTexelIsHalfGeometry) {
 
 namespace {
 
-Look transparentLook() {
-    Look l;
+SceneLook transparentLook() {
+    SceneLook l;
     l.transparent = true;
     return l;
 }
@@ -372,7 +372,7 @@ PL_TEST(HidingTheSunLeavesTheCloudsLitExactlyAsTheyWere) {
     // The default sun is out of frame, 48 degrees right of the lens. Only a camera ray that reaches the sky unscattered
     // was ever shown the disc, so with the disc out of view the two renders must agree to the
     // bit -- cloud, sky and all. That is "still have it affect the cloud".
-    Look hidden;
+    SceneLook hidden;
     hidden.showSun = false;
     const std::vector<float> a = render(true, nullptr, 8);
     const std::vector<float> b = render(true, nullptr, 8, true, hidden);
@@ -384,11 +384,11 @@ PL_TEST(HidingTheSunTakesItsDiscOutOfView) {
     // Shown, the samples that land on the disc blaze; hidden, they do not, and no pixel the
     // disc never touched moves at all. TWO DEGREES ACROSS, not the Sun's 0.27: a pixel here is
     // 3.3 degrees, and the real disc would be missed by every sample often enough to fail.
-    Look shown;
+    SceneLook shown;
     shown.sunAz = 180.0f;
     shown.sunEl = 40.0f;
     shown.sunRadius = 1.0f;
-    Look hidden = shown;
+    SceneLook hidden = shown;
     hidden.showSun = false;
     const std::vector<float> a = render(false, nullptr, 64, true, shown);
     const std::vector<float> b = render(false, nullptr, 64, true, hidden);

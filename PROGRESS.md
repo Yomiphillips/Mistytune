@@ -4,7 +4,87 @@ Tracked against `PLAN.md`. Newest first.
 
 ---
 
-## 2026-10-03 — THE CLOUDS ALONE: BACKGROUND TRANSPARENT, AND SHOW SUN. Build 31, still minor 15. Two new controls. **Background** (under Render Quality): Sky, or Transparent (Clouds Only), which gives the clouds premultiplied over nothing, with alpha from their own transmittance, for use over other layers. **Show Sun** (Sun and Sky): off hides the sun's disc from the camera and leaves every cloud lit exactly as before. With both at their defaults a frame is byte-identical to build 30 (cirrus, hero, Draft, field, city depth pass). Transparent laid over the clear sky gives back the sky render to 0.001%. Transparent costs about the same as Sky, and less when the cloud is small in frame. Displace Volume moves to build 32. INSTALLED (2026-10-03), NOT YET SEEN IN THE HOST.
+## 2026-10-05 — THE STYLIZED LOOK: THE SAME CLOUD, DRAWN IN TENS OF MILLISECONDS. Build 32, still minor 15. A new **Look** popup above Render Quality: Stylized (Fast) or Physical (Slow), fastest first with the speed in the name, as the user asked. Stylized bakes the same cloud to grids once a frame (the wind, the time, the hero, the pareidolia shape and Relief all included) and draws it with one noise-free march per pixel: cotton-wool puffs on a domed base, fuzz on the edge, a silver lining, tinted shadows. A 1080p frame of the hero takes 19 ms at Draft and 28 ms at Best on the RTX 2070 SUPER. The whole cumulus field with cirrus takes 27 to 38 ms, against about 1.2 s for Physical Draft's trace. A new Stylized Look topic holds its seven controls. Physical is the default, and its frames are byte-identical to build 31 (six scenes). Displace Volume moves to build 33. INSTALLED (2026-10-05, 17:55), 314/314 tests, NOT YET SEEN IN THE HOST.
+
+### What was asked
+
+The user sent four references: a film-grain photo of cumulus, a satin-textured iridescent cloud, cotton-wool puffs over green hills, and clouds shaped like flowers. They asked: "Is there a way to make the clouds look less realistic / more beautiful like this? So renders can be faster too, almost realtime. Does not have to be realistic as long as it moves like cloud." On the menu: "put them in order from fast to slow. And put it in parenthesis beside the style." Mid-build they added: "Just remember, it's important that it is fast! It almost feels native to AE."
+
+### What was built
+
+- **Look** (POPUP, ID 310, "Stylized (Fast)|Physical (Slow)", default Physical): above Render Quality, the first of the modes, because it decides what every other control draws with. It sets `RenderRequest::look` (`cloud::Look`).
+- **Stylized Look** (TOPIC, IDs 1000–1019, after Background). The sliders are in percent and arrive as fractions in `cloud::StylizedParams` (`toStylized`, clamped):
+  - Puffiness 65: 0 is the cloud's own soft density; 100 is solid puffs, rounded, on a domed base.
+  - Softness 35: how far the sunlight soaks in.
+  - Fuzz 35, Fuzz Size 70 m: fibres on the edge. They drift with the cloud and fade where a pixel is wider than they are.
+  - Silver Lining 50.
+  - Shadow Tint 50: −100 warm, 0 the sky's own colour, 100 cool.
+  - Brightness 100: calibrated to sit at Physical's exposure.
+  - Six spares.
+- **The frame** (src/kernel, `Stylized*.h`, `StylizedCpu.cpp`, `StylizedCuda.cu`):
+  1. **The grids** (`StylizedPlan.h`): up to three levels fitted to the frustum ∩ the cloud slab ∩ the hero's box. They are stretched sunward and merged when one is barely bigger than the next. Budgets: 4M / 1.5M / 1.5M voxels; Draft halves them, and the CPU takes a quarter.
+  2. **The density bake** (`Mistytune.cu`, `CpuRender.cpp`): the generated Slang density at every voxel, plus the sky table, the probe, the air table and a screen map of the cirrus.
+  3. **The shape pass**: a Gaussian rounding (70 m × puffiness). The base's dome (600 m × puffiness) is applied where the density is read; baking it left contour bands.
+  4. **The light**: each voxel's optical depth to the sun through the cut cloud, over four multiple-scattering octaves. The skylight comes from column scans above and below every voxel, plus side sky and ground bounce.
+  5. **The march**: one ray per pixel, on hardware half-float 3D textures on the GPU. Each read is a cubic B-spline (8 taps). Empty 8³ blocks are crossed in one step. The surface is found by bisection, so neighbouring rays enter a cloud where it is, not where their steps fell. The output transform runs in the same kernel. No samples, no denoise.
+- **What Stylized does not draw**: comp lights and the Light Layer, which are skipped and not read. Depth Pass (Holdout/Composite) and Background Transparent work as under Physical. The GPU offer (`GPU_RENDER_POSSIBLE`) is withdrawn: the frame comes back to the host whole.
+- **AE log:** `look Stylized: puffiness …` and `stylized WxH on the GPU in … s (tables, cirrus, density, light, march, copy)`. If CUDA fails, the log says so and the frame is drawn on the CPU.
+- **CLI:** `--look stylized`, `--puffiness --softness --fuzz --fuzz-size --silver --brightness --shadow-tint r,g,b`, plus `--style-timings --style-repeat N` and `--style-tune name=value,...` (dev overrides of the look's constants).
+
+### Found and fixed while measuring: speckle on the far field near the horizon
+
+At 1080p the far field's bases, just above the horizon, were peppered with single pixels of the sky behind them (about 600 in a 600×200 crop). The cause: 30–50 km out, `ro + rd·t` could round a hair outside the box the ray was in. The march then asked for the next entry, got `t` back, and `t + 1e-3` equals `t` in floats past 8 km. The ray stood still until its 1024 iterations ran out. `styleLevelAlong` now takes the level from the ray's range through each box when the point test says outside. A ray in no box's range always gets an entry strictly ahead. The speckle count in the crop fell from 607 to 41 (fuzz texture) and the whole frame's from 2117 to 319. The field's march also got faster, because stuck rays no longer burn 1024 steps. `StylizedFarRaysNeverStandStill` checks the fix: without it, 364 of 4000 grazing rays come back clear.
+
+The surface bisection was also timed at 0, 2, 3 and 5 steps. With none, contour bands came back. Three steps against five saves 1.6 ms of a 38 ms field frame and changes 0.17% of pixels by more than 8 levels, so it stays at five.
+
+### Measured (1080p, RTX 2070 SUPER, warm frames)
+
+Stylized is the median of 7 warm frames in one process. Physical is the CLI's whole run, median of 5; an empty run is 0.27 s of that (process and CUDA start-up, which AE does not pay).
+
+| Scene | Stylized Best | Stylized Draft | Physical Draft (whole run) |
+|---|---|---|---|
+| Hero at 4 km | 28 ms | 19 ms | 0.52 s |
+| Hero at 4 km, Transparent | 27 ms | | |
+| Field + cirrus | 38 ms | 27 ms | 1.49 s |
+
+- **Where a Best frame goes** (hero / field): tables 0.9 / 0.7, density 1.1 / 4.0, light 9.7 / 8.2, march 8.6 / 16.8, copy to the host 6.9 / 7.0 ms.
+- **The first frame in a process** is about 0.9 s: the one-time load of the density kernel. In AE that is paid once per session.
+- **The CPU** (no CUDA) takes 3.3 s for the hero at 1080p and 2.1 s at Draft. It is a fallback.
+- **Physical is build 31's to the bit**: six scenes (cirrus, hero, hero Draft, field, city depth pass holdout, Transparent), byte for byte against build 31's CLI.
+- **Brightness**: at gains 1/1 Stylized was 0.89–1.03 of converged Physical. The shipped calibration is sun 0.85, sky 1.5, side sky and ground bounce 0.5.
+
+### Tests
+
+- **TestStylized** (new, 11 tests):
+  - The hero alone is one grid of every voxel, and looking away from the layer bakes nothing.
+  - The field is coarser farther out, and the layer's bounds take the clip and the fade.
+  - The cut only grows with the density, and the fuzz only erodes it. That is what makes skipping a block on its largest density exact.
+  - The cubic read gives back constants and ramps, and the tables map back to themselves.
+  - Far rays never stand still.
+  - A frame is the same bits twice.
+  - Transparent is the sky frame less its background.
+  - The GPU draws what the CPU draws.
+- **TestSceneDepth**: its local `Look` struct is now `SceneLook`, because the name clashed with `cloud::Look`.
+- plugin_tests: 314 pass.
+
+### What to look at in AE
+
+- **Look → Stylized (Fast)** on the default hero. Scrub and play: it should keep up with the timeline. The first frame after AE starts takes about a second.
+- **The Stylized Look topic**: Puffiness 0 → 100 (soft to cotton wool), Fuzz and Fuzz Size, Softness, Silver Lining with the sun behind the cloud, Shadow Tint warm ↔ cool.
+- **Wind and time**: the stylized cloud should move exactly as the physical one does.
+- **Render Quality Draft** under Stylized halves the grids, not the pixels.
+- **Log**: `stylized 1920x1080 on the GPU in 0.0xx s (…)`.
+- **Saved projects**: the parameter list changed (Look inserted, a topic added), as in builds 27–31.
+
+### Next
+
+Displace Volume (build 33; drafts in build/tmp/b30/draft). For Stylized, if the user wants it faster:
+- The 7 ms copy to the host could shrink with a pinned staging buffer, or with conversion to the comp's bit depth on the card.
+- The Film Look (grain, fade, grade) proposed alongside this one is not built.
+
+---
+
+## 2026-10-03 — THE CLOUDS ALONE: BACKGROUND TRANSPARENT, AND SHOW SUN. Build 31, still minor 15. Two new controls. **Background** (under Render Quality): Sky, or Transparent (Clouds Only), which gives the clouds premultiplied over nothing, with alpha from their own transmittance, for use over other layers. **Show Sun** (Sun and Sky): off hides the sun's disc from the camera and leaves every cloud lit exactly as before. With both at their defaults a frame is byte-identical to build 30 (cirrus, hero, Draft, field, city depth pass). Transparent laid over the clear sky gives back the sky render to 0.001%. Transparent costs about the same as Sky, and less when the cloud is small in frame. Displace Volume moves to build 32. INSTALLED (2026-10-03); SEEN IN THE HOST 2026-10-05, the user: "works well".
 
 ### What was asked
 

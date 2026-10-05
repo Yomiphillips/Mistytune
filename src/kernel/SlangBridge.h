@@ -171,6 +171,57 @@ MT_DEVICE void fillTurret(const cloud::ConvectionDerived& cd, int k, int count, 
     out = V::v4(t.x, t.z, radius, top);
 }
 
+// HOW FAR ACROSS THE HERO'S BOX REACHES FROM ITS AXIS, in metres: convHeroReach plus a margin,
+// and past it the shape, the turrets and the veil. ZERO WITH NO HERO.
+//
+// A FUNCTION OF ITS OWN SINCE BUILD 32, so the stylized look's planner fits its finest grid to
+// the same box Hero Cloud Alone clips the layer to. fillSlangScene calls it with exactly the
+// arithmetic it ran inline, so the box has not moved by a bit.
+MT_DEVICE float heroBoxReach(const RenderRequest& req) {
+    const cloud::ConvectionParams&  cv = req.field.convection;
+    const cloud::ConvectionDerived& cd = req.convection;
+    const cloud::ShapeGeometry&     sg = req.shape;
+    if (!(cd.heroTop > 0.0f)) return 0.0f;
+
+    const float billow = cv.billowAmount > 0.0f ? cv.billowAmount : 0.0f;
+    const float heroR  = cd.heroRadius > 1.0f ? cd.heroRadius : 1.0f;
+    const int turrets  = cd.turretCount < 0 ? 0 : (cd.turretCount > cloud::kMaxHeroTurrets
+                                                       ? cloud::kMaxHeroTurrets
+                                                       : cd.turretCount);
+    const bool  shapeOn = sg.on && req.shapeBuffer != nullptr;
+    const float velum   = cd.velumThick > 0.0f ? cd.velumThick : 0.0f;
+
+    float reach = cd.heroRadius + 1.5f * billow * cd.heroBillow + 24.0f + kHeroBoxMargin;
+
+    // THE SHAPE REACHES FURTHER THAN THE TOWER ON THE DIAGONAL: past its half width across
+    // the plane and past its rims along the normal. convShapeReach, plus the margin.
+    if (shapeOn) {
+        const float lift   = 1.5f * billow * cd.heroBillow + 24.0f;
+        const float round  = sg.round > 1.0f ? sg.round : 1.0f;
+        const float relief = sg.reliefHeight >= 1.0f ? sg.reliefHeight : 0.0f;
+        const float a = 0.5f * sg.widthMetres + lift;
+        const float b = round + relief + lift;
+        const float shapeReach = sqrtf(a * a + b * b) + kHeroBoxMargin;
+        if (shapeReach > reach) reach = shapeReach;
+    }
+
+    // THE GROUP'S TURRETS STAND OUT PAST THE HERO, the flanking line by nearly three
+    // of its radii: each one's centre from the hero's, plus convTurretReach at the
+    // hero's own billow factor, which is the most a turret's can be.
+    for (int k = 0; k < turrets; ++k) {
+        const float dx = cd.turret[k].x - cd.heroX;
+        const float dz = cd.turret[k].z - cd.heroZ;
+        const float r  = cd.turret[k].radius > heroR ? heroR : cd.turret[k].radius;
+        const float turretReach = sqrtf(dx * dx + dz * dz) + r + 1.5f * billow * cd.heroBillow +
+                                  24.0f + kHeroBoxMargin;
+        if (turretReach > reach) reach = turretReach;
+    }
+
+    // THE VEIL REACHES kVelumExtent OF THE HERO'S RADIUS (build 24); the cap stays inside it.
+    if (velum > 0.0f && 1.9f * heroR + kHeroBoxMargin > reach) reach = 1.9f * heroR + kHeroBoxMargin;
+    return reach;
+}
+
 template <class V, class SceneT, class PhaseT>
 MT_DEVICE void fillSlangScene(const RenderRequest& req, SceneT& s, PhaseT& ph) {
     const cloud::FieldParams& f   = req.field;
@@ -527,33 +578,7 @@ MT_DEVICE void fillSlangScene(const RenderRequest& req, SceneT& s, PhaseT& ph) {
     // never enters the layer, where an unbounded slab would make it walk kilometres of
     // empty air at the cloud's majorant. Reach as convHeroReach has it, plus a margin.
     if (cd.heroAlone && cd.heroTop > 0.0f) {
-        float reach = cd.heroRadius + 1.5f * billow * cd.heroBillow + 24.0f + kHeroBoxMargin;
-
-        // THE SHAPE REACHES FURTHER THAN THE TOWER ON THE DIAGONAL: past its half width across
-        // the plane and past its rims along the normal. convShapeReach, plus the margin.
-        if (shapeOn) {
-            const float lift = 1.5f * billow * cd.heroBillow + 24.0f;
-            const float a = 0.5f * sg.widthMetres + lift;
-            const float b = s.medium2_0.conv_0.cvShapeRound_0 +
-                            s.medium2_0.conv_0.cvReliefHeight_0 + lift;
-            const float shapeReach = sqrtf(a * a + b * b) + kHeroBoxMargin;
-            if (shapeReach > reach) reach = shapeReach;
-        }
-
-        // THE GROUP'S TURRETS STAND OUT PAST THE HERO, the flanking line by nearly three
-        // of its radii: each one's centre from the hero's, plus convTurretReach at the
-        // hero's own billow factor, which is the most a turret's can be.
-        for (int k = 0; k < turrets; ++k) {
-            const float dx = cd.turret[k].x - cd.heroX;
-            const float dz = cd.turret[k].z - cd.heroZ;
-            const float r  = cd.turret[k].radius > heroR ? heroR : cd.turret[k].radius;
-            const float turretReach = sqrtf(dx * dx + dz * dz) + r + 1.5f * billow * cd.heroBillow +
-                                      24.0f + kHeroBoxMargin;
-            if (turretReach > reach) reach = turretReach;
-        }
-
-        // THE VEIL REACHES kVelumExtent OF THE HERO'S RADIUS (build 24); the cap stays inside it.
-        if (velum > 0.0f && 1.9f * heroR + kHeroBoxMargin > reach) reach = 1.9f * heroR + kHeroBoxMargin;
+        const float reach = heroBoxReach(req);
         s.medium2_0.clipOn_0 = 1;
         s.medium2_0.clipLo_0 = V::v2(cd.heroX - reach, cd.heroZ - reach);
         s.medium2_0.clipHi_0 = V::v2(cd.heroX + reach, cd.heroZ + reach);

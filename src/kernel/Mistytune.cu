@@ -55,6 +55,10 @@
 #include "SlangBridge.h"
 
 #include "AirMapHost.h"
+#include "StylizedHost.h"
+#include "StylizedPasses.h"
+
+#include <cuda_fp16.h>
 
 #include <vector>
 
@@ -632,25 +636,12 @@ const char* deviceDescription() {
     return description;
 }
 
-bool renderCuda(const RenderRequest& req) {
-    if (!cudaAvailable()) return false;
-    if (!req.dest.data || req.dest.widthPx <= 0 || req.dest.heightPx <= 0) return false;
-
-    // ---------------------------------------------------------------------
-    // The derived half of the request, and the one buffer it needs on the device
-    // ---------------------------------------------------------------------
-    //
-    // DONE HERE RATHER THAN ASKED OF THE CALLER. Three call sites today -- the
-    // effect, the CLI and the golden tests -- and the failure mode of a caller that
-    // forgets is a majorant of zero, which renders a clear sky rather than an error.
-    //
-    // A LOCAL COPY, because the caller's struct is const and this fills in five
-    // fields and a pointer. renderCudaToHost calls straight through to here, so the
-    // derivation happens exactly once per launch either way.
-    RenderRequest work = req;
-    deriveRenderInputs(work);
-
-    void* driftDev = g_drift.reserve(sizeof(work.drift.xz));
+// THE DERIVED INPUTS THE KERNELS READ, HOST POINTERS IN AND DEVICE POINTERS OUT: the drift
+// table, the transmittance table, the pareidolia map, the local lights and the depth pass.
+// `work` must already be derived (deriveRenderInputs). A FUNCTION OF ITS OWN SINCE BUILD 32,
+// which the stylized look calls too; renderCuda runs exactly what it ran inline.
+bool uploadRenderInputs(RenderRequest& work, void*& driftDev) {
+    driftDev = g_drift.reserve(sizeof(work.drift.xz));
     if (!driftDev) return false;   // reserve() has already set the error
 
     const cudaError_t driftErr = cudaMemcpy(driftDev, work.drift.xz,
@@ -747,6 +738,29 @@ bool renderCuda(const RenderRequest& req) {
         }
         work.sceneBuffer = sceneDev;
     }
+    return true;
+}
+
+bool renderCuda(const RenderRequest& req) {
+    if (!cudaAvailable()) return false;
+    if (!req.dest.data || req.dest.widthPx <= 0 || req.dest.heightPx <= 0) return false;
+
+    // ---------------------------------------------------------------------
+    // The derived half of the request, and the one buffer it needs on the device
+    // ---------------------------------------------------------------------
+    //
+    // DONE HERE RATHER THAN ASKED OF THE CALLER. Three call sites today -- the
+    // effect, the CLI and the golden tests -- and the failure mode of a caller that
+    // forgets is a majorant of zero, which renders a clear sky rather than an error.
+    //
+    // A LOCAL COPY, because the caller's struct is const and this fills in five
+    // fields and a pointer. renderCudaToHost calls straight through to here, so the
+    // derivation happens exactly once per launch either way.
+    RenderRequest work = req;
+    deriveRenderInputs(work);
+
+    void* driftDev = nullptr;
+    if (!uploadRenderInputs(work, driftDev)) return false;
 
     // THE CLOUDS' SHADOW MAPS, built on this device at most once per change. See
     // AirMapLib.slang for what they are and AirMapHost.h for the key.
@@ -979,6 +993,227 @@ const char* lastCudaError() {
     std::memcpy(out, g_lastError, sizeof(out));
     g_lastError[0] = '\0';
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// The Stylized look (build 32): the bakes
+// ---------------------------------------------------------------------------
+//
+// HERE BECAUSE THEY CALL THE GENERATED RENDERER: the sky, the air in front, the sun at each
+// layer, the cirrus and the cumulus density, each once per frame at a few hundred thousand
+// points at most. The light and the march are in StylizedCuda.cu. See StylizedFrame.h.
+
+namespace {
+
+thread_local DeviceScratch g_styleRaw;      // half floats, a voxel each
+thread_local DeviceScratch g_styleSky;
+thread_local DeviceScratch g_styleAir;
+thread_local DeviceScratch g_styleCirrus;
+thread_local DeviceScratch g_styleProbe;
+thread_local DeviceScratch g_styleDest;
+
+__global__ void styleSkyKernel(SkyInput_0 sky, float alt, float* out) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= kStyleSkyW * kStyleSkyH) return;
+    const int x = i % kStyleSkyW, y = i / kStyleSkyW;
+    const Vec3 d = styleSkyDir((x + 0.5f) / kStyleSkyW, (y + 0.5f) / kStyleSkyH);
+    SkyInput_0 s = sky;
+    const float3 r = skyRadiance_0(&s, alt, make_float3(d.x, d.y, d.z), false, 1.0f);
+    out[i * 4 + 0] = r.x; out[i * 4 + 1] = r.y; out[i * 4 + 2] = r.z; out[i * 4 + 3] = 0.0f;
+}
+
+// THE SUN AT EACH LAYER and the disc's radiance, as sunIrradianceAt has them: the top of the
+// atmosphere's irradiance through the air above the point.
+__global__ void styleProbeKernel(SkyInput_0 sky, float alt, float3 cu, float3 ci, float3 sun, float* out) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    SkyInput_0 s = sky;
+    const float top = sunIrradianceTop_0(&s);
+    const float3 a = sunTransmittanceAt_0(&s, cu);
+    const float3 b = sunTransmittanceAt_0(&s, ci);
+    const float3 with = skyRadiance_0(&s, alt, sun, true, 1.0f);
+    const float3 without = skyRadiance_0(&s, alt, sun, false, 1.0f);
+    out[0] = top * a.x; out[1] = top * a.y; out[2] = top * a.z;
+    out[3] = top * b.x; out[4] = top * b.y; out[5] = top * b.z;
+    out[6] = with.x - without.x; out[7] = with.y - without.y; out[8] = with.z - without.z;
+}
+
+__global__ void styleAirKernel(SkyInput_0 sky, float alt, cloud::ViewParams view, StylizedFrame f, float* out) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= kStyleAirW * kStyleAirH * kStyleAirD) return;
+    const int x = i % kStyleAirW, y = (i / kStyleAirW) % kStyleAirH, z = i / (kStyleAirW * kStyleAirH);
+    Vec3 d;
+    float depth;
+    styleAirTexel(f, view, x, y, z, d, depth);
+    SkyInput_0 s = sky;
+    const AirSegment_0 seg = airSegment_0(&s, alt, make_float3(d.x, d.y, d.z), depth, 0.5f, 0.5f);
+    float* o = out + static_cast<long long>(i) * 8;
+    o[0] = seg.airIn_0.x; o[1] = seg.airIn_0.y; o[2] = seg.airIn_0.z; o[3] = 0.0f;
+    o[4] = seg.airT_0.x;  o[5] = seg.airT_0.y;  o[6] = seg.airT_0.z;  o[7] = 0.0f;
+}
+
+__global__ void styleCirrusKernel(Medium_0 ice, StructuredBuffer<float2> drift, cloud::ViewParams view,
+                                  StylizedFrame f, float bottom, float top, float reach, float* out) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= f.cirrusW * f.cirrusH) return;
+    Vec3 ro, rd;
+    float a, b;
+    out[i * 2] = 0.0f;
+    out[i * 2 + 1] = 0.0f;
+    if (!styleCirrusTexel(f, view, bottom, top, reach, i % f.cirrusW, i / f.cirrusW, ro, rd, a, b)) return;
+    Medium_0 m = ice;
+    const float dt = (b - a) / kStyleCirrusSteps;
+    float tau = 0.0f, tSum = 0.0f;
+    for (int k = 0; k < kStyleCirrusSteps; ++k) {
+        const float t = a + (k + 0.5f) * dt;
+        const Vec3 p = ro + rd * t;
+        const float s = densityAt_0(&m, drift, make_float3(p.x, p.y, p.z)) * dt;
+        tau += s;
+        tSum += s * t;
+    }
+    out[i * 2] = tau;
+    out[i * 2 + 1] = tau > 0.0f ? tSum / tau : 0.0f;
+}
+
+__global__ void styleDensityKernel(Medium_0 cu, StructuredBuffer<float2> drift, StylizedFrame f,
+                                   float invRef, unsigned short* out) {
+    const long long i = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= f.voxels) return;
+    int L;
+    Vec3 p;
+    if (!styleVoxelCentre(f, i, L, p)) return;
+    Medium_0 m = cu;
+    const float d = densityAt_0(&m, drift, make_float3(p.x, p.y, p.z)) * invRef;
+    out[i] = __half_as_ushort(__float2half_rn(d));
+}
+
+bool styleLaunched(const char* what) {
+    const cudaError_t err = cudaPeekAtLastError();
+    if (err != cudaSuccess) { setError(what, cudaGetLastError()); return false; }
+    return true;
+}
+
+} // namespace
+
+void styleCudaError(const char* what, int code) { setError(what, static_cast<cudaError_t>(code)); }
+
+bool renderStylizedCudaToHost(const RenderRequest& req, StylizedTimings* timings) {
+    if (!cudaAvailable()) return false;
+    if (!req.dest.data || req.dest.widthPx <= 0 || req.dest.heightPx <= 0) return false;
+
+    cudaEvent_t ev[5] = { nullptr, nullptr, nullptr, nullptr, nullptr };
+    if (timings) for (cudaEvent_t& e : ev) cudaEventCreate(&e);
+    if (timings) cudaEventRecord(ev[0]);
+
+    RenderRequest work = req;
+    deriveRenderInputs(work);
+    void* driftDev = nullptr;
+    if (!uploadRenderInputs(work, driftDev)) return false;
+
+    // THE SCENE ON THE HOST, with the device pointers just uploaded inside it, as the shadow
+    // maps' plan fills it.
+    Scene_0      scene;
+    PhaseInput_0 phase;
+    std::memset(static_cast<void*>(&scene), 0, sizeof scene);
+    std::memset(static_cast<void*>(&phase), 0, sizeof phase);
+    fillSlangScene<CudaVectors>(work, scene, phase);
+
+    StructuredBuffer<float2> drift;
+    drift.data  = static_cast<float2*>(driftDev);
+    drift.count = static_cast<size_t>(cloud::kDriftKnots);
+
+    StylizedFrame f;
+    styleBeginFrame(work, scene, f);
+    const float alt = work.view.observerAltitude;
+
+    // THE TABLES.
+    float* sky   = static_cast<float*>(g_styleSky.reserve(sizeof(float) * kStyleSkyW * kStyleSkyH * 4));
+    float* probe = static_cast<float*>(g_styleProbe.reserve(sizeof(float) * kStyleProbeFloats));
+    float* air   = static_cast<float*>(g_styleAir.reserve(sizeof(float) * kStyleAirW * kStyleAirH * kStyleAirD * 8));
+    if (!sky || !probe || !air) return false;
+
+    const SkyInput_0 skyIn = scene.environment_0.sky_0;
+    styleSkyKernel<<<divideRoundUp(kStyleSkyW * kStyleSkyH, 128), 128>>>(skyIn, alt, sky);
+    if (!styleLaunched("stylized sky")) return false;
+    float cu[3], ci[3];
+    styleProbePoints(work, scene, cu, ci);
+    styleProbeKernel<<<1, 1>>>(skyIn, alt, make_float3(cu[0], cu[1], cu[2]), make_float3(ci[0], ci[1], ci[2]),
+                               make_float3(f.sunX, f.sunY, f.sunZ), probe);
+    if (!styleLaunched("stylized probe")) return false;
+
+    // THE SKYLIGHT IS SUMMED ON THE HOST: the table is 512 KB and the sum a few thousand adds.
+    std::vector<float> skyHost(static_cast<size_t>(kStyleSkyW) * kStyleSkyH * 4);
+    float probeHost[kStyleProbeFloats];
+    cudaError_t err = cudaMemcpy(skyHost.data(), sky, skyHost.size() * sizeof(float), cudaMemcpyDeviceToHost);
+    if (err == cudaSuccess) err = cudaMemcpy(probeHost, probe, sizeof probeHost, cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) { setError("stylized tables back", err); return false; }
+    styleFinishFrame(skyHost.data(), probeHost, f);
+
+    styleAirKernel<<<divideRoundUp(kStyleAirW * kStyleAirH * kStyleAirD, 128), 128>>>(skyIn, alt, work.view, f, air);
+    if (!styleLaunched("stylized air")) return false;
+    if (timings) cudaEventRecord(ev[1]);
+
+    // THE CIRRUS.
+    const int ciTexels = f.cirrusOn ? f.cirrusW * f.cirrusH : 1;
+    float* cirrus = static_cast<float*>(g_styleCirrus.reserve(sizeof(float) * 2 * static_cast<size_t>(ciTexels)));
+    if (!cirrus) return false;
+    if (f.cirrusOn) {
+        const AirMapLayerExtent ice = styleIceExtent(scene);
+        styleCirrusKernel<<<divideRoundUp(ciTexels, 128), 128>>>(scene.medium_0, drift, work.view, f,
+                                                                 ice.bottom, ice.top, ice.fadeRadius, cirrus);
+        if (!styleLaunched("stylized cirrus")) return false;
+    }
+    if (timings) cudaEventRecord(ev[2]);
+
+    // THE GRIDS.
+    unsigned short* raw = static_cast<unsigned short*>(
+        g_styleRaw.reserve(sizeof(unsigned short) * static_cast<size_t>(f.voxels > 0 ? f.voxels : 1)));
+    if (!raw) return false;
+    if (f.voxels > 0) {
+        styleDensityKernel<<<static_cast<unsigned>((f.voxels + 127) / 128), 128>>>(scene.medium2_0, drift, f,
+                                                                                    1.0f / f.ref, raw);
+        if (!styleLaunched("stylized density")) return false;
+    }
+    if (timings) cudaEventRecord(ev[3]);
+
+    // THE LIGHT AND THE MARCH, into device memory the size of the buffer.
+    const int pitchPx = req.dest.pitchPx > 0 ? req.dest.pitchPx : req.dest.widthPx;
+    const size_t bytes = static_cast<size_t>(pitchPx) * 4u * sizeof(float) * static_cast<size_t>(req.dest.heightPx);
+    void* devDest = g_styleDest.reserve(bytes);
+    if (!devDest) return false;
+    RenderRequest devReq = work;
+    devReq.dest.data    = devDest;
+    devReq.dest.pitchPx = pitchPx;
+
+    float passMs[2] = { 0.0f, 0.0f };
+    if (!styleLightAndMarchCuda(devReq, f, raw, sky, air, cirrus, timings ? passMs : nullptr)) return false;
+
+    if (timings) cudaEventRecord(ev[4]);
+    err = cudaMemcpy(req.dest.data, devDest, bytes, cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) { setError("stylized frame back", err); return false; }
+
+    if (timings) {
+        cudaEvent_t done = nullptr;
+        cudaEventCreate(&done);
+        cudaEventRecord(done);
+        cudaEventSynchronize(done);
+        float a = 0, b = 0, c = 0, d = 0, total = 0;
+        cudaEventElapsedTime(&a, ev[0], ev[1]);
+        cudaEventElapsedTime(&b, ev[1], ev[2]);
+        cudaEventElapsedTime(&c, ev[2], ev[3]);
+        cudaEventElapsedTime(&d, ev[4], done);
+        cudaEventElapsedTime(&total, ev[0], done);
+        timings->tables  = a;
+        timings->cirrus  = b;
+        timings->density = c;
+        timings->light   = passMs[0];
+        timings->march   = passMs[1];
+        timings->copy    = d;
+        timings->total   = total;
+        timings->voxels  = f.voxels;
+        cudaEventDestroy(done);
+        for (cudaEvent_t& e : ev) cudaEventDestroy(e);
+    }
+    return true;
 }
 
 } // namespace plugin::kernel

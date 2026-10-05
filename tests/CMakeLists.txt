@@ -62,6 +62,11 @@ add_executable(plugin_tests
     # Scene integration (build 30): the depth pass reads as its encoding says, and through
     # the kernel the holdout laid over what is behind the geometry gives back the render.
     unit/TestSceneDepth.cpp
+    # The Stylized look (build 32): the grids hold what the frame sees, the cut only grows,
+    # the cubic read is a true B-spline, a far ray never stands still, a frame is the same bits
+    # twice, the clouds alone are the sky frame less its background, and the GPU draws what the
+    # CPU draws.
+    unit/TestStylized.cpp
 
     # The output conversion: 8, 16 and 32 bpc, the sRGB curve and the alpha rule.
     # PLAN.md's Phase 1 exit asks for all three bit depths to be CORRECT, and until

@@ -302,6 +302,17 @@ struct RenderRequest {
     // a user parameter, like the knobs above. See PathState in BounceLib.slang.
     bool stagedGpu = true;
 
+    // THE LOOK (build 32), and the Stylized look's controls. Physical, the default, is every
+    // frame before this build. Stylized is drawn by renderStylizedCudaToHost / renderStylizedCpu
+    // instead of the path trace, and reads nothing below this line but `dest`. See
+    // StylizedFrame.h.
+    cloud::Look           look = cloud::Look::Physical;
+    cloud::StylizedParams stylized;
+
+    // THE CLI'S --style-tune: "name=value,..." overrides of the look's constants, for tuning
+    // without a rebuild. See styleApplyTune in StylizedHost.h. Null everywhere else.
+    const char* styleTune = nullptr;
+
     // Linear radiance, four floats per pixel, persisting across the launches of
     // one frame. Null on the CPU reference path, which accumulates in the
     // destination surface directly because it has nowhere else to put it.

@@ -21,6 +21,8 @@
 #include "Denoiser.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -54,6 +56,8 @@ namespace mistytune_cpu_backend {
 #include "SlangBridge.h"
 
 #include "AirMapHost.h"
+#include "StylizedHost.h"
+#include "StylizedPasses.h"
 
 namespace plugin::kernel {
 
@@ -555,6 +559,164 @@ bool denoiseCpu(const RenderRequest& req) {
     }
 
     return cloud::denoiseFrame(img);
+}
+
+// ---------------------------------------------------------------------------
+// The Stylized look (build 32)
+// ---------------------------------------------------------------------------
+//
+// THE BAKES HERE, because they call the generated renderer this file owns; the light and the
+// march in StylizedCpu.cpp. The CPU is the fallback and the reference, not the shipping path: a
+// 1080p stylized frame is about a second here and tens of milliseconds on the card.
+
+namespace {
+
+// OWNED BY THE CALLING THREAD and grow-only, like the accumulator.
+thread_local std::vector<float>         g_styleRaw;
+thread_local std::vector<float>         g_stylePacked;
+thread_local std::vector<unsigned char> g_styleOcc;
+thread_local std::vector<float>         g_styleSky;
+thread_local std::vector<float>         g_styleAir;
+thread_local std::vector<float>         g_styleCirrus;
+
+double styleNowMs() {
+    return std::chrono::duration<double, std::milli>(
+               std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+} // namespace
+
+void renderStylizedCpu(const RenderRequest& req, int threads, StylizedTimings* timings) {
+    namespace be = mistytune_cpu_backend;
+    if (!req.dest.data || req.dest.widthPx <= 0 || req.dest.heightPx <= 0) return;
+    const double t0 = styleNowMs();
+
+    RenderRequest work = req;
+    deriveRenderInputs(work);
+    work.driftBuffer = work.drift.xz;
+
+    be::Scene_0      scene{};
+    be::PhaseInput_0 phase{};
+    fillSlangScene<CpuVectors>(work, scene, phase);
+
+    be::StructuredBuffer<be::Vector<float, 2>> drift;
+    drift.data  = reinterpret_cast<be::Vector<float, 2>*>(work.drift.xz);
+    drift.count = static_cast<size_t>(cloud::kDriftKnots);
+
+    StylizedFrame f;
+    styleBeginFrame(work, scene, f, kStyleCpuBudget);
+    const float alt = work.view.observerAltitude;
+
+    // THE SKY, AND THE SUN'S PROBE.
+    //
+    // THE BUFFERS ARE THIS THREAD'S, AND THE POOL'S WORKERS ARE OTHER THREADS: each lambda writes
+    // through a pointer taken here. Naming g_styleSky inside one reaches the WORKER's own empty
+    // thread_local vector and writes through its null data() -- which is how the first version
+    // of this crashed on every CPU frame.
+    g_styleSky.assign(static_cast<size_t>(kStyleSkyW) * kStyleSkyH * 4, 0.0f);
+    float* const skyOut = g_styleSky.data();
+    styleParallelFor(static_cast<long long>(kStyleSkyW) * kStyleSkyH, threads, [&](long long i) {
+        be::SkyInput_0 sky = scene.environment_0.sky_0;
+        const int x = static_cast<int>(i % kStyleSkyW), y = static_cast<int>(i / kStyleSkyW);
+        const Vec3 d = styleSkyDir((x + 0.5f) / kStyleSkyW, (y + 0.5f) / kStyleSkyH);
+        const be::Vector<float, 3> r = be::skyRadiance_0(&sky, alt, CpuVectors::v3(d.x, d.y, d.z), false, 1.0f);
+        float* o = skyOut + i * 4;
+        o[0] = r.x; o[1] = r.y; o[2] = r.z; o[3] = 0.0f;
+    });
+    float probe[kStyleProbeFloats];
+    {
+        float cu[3], ci[3];
+        styleProbePoints(work, scene, cu, ci);
+        be::Scene_0 s = scene;
+        const be::Vector<float, 3> a = be::sunIrradianceAt_0(&s, CpuVectors::v3(cu[0], cu[1], cu[2]));
+        const be::Vector<float, 3> b = be::sunIrradianceAt_0(&s, CpuVectors::v3(ci[0], ci[1], ci[2]));
+        be::SkyInput_0 sky = scene.environment_0.sky_0;
+        const be::Vector<float, 3> sd = CpuVectors::v3(f.sunX, f.sunY, f.sunZ);
+        const be::Vector<float, 3> with = be::skyRadiance_0(&sky, alt, sd, true, 1.0f);
+        const be::Vector<float, 3> without = be::skyRadiance_0(&sky, alt, sd, false, 1.0f);
+        const float v[kStyleProbeFloats] = { a.x, a.y, a.z, b.x, b.y, b.z,
+                                             with.x - without.x, with.y - without.y, with.z - without.z };
+        for (int k = 0; k < kStyleProbeFloats; ++k) probe[k] = v[k];
+    }
+    styleFinishFrame(g_styleSky.data(), probe, f);
+
+    // THE AIR IN FRONT OF EVERY PIXEL.
+    g_styleAir.assign(static_cast<size_t>(kStyleAirW) * kStyleAirH * kStyleAirD * 8, 0.0f);
+    float* const airOut = g_styleAir.data();
+    styleParallelFor(static_cast<long long>(kStyleAirW) * kStyleAirH * kStyleAirD, threads, [&](long long i) {
+        be::SkyInput_0 sky = scene.environment_0.sky_0;
+        const int x = static_cast<int>(i % kStyleAirW);
+        const int y = static_cast<int>((i / kStyleAirW) % kStyleAirH);
+        const int z = static_cast<int>(i / (static_cast<long long>(kStyleAirW) * kStyleAirH));
+        Vec3 d;
+        float depth;
+        styleAirTexel(f, work.view, x, y, z, d, depth);
+        const be::AirSegment_0 seg = be::airSegment_0(&sky, alt, CpuVectors::v3(d.x, d.y, d.z), depth, 0.5f, 0.5f);
+        float* o = airOut + i * 8;
+        o[0] = seg.airIn_0.x; o[1] = seg.airIn_0.y; o[2] = seg.airIn_0.z; o[3] = 0.0f;
+        o[4] = seg.airT_0.x;  o[5] = seg.airT_0.y;  o[6] = seg.airT_0.z;  o[7] = 0.0f;
+    });
+    const double t1 = styleNowMs();
+
+    // THE CIRRUS.
+    g_styleCirrus.assign(static_cast<size_t>(f.cirrusW > 0 ? f.cirrusW : 1) * (f.cirrusH > 0 ? f.cirrusH : 1) * 2, 0.0f);
+    float* const cirrusOut = g_styleCirrus.data();
+    if (f.cirrusOn) {
+        const AirMapLayerExtent ice = styleIceExtent(scene);
+        styleParallelFor(static_cast<long long>(f.cirrusW) * f.cirrusH, threads, [&](long long i) {
+            be::Medium_0 m = scene.medium_0;
+            Vec3 ro, rd;
+            float a, b;
+            if (!styleCirrusTexel(f, work.view, ice.bottom, ice.top, ice.fadeRadius,
+                                  static_cast<int>(i % f.cirrusW), static_cast<int>(i / f.cirrusW),
+                                  ro, rd, a, b)) return;
+            const float dt = (b - a) / kStyleCirrusSteps;
+            float tau = 0.0f, tSum = 0.0f;
+            for (int k = 0; k < kStyleCirrusSteps; ++k) {
+                const float t = a + (k + 0.5f) * dt;
+                const Vec3 p = ro + rd * t;
+                const float s = be::densityAt_0(&m, drift, CpuVectors::v3(p.x, p.y, p.z)) * dt;
+                tau += s;
+                tSum += s * t;
+            }
+            cirrusOut[i * 2]     = tau;
+            cirrusOut[i * 2 + 1] = tau > 0.0f ? tSum / tau : 0.0f;
+        });
+    }
+    const double t2 = styleNowMs();
+
+    // THE GRIDS: every voxel's density, as a fraction of the layer's peak.
+    g_styleRaw.assign(static_cast<size_t>(f.voxels > 0 ? f.voxels : 1), 0.0f);
+    const float invRef = 1.0f / f.ref;
+    float* const rawOut = g_styleRaw.data();
+    styleParallelFor(f.voxels, threads, [&](long long i) {
+        be::Medium_0 m = scene.medium2_0;
+        int L;
+        Vec3 p;
+        if (!styleVoxelCentre(f, i, L, p)) return;
+        rawOut[i] = be::densityAt_0(&m, drift, CpuVectors::v3(p.x, p.y, p.z)) * invRef;
+    });
+    const double t3 = styleNowMs();
+
+    g_stylePacked.assign(static_cast<size_t>(f.voxels > 0 ? f.voxels : 1) * 4, 0.0f);
+    g_styleOcc.assign(static_cast<size_t>(f.blocks > 0 ? f.blocks : 1), 0);
+    styleLightCpu(f, g_styleRaw.data(), g_stylePacked.data(), g_styleOcc.data(), threads);
+    const double t4 = styleNowMs();
+
+    styleMarchCpu(work, f, g_stylePacked.data(), g_styleOcc.data(), g_styleSky.data(),
+                  g_styleAir.data(), g_styleCirrus.data(), threads);
+    const double t5 = styleNowMs();
+
+    if (timings) {
+        timings->tables  = static_cast<float>(t1 - t0);
+        timings->cirrus  = static_cast<float>(t2 - t1);
+        timings->density = static_cast<float>(t3 - t2);
+        timings->light   = static_cast<float>(t4 - t3);
+        timings->march   = static_cast<float>(t5 - t4);
+        timings->copy    = 0.0f;
+        timings->total   = static_cast<float>(t5 - t0);
+        timings->voxels  = f.voxels;
+    }
 }
 
 } // namespace plugin::kernel

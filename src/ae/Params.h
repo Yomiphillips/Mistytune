@@ -99,6 +99,17 @@ namespace ae {
      * no control for: see addStaticText below, and src/engine/Classifier.h for the     \
      * rules. Moved, not re-made: the ID is the one it always had. */                   \
     TEXT    (Classification,    403, "--")                                              \
+    /* THE LOOK (build 32), FIRST OF THE MODES because it decides what every other       \
+     * control draws with. Asked for from the host with four references -- a film photo, \
+     * satin, cotton-wool puffs and clouds shaped like flowers -- "less realistic, more    \
+     * beautiful ... almost realtime", and "it's important that it is fast". STYLIZED is \
+     * the same cloud baked to grids once a frame and drawn by one noise-free march per   \
+     * pixel: tens of milliseconds a 1080p frame. PHYSICAL is the path trace, and the     \
+     * default, so every saved project draws what it drew. FASTEST FIRST, WITH ITS SPEED  \
+     * IN THE NAME, as the host asked: "put them in order from fast to slow. And put it   \
+     * in parenthesis beside the style." ID 310 is the Quality block's next. */           \
+    POPUP   (Look,              310, "Look", 2, 2,                                      \
+             "Stylized (Fast)|Physical (Slow)")                                         \
     /* DRAFT OR BEST, THE EFFECT'S OWN SWITCH (build 26), and second only to the readout \
      * because it is the control a look session touches most. Reported from the host:   \
      * the layer's Draft switch "does not help in any way", and the log never once saw  \
@@ -115,6 +126,40 @@ namespace ae {
      * is the Quality block's next. See ViewParams::transparentSky. */                 \
     POPUP   (Background,        309, "Background", 2, 1,                                \
              "Sky|Transparent (Clouds Only)")                                           \
+                                                                                        \
+    /* ---------------- Stylized Look (build 32) ---------------- */                     \
+    /* WHAT THE STYLIZED LOOK DOES WITH THE CLOUD; Physical reads none of it. Beside the  \
+     * Look popup, above every scene group, because it is what a look session turns.      \
+     * PERCENTAGES, as Puffiness 65 reads better than 0.65. See StylizedParams. */        \
+    TOPIC   (StylizedGroup,    1000, "Stylized Look")                                   \
+    /* 0 the cloud's own soft density; 100 solid puffs, rounded, on a domed base. */      \
+    FLOAT   (StylePuffiness,   1001, "Puffiness",                                       \
+             0.0, 100.0,    0.0, 100.0,     65.0,    1)                                 \
+    /* How far the sunlight soaks in: 0 a sunlit face and a dark heart, 100 lit through. */\
+    FLOAT   (StyleSoftness,    1002, "Softness",                                        \
+             0.0, 100.0,    0.0, 100.0,     35.0,    1)                                 \
+    /* Fibre on the edge, so a puff reads as wool rather than plastic. It drifts with the \
+     * cloud and fades where a pixel is wider than its fibres. */                         \
+    FLOAT   (StyleFuzz,        1003, "Fuzz",                                            \
+             0.0, 100.0,    0.0, 100.0,     35.0,    1)                                 \
+    FLOAT   (StyleFuzzSize,    1004, "Fuzz Size (m)",                                   \
+             1.0, 5000.0,   10.0, 300.0,    70.0,    1)                                 \
+    FLOAT   (StyleSilverLining,1005, "Silver Lining",                                   \
+             0.0, 100.0,    0.0, 100.0,     50.0,    1)                                 \
+    /* The shadows' colour: -100 warm, 0 the sky's own, 100 cool. 50, a little cool, as   \
+     * the references' shadows are. */                                                   \
+    FLOAT   (StyleShadowTint,  1006, "Shadow Tint",                                     \
+             -100.0, 100.0, -100.0, 100.0,  50.0,    1)                                 \
+    /* 100 is calibrated to sit with Physical's exposure. */                              \
+    FLOAT   (StyleBrightness,  1007, "Brightness",                                      \
+             0.0, 1000.0,   0.0, 200.0,     100.0,   1)                                 \
+    SPARE   (StylizedSpare1,   1008)                                                    \
+    SPARE   (StylizedSpare2,   1009)                                                    \
+    SPARE   (StylizedSpare3,   1010)                                                    \
+    SPARE   (StylizedSpare4,   1011)                                                    \
+    SPARE   (StylizedSpare5,   1012)                                                    \
+    SPARE   (StylizedSpare6,   1013)                                                    \
+    ENDTOPIC(StylizedGroupEnd, 1019)                                                    \
                                                                                         \
     /* ---------------- Sun and Sky ---------------- */                                 \
     TOPIC   (SkyGroup,          100, "Sun and Sky")                                     \
@@ -1400,6 +1445,40 @@ inline bool draftRequested(const ParamValues& p) {
 // so a broken expression can only bring the sky back, never lose the clouds.
 inline bool transparentBackground(const ParamValues& p) {
     return std::lround(p.v[kMistytuneBackground]) == 1;
+}
+
+// THE LOOK (build 32): Stylized is item 0, Physical 1. Anything else an expression delivers is
+// Physical, the path trace every build before this one drew.
+inline cloud::Look lookOf(const ParamValues& p) {
+    return std::lround(p.v[kMistytuneLook]) == 0 ? cloud::Look::Stylized : cloud::Look::Physical;
+}
+
+// THE STYLIZED LOOK'S CONTROLS, percentages to fractions. CLAMPED where a fraction is meant, as
+// toQuality clamps: an expression can drive any slider past its range.
+inline cloud::StylizedParams toStylized(const ParamValues& p) {
+    const auto unit = [&](int index) {
+        const double v = p.v[index] / 100.0;
+        return static_cast<cloud::Real>(v > 0.0 ? (v < 1.0 ? v : 1.0) : 0.0);   // NaN -> 0
+    };
+    cloud::StylizedParams s;
+    s.puffiness    = unit(kMistytuneStylePuffiness);
+    s.softness     = unit(kMistytuneStyleSoftness);
+    s.fuzz         = unit(kMistytuneStyleFuzz);
+    s.silverLining = unit(kMistytuneStyleSilverLining);
+    const double size = p.v[kMistytuneStyleFuzzSize];
+    s.fuzzSize = static_cast<cloud::Real>(size > 1.0 ? size : 1.0);
+    const double gain = p.v[kMistytuneStyleBrightness] / 100.0;
+    s.brightness = static_cast<cloud::Real>(gain > 0.0 ? gain : 0.0);
+
+    // SHADOW TINT, -1 warm .. 1 cool: blue up and red down, green a little, so 0 is the sky's
+    // own skylight and 0.5 the default's (0.85, 0.95, 1.15).
+    double t = p.v[kMistytuneStyleShadowTint] / 100.0;
+    t = t > -1.0 ? (t < 1.0 ? t : 1.0) : -1.0;
+    if (!(t == t)) t = 0.0;
+    s.shadowTint[0] = static_cast<cloud::Real>(1.0 - 0.3 * t);
+    s.shadowTint[1] = static_cast<cloud::Real>(1.0 - 0.1 * t);
+    s.shadowTint[2] = static_cast<cloud::Real>(1.0 + 0.3 * t);
+    return s;
 }
 
 } // namespace ae

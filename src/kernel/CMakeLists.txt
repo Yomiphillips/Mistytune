@@ -58,6 +58,12 @@ set(PLUGIN_KERNEL_SOURCES
     KernelApi.h         # the only thing the host calls
     CpuRender.cpp       # the CPU loop around Shading.h
     GroundSkyLight.cpp  # the ground's skylight, integrated on the host
+    StylizedFrame.h     # the Stylized look (build 32): one frame's bakes, and reading them
+    StylizedPlan.h      #   where its grids lie, and its constants
+    StylizedHost.h      #   the frame built from the scene
+    StylizedShading.h   #   the light and the march, for BOTH paths
+    StylizedPasses.h    #   the passes each backend runs
+    StylizedCpu.cpp     #   ...on the CPU
 
     # Generated, committed, and #included as source rather than compiled on their
     # own -- see HEADER_FILE_ONLY below. Listed here so the custom commands that
@@ -74,7 +80,7 @@ if(PLUGIN_CUDA_FOUND)
     # lastCudaError(). CudaStub.cpp supplies the same four when there is no
     # toolkit. EXACTLY ONE OF THEM IS EVER COMPILED -- both would be a duplicate
     # symbol at link time, which is the correct failure for that mistake.
-    list(APPEND PLUGIN_KERNEL_SOURCES Mistytune.cu)
+    list(APPEND PLUGIN_KERNEL_SOURCES Mistytune.cu StylizedCuda.cu)
 else()
     list(APPEND PLUGIN_KERNEL_SOURCES CudaStub.cpp)
 endif()

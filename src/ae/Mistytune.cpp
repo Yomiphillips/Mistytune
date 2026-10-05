@@ -87,6 +87,10 @@ struct PreRenderData {
     cloud::ViewParams    view;
     cloud::QualityParams quality;
 
+    // THE LOOK (build 32), and the Stylized look's controls. See StylizedFrame.h.
+    cloud::Look           look = cloud::Look::Physical;
+    cloud::StylizedParams stylized;
+
     // The cache key, computed once here rather than twice on two render paths.
     sim::RenderKey key;
 
@@ -482,6 +486,26 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
             static_cast<int>(data->quality.pixelStride),
             data->quality.denoise ? static_cast<double>(data->quality.denoiseAmount) : 0.0);
 
+    // THE LOOK (build 32). Draft keeps its meaning under Stylized -- half the grids' voxels --
+    // and the samples, bounces and denoise above are the path trace's and go unread.
+    data->look     = lookOf(values);
+    data->stylized = toStylized(values);
+    if (data->look == cloud::Look::Stylized) {
+        diagLog("  look Stylized: puffiness %.2f, softness %.2f, fuzz %.2f at %.0f m, silver %.2f, "
+                "tint %.2f/%.2f/%.2f, brightness %.2f",
+                static_cast<double>(data->stylized.puffiness),
+                static_cast<double>(data->stylized.softness),
+                static_cast<double>(data->stylized.fuzz),
+                static_cast<double>(data->stylized.fuzzSize),
+                static_cast<double>(data->stylized.silverLining),
+                static_cast<double>(data->stylized.shadowTint[0]),
+                static_cast<double>(data->stylized.shadowTint[1]),
+                static_cast<double>(data->stylized.shadowTint[2]),
+                static_cast<double>(data->stylized.brightness));
+    } else {
+        diagLog("  look Physical");
+    }
+
     data->view.exposureEV = static_cast<float>(values.v[kMistytuneExposureEV]);
     data->view.renderDistance = static_cast<float>(values.v[kMistytuneRenderDistance]);
     data->view.agxTonemap = values.v[kMistytuneAgxTonemap] > 0.5;
@@ -604,7 +628,8 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
 
     // SCENE INTEGRATION (build 30): how the depth pass reads, and what the clouds do with it.
     data->scene = sceneDepthParamsOf(values);
-    if (usesCompLights(values)) {
+    // NOT UNDER STYLIZED (build 32), which draws no local lights: reading them would only cost.
+    if (usesCompLights(values) && data->look != cloud::Look::Stylized) {
         readCompLights(in_data, data->view, compCamera, values.v[kMistytuneCameraTravel],
                        data->lightAnchor, compLightStrengthOf(values), data->view.encodeSrgb,
                        data->compLights, data->compAmbient);
@@ -694,7 +719,8 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
 
     // THE LIGHT LAYER (build 29), as it covers the frame -- and not at all at strength 0,
     // which would only cost AE a render nobody reads.
-    if (data->lightLayerStrength > 0.0f) {
+    // ...nor the light layer, which AE would otherwise render for nothing.
+    if (data->lightLayerStrength > 0.0f && data->look != cloud::Look::Stylized) {
         data->lightLayerCheckedOut = checkoutLayerBounds(in_data, extra, kMistytuneLightLayer,
                                                          kLightLayerProbeCheckout,
                                                          kLightLayerCheckout, "light layer");
@@ -721,6 +747,10 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
         diagLog("  light layer present -- not offering GPU_RENDER_POSSIBLE.");
     } else if (data->sceneCheckedOut) {
         diagLog("  depth pass present -- not offering GPU_RENDER_POSSIBLE.");
+    } else if (data->look == cloud::Look::Stylized) {
+        // BUILD 32: the stylized frame owns its device memory and comes back to the host whole,
+        // as the path trace's host path does. It still runs on the card.
+        diagLog("  stylized look -- not offering GPU_RENDER_POSSIBLE.");
     } else if (data->view.transparentSky) {
         // BUILD 31: the clouds alone want the alpha-guided denoise and its crop, which run on
         // the host buffer. The host path still traces on the card.
@@ -944,6 +974,10 @@ PF_Err smartRenderGpu(PF_InData* in_data, PF_OutData* out_data,
 // staging buffer rather than by rendering into them. Quantising to 8 bits is the LAST
 // thing that should happen to a radiance value, not the first: rendering directly
 // into an integer buffer would clamp the sun to white before the tonemap ever saw it.
+PF_Err finishHostFrame(PF_PixelFormat format, PF_EffectWorld* output, const PreRenderData& data,
+                       const cloud::SceneDepthMap* scene, const ConstImageView* plate,
+                       const kernel::RenderRequest& req, bool direct, std::vector<float>& staging);
+
 PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
                        PF_PixelFormat format, PF_EffectWorld* output,
                        const PreRenderData& data, const cloud::ShapeMap* shape,
@@ -1045,6 +1079,36 @@ PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
         req.dest.heightPx = output->height;
         req.dest.pitchPx  = output->width;      // tightly packed, unlike AE's worlds
         req.dest.order    = kernel::ChannelOrder::ARGB;
+    }
+
+    // =======================================================================
+    // THE STYLIZED LOOK (build 32): the whole frame in one call, FINISHED -- no bands, no sample
+    // chunks, no accumulator, no denoise, and the output transform already applied in the march.
+    // Draft halves the grids instead of the pixels. See StylizedFrame.h.
+    // =======================================================================
+    if (data.look == cloud::Look::Stylized) {
+        req.look     = data.look;
+        req.stylized = data.stylized;
+        const double tStyle = diagSeconds();
+        kernel::StylizedTimings tm;
+        bool onGpu = kernel::cudaAvailable() && kernel::renderStylizedCudaToHost(req, &tm);
+        if (!onGpu) {
+            if (kernel::cudaAvailable()) {
+                const char* why = kernel::lastCudaError();
+                diagLog("  stylized on the GPU failed (%s) -- the CPU instead.",
+                        why && why[0] ? why : "no detail");
+            }
+            kernel::renderStylizedCpu(req, 0, &tm);
+        }
+        diagLog("  stylized %dx%d%s on the %s in %.3f s (tables %.1f, cirrus %.1f, density %.1f, "
+                "light %.1f, march %.1f, copy %.1f ms; %lld voxels)",
+                static_cast<int>(output->width), static_cast<int>(output->height),
+                data.quality.pixelStride > 1 ? " (Draft)" : "", onGpu ? "GPU" : "CPU",
+                diagSeconds() - tStyle, static_cast<double>(tm.tables), static_cast<double>(tm.cirrus),
+                static_cast<double>(tm.density), static_cast<double>(tm.light),
+                static_cast<double>(tm.march), static_cast<double>(tm.copy), tm.voxels);
+        if (PF_Err abortErr = PF_ABORT(in_data)) return abortErr;
+        return finishHostFrame(format, output, data, scene, plate, req, direct, staging);
     }
 
     // =======================================================================
@@ -1403,6 +1467,15 @@ PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
             static_cast<double>(data.view.exposureEV),
             static_cast<int>(data.view.agxTonemap));
 
+    return finishHostFrame(format, output, data, scene, plate, req, direct, staging);
+}
+
+// THE FRAME'S LAST STEPS ON THE HOST, after the output transform: the composite over this layer,
+// and the conversion into AE's world. A FUNCTION OF ITS OWN SINCE BUILD 32, shared by the path
+// trace and the Stylized look, which arrive here with the same finished buffer.
+PF_Err finishHostFrame(PF_PixelFormat format, PF_EffectWorld* output, const PreRenderData& data,
+                       const cloud::SceneDepthMap* scene, const ConstImageView* plate,
+                       const kernel::RenderRequest& req, bool direct, std::vector<float>& staging) {
     // =======================================================================
     // COMPOSITE (build 30): the clouds, premultiplied and transformed, laid over the layer this
     // effect is applied to -- AE's own normal blend, in the space AE would blend in, and after

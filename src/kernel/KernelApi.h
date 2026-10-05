@@ -466,4 +466,36 @@ float* reserveDeviceAccumulator(int pitchPx, int heightPx);
 // The last CUDA error, cleared by reading it. Empty when there was none.
 const char* lastCudaError();
 
+// ---------------------------------------------------------------------------
+// The Stylized look (build 32)
+// ---------------------------------------------------------------------------
+
+// WHERE A STYLIZED FRAME'S TIME WENT, in milliseconds, for the log and the CLI. The GPU's
+// phases are timed with events, so they are the card's time and not the host's.
+struct StylizedTimings {
+    float tables  = 0.0f;   // the sky, the air in front, the sun's probe
+    float cirrus  = 0.0f;
+    float density = 0.0f;   // the grids
+    float light   = 0.0f;   // the sun and skylight through them, and the empty blocks
+    float march   = 0.0f;   // the pixels, transform included
+    float copy    = 0.0f;   // the finished frame back to the host
+    float total   = 0.0f;
+    long long voxels = 0;
+};
+
+// ===========================================================================
+// A WHOLE STYLIZED FRAME INTO req.dest, FINISHED: the output transform is applied, so the caller
+// runs NEITHER denoiseCpu NOR transformCpu on it, and nothing accumulates. See StylizedFrame.h.
+//
+// HOST MEMORY, like renderCudaToHost. THE WHOLE BUFFER IN ONE CALL: a stylized frame is tens of
+// milliseconds, far inside the display driver's timeout, so it needs no bands. The pixel stride
+// is ignored -- every pixel is drawn; Draft halves the grids instead.
+//
+// False if the GPU could not do it (lastCudaError says why): the caller falls back to
+// renderStylizedCpu, which always draws.
+// ===========================================================================
+bool renderStylizedCudaToHost(const RenderRequest& req, StylizedTimings* timings = nullptr);
+void renderStylizedCpu(const RenderRequest& req, int threads = 0,
+                       StylizedTimings* timings = nullptr);
+
 } // namespace plugin::kernel
