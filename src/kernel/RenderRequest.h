@@ -25,6 +25,9 @@ namespace plugin::cloud { struct ShapeMap; }
 // ...and so are the local lights (build 29); see `lightSet` below.
 namespace plugin::cloud { struct LightSet; }
 
+// ...and so is the scene's depth pass (build 30); see `sceneDepth` below.
+namespace plugin::cloud { struct SceneDepthMap; }
+
 namespace plugin::kernel {
 
 // WHERE A PIXEL'S FOUR FLOATS SIT IN MEMORY, and it is not the same on both
@@ -186,6 +189,23 @@ struct RenderRequest {
     int                    lightFloats = 0;
     uint64_t               lightHash   = 0;
     float                  ambientLight[3] = { 0.0f, 0.0f, 0.0f };
+
+    // ===================================================================
+    // SCENE INTEGRATION (build 30): the footage's depth pass, resolved on the host to metres
+    // along the view axis and a coverage per texel by src/engine/SceneDepth.h.
+    //
+    // `sceneDepth` IS THE ONE THING A CALLER SETS, host memory it owns for the render, as the
+    // shape map is; null is no geometry, and then every sample runs exactly the arithmetic it
+    // ran before build 30. deriveRenderInputs() reads the rest out of it, and renderCuda
+    // replaces the buffer with a device copy keyed on `sceneHash`. The texels are read per
+    // SAMPLE, in Shading.h, where the camera ray is made: a sample that lands on geometry has
+    // its camera ray stopped there.
+    // ===================================================================
+    const cloud::SceneDepthMap* sceneDepth  = nullptr;
+    const void*                 sceneBuffer = nullptr;
+    int                         sceneWidth  = 0;
+    int                         sceneHeight = 0;
+    uint64_t                    sceneHash   = 0;
 
     // THE REASON ALL FIVE ARE HERE RATHER THAN COMPUTED WHERE THEY ARE USED: the
     // marshalling into the kernel's structs runs ON THE DEVICE, inside renderPixel,

@@ -4,6 +4,152 @@ Tracked against `PLAN.md`. Newest first.
 
 ---
 
+## 2026-10-03 — THE CLOUDS ALONE: BACKGROUND TRANSPARENT, AND SHOW SUN. Build 31, still minor 15. Two new controls. **Background** (under Render Quality): Sky, or Transparent (Clouds Only), which gives the clouds premultiplied over nothing, with alpha from their own transmittance, for use over other layers. **Show Sun** (Sun and Sky): off hides the sun's disc from the camera and leaves every cloud lit exactly as before. With both at their defaults a frame is byte-identical to build 30 (cirrus, hero, Draft, field, city depth pass). Transparent laid over the clear sky gives back the sky render to 0.001%. Transparent costs about the same as Sky, and less when the cloud is small in frame. Displace Volume moves to build 32. INSTALLED (2026-10-03), NOT YET SEEN IN THE HOST.
+
+### What was asked
+
+"Is there a way for me to have a hero cloud alone without the sky etc, so I can use with other layers?" Build 30's Holdout already could, with a black solid as the depth pass, Open Sky Cutoff 0 and Farthest 100 km (tested in the CLI first). Then: "Yeah lets have a proper. Need so the renders can even be faster too. Prolly fine to have the option to switch off or on the sun. But still have it affect the cloud. Just not show."
+
+### What was built
+
+- **Background** (POPUP, ID 309, "Sky|Transparent (Clouds Only)", default Sky): inserted directly under Render Quality, because it is a mode a session switches. `ViewParams::transparentSky`, hashed in `samplingHash`. ViewParams' sizeof did not move (the bool fits in padding), so a test pins the hash.
+  - **The kernel:** `pixelSampleRay` gives every camera ray that no depth pass stops `tGeo = kSkyGeometry` (1e29), geometry at infinity: past the top of the air (airSegment stops there) and past every cloud (slabRange stops at 120 km), below `kNoGeometry` (1e30). Build 30's holdout does the rest: colour R − T·H, alpha 1 − T. Here H is the whole clear-air airlight along the ray, so the result is (1 − T)·(air in front) + (the cloud as seen through that air): the clouds with the haze in front of them, the sky behind them gone. The sun and sky still light the clouds; bounced paths never see the geometry.
+  - **A depth pass still wins:** its own geometry stops the ray where it stands. Transparent + Composite with a depth pass lays the clouds over the footage everywhere, the footage's own sky included.
+  - **The early-out:** a transparent ray whose camera walk met no cloud at all (`psSee >= 1`) returns before the airlight's march (`Scene.clearSky`). All it could add is the air less the same air clear: zero, or below zero where a cloud's shadow lies in that air, which the mean's clamp removes anyway.
+  - **The clamp** in `finishPixel` now applies to transparent frames as to depth-pass frames.
+- **Show Sun** (CHECK, ID 115, default on): inserted after Sun Intensity. `AtmosphereParams::showSunDisc`, hashed in the field fingerprint. `Scene.hideSunDisc`: `pathEnvironment` passes `first && hideSunDisc == 0` as `includeSunDisc`, so only the camera's unscattered view of the disc changes. The sky's glow round the sun stays; that is the sky.
+- **The denoise for the clouds alone** (`denoiseCpu`, Denoiser.{h,cpp}):
+  - **Guided:** a transparent frame takes build 30's alpha guide.
+  - **The crop:** `alphaCrop` finds the box round every pixel with alpha > 0, adds a 32-pixel margin and rounds the size up to 128-pixel steps (the filter is rebuilt when the size changes, which is the expensive call). `denoiseCpu` filters only that window of the buffer. Outside it the guided filter's answer was exactly zero anyway. A frame with no alpha at all is not filtered.
+  - **Pinholes:** build 30 put every pixel whose raw alpha was exactly 0 back to exactly 0. For a depth pass's building that is right. For the clouds alone at one sample it left the soft edge PEPPERED WITH HOLES (156 at 640x360, 1 spp; the same count through build 30's own holdout). `DenoiseImage::exactZeros` (true with a depth pass, false for the clouds alone) lets the denoised alpha decide instead; only what it leaves below half an 8-bit level is zeroed. build/tmp/b31 has the before and after.
+  - **The GPU offer:** withdrawn under Transparent, as a depth pass withdraws it, so the alpha's denoise and crop always run. The host path still traces on CUDA.
+- **AE log:** `background sky|transparent (clouds only), sun disc shown|hidden`, and `transparent background -- not offering GPU_RENDER_POSSIBLE.`
+- **CLI:** `--transparent` and `--hide-sun`, in the scene options' own chain.
+
+### Measured
+
+- **Defaults are build 30's to the bit:** five scenes (cirrus 8 spp, hero 8 spp, hero Draft, field 4 spp, city depth pass holdout 4 spp) compared byte for byte against build 30's CLI.
+- **Transparent against build 30's black-solid trick** (640x360, 32 spp): alpha identical to 0.0000 mean; colour mean |d| 0.02 levels, max 18 (the skipped shadow-in-the-air term, per sample instead of after the mean).
+- **Speed, 1080p, CLI median of 5** (each includes about 0.23 s of process and CUDA start-up AE does not pay):
+
+| Scene | Sky | Transparent | Build 30 trick |
+|---|---|---|---|
+| Hero at 4 km, 1 spp + denoise | 0.78 s | 0.78 s | 0.87 s |
+| Hero at 4 km, 4 spp + denoise | 1.69 s | 1.67 s | |
+| Hero at 9 km, 4 spp + denoise | 0.81 s | 0.74 s | |
+| Hero at 4 km, Draft | 0.51 s | 0.52 s | |
+
+  The sky was never the cost: a full 1080p frame of nothing but sky traces in 0.03 s per sample, against 0.29 s for the hero. What Transparent saves (the sky's airlight, the denoise outside the cloud) about pays for what it adds (the alpha's own filter). It is faster in proportion to how little of the frame the cloud fills.
+
+### Tests
+
+- **TestSceneDepth** (+5): a transparent clear sky is exactly zero, colour and alpha. The transparent clouds over the clear sky give back the render (0.001%, worst pixel 0.13%). A depth pass's geometry is untouched by the switch. Hiding the sun leaves a frame with the disc out of view bit-identical, clouds included. With the sun dead ahead, hiding it takes the brightest pixel from 1358 to 0.68 and moves only the 4 pixels under the disc.
+- **TestDenoiser** (+6): the crop (none for no alpha; margin and whole steps; slides inside at the edge; whole frame when larger; a window into the same buffer), and pinholes fill for the clouds alone (mean alpha 0.98) but stay exactly zero with a depth pass, with the clear sky exactly zero either way.
+- **TestFieldCache** (+1): Transparent restarts the accumulation. **TestFingerprint:** `showSunDisc` is in the coverage list.
+
+### What to look at in AE
+
+- **Background → Transparent (Clouds Only)** on a solid above other layers: the hero alone, over whatever is underneath. Hero Cloud Alone, and Ice Layer off, for the hero by itself.
+- **Draft** with Transparent: the edge should be soft, not peppered.
+- **Show Sun off** with the sun in frame (Sun Placement Backlit and a low Sun Elevation): the disc goes, the cloud's lit edge stays.
+- **Log:** `background transparent (clouds only), sun disc hidden`.
+
+---
+
+## 2026-10-03 — SCENE INTEGRATION: A DEPTH PASS STOPS THE CAMERA RAY AT THE FOOTAGE'S GEOMETRY. HOLDOUT AND COMPOSITE. Build 30, still minor 15. A new Scene Integration topic. A Depth Pass layer, either an AI depth map of the footage or a 3D app's Z pass, says how far away each pixel's building is. Every camera ray that lands on one stops there. Cloud nearer than the building is drawn in front of it, and cloud behind it is not drawn. The geometry comes out transparent, with alpha taken from the clouds' own transmittance in front of it. Composite lays the result over the layer the effect is applied to; Holdout leaves that to AE. With no depth pass a frame is byte-identical to build 29 (GPU, CPU, Draft, light layer). The holdout's algebra closes to 0.001% through the kernel. Best is 3 to 9% faster with a depth pass; Draft is about 0.1 s slower at 1080p. Displace Volume is next. INSTALLED (2026-10-03), NOT YET SEEN IN THE HOST.
+
+### What was asked
+
+"Continue with scene integration until you need me to test something in AE." PLAN.md's Phase 4 lists scene integration as holdout, composite and displace-volume. The design spec's section (recovered from an earlier session's transcript, since no session here can read the Claude Docs spec):
+
+> Depth is not a look-driver, it is an integration tool, so it gets its own section. **Composite** interleaves cloud with geometry per-pixel. **Displace Volume** pushes the density field away from anything in the depth pass, so cloud parts around a building rather than intersecting it.
+
+This build is holdout and composite. Displace Volume is build 31.
+
+### What was built
+
+- **The Scene Integration topic** (params 900–913, after Lights):
+  - **Depth Integration:** Off, Holdout (Transparent), or Composite Over This Layer (the default). Nothing happens until a Depth Pass is picked.
+  - **Depth Pass:** a layer.
+  - **Depth Pass Is:** Brighter Is Nearer (AI Depth), Brighter Is Nearer (Linear), or Brighter Is Farther (Linear).
+  - **Nearest (m)** (default 10) and **Farthest (m)** (default 2000): planar distances along the lens axis.
+  - **Open Sky Cutoff (%)** (default 2).
+  - Six spares, two of them held for Displace Volume.
+- **The depth pass** (src/engine/SceneDepth.{h,cpp}): resolved on the host to metres along the view axis and a coverage per texel.
+  - **Reading:** Rec. 709 luma of the straight colour, as the relief reads it. The alpha is the coverage, so a soft key edge is a soft holdout edge.
+  - **AI depth:** a disparity, so equal steps of brightness are equal steps of 1/distance.
+  - **Open sky:** the far end of the range beyond the cutoff, or no alpha, is no geometry.
+  - **Size:** kept at the layer's size up to 4096 on a side, subsampled past that and never filtered (a mean of a building and the sky is neither). Matched to the frame by fraction, so a pass at another resolution lines up.
+- **The kernel** (BounceLib `pathBegin`, `cameraSegmentSun`; Shading.h `sceneGeometryAlong`):
+  - **The stop:** each sample reads the pass at its own jittered spot (Draft: at the block's centre) and turns the planar depth into a distance along its ray. The camera walk and the free flights stop there. Only the camera ray sees the geometry: bounced paths do not hit it, and it casts no shadow.
+  - **What comes back:** the premultiplied colour R − T·H and the alpha 1 − T. R is what the ray gathers in front of the geometry, with the geometry black. T is the clouds' ratio-tracked transmittance to it. H is the clear air's airlight over the same stretch, which the footage already has.
+  - **Why the subtraction:** SceneDepth.h has the algebra. AE's own "over" of that pixel on the footage is the truth: a building with nothing in front of it is exactly transparent, and a cloud in front of it is exactly as hazy as the same cloud beside it against the sky.
+  - **Determinism:** the walk's end is the only change, and `kNoGeometry` (1e30) moves no comparison and draws no number. That is why a frame without a pass is build 29's to the bit.
+  - **The alpha's home:** the accumulator's fourth float, always present and always zero until now, so the resolve path and the cache carry it.
+  - **The transform:** it divides a partly transparent pixel by its alpha, transforms it, and multiplies back. At alpha 1 the line is unchanged.
+- **The denoiser, with a depth pass** (`DenoiseImage::alphaGuide`):
+  - **The guide:** the alpha is denoised by an LDR filter of its own, then goes to the colour's filter as its albedo guide.
+  - **Exact zeros:** where the alpha is exactly 0, both colour and alpha are put back to exactly 0.
+  - **Why:** without a guide, sky colour smeared into the transparent tower blocks came back multiplied by 1/alpha as a light-blue dotted outline at Draft. Without the alpha's own pass, a stray opaque block along a cloud's thin edge was a dark speck. build/tmp/b30/r1/m5.png and m7.png show before and after.
+- **Composite** (`compositeOverPlate`): after the transform, in the space AE would blend in, out = clouds + footage × (1 − alpha). The input's buffer offset comes from its own checkout rect.
+- **AE:**
+  - **Checkout:** the pass is checked out at pre-render like the light layer, and not at all when Depth Integration is Off.
+  - **GPU:** the pass withdraws the GPU offer, as a shape or a light layer does. The host path still renders on CUDA.
+  - **Key:** the map's hash goes into the render key; Holdout or Composite does not, because they trace the same samples.
+  - **Log:** the line is `depth pass: WxH -> WxH map, N texels of geometry, near to far m, encoding, mode`.
+- **CLI:**
+  - **Options:** `--depth <file|city>` (`city` is a built-in skyline in three ranks), `--depth-encoding ai|near|far`, `--depth-near`, `--depth-far`, `--sky-cutoff <pct>`, `--scene holdout|composite`, `--plate <file|city>` and `--alpha-out <pgm>`.
+  - **Parser:** the options parse in a chain of their own, because the main `else if` chain hit MSVC's limit of 128 nested blocks.
+
+### Tests
+
+- **TestSceneDepth** (11 tests):
+  - **Encodings:** disparity is linear in 1/distance; both linear encodings run the right way.
+  - **The map:** the open sky is cut at the far end, the map reads the straight colour and keeps alpha as coverage, an all-sky pass is no scene, and the hash follows the depths and the settings.
+  - **Composite:** it is AE's normal blend.
+  - **Through the CPU kernel:**
+    - No pass is opaque.
+    - Geometry 1 m away is exactly transparent and exactly black.
+    - A half-covered texel is half geometry (alpha 0.5 ± 0.03).
+    - **The algebra:** with the geometry past the top of the atmosphere, the holdout laid in linear light over a clear-sky render gives back the render without a pass. The frame mean is within 0.001% and the worst pixel within 0.13% (air shadows off; see Known limits).
+- **Without a pass:** byte-identical to build 29 on six scenes, GPU and CPU: default, field, hero, hero on CPU, Draft, and the bolt light layer (build/tmp/b30/ident.sh).
+- **With a pass:**
+  - `--resolve-check` passes on the GPU (chunked and banded) and on the CPU (chunked).
+  - A window of the composite is the whole frame's region to the bit.
+  - GPU against CPU is at most 1 level on one pixel, the same as build 29 shows without a pass.
+- **ctest:** 28/28 on the main build (four architectures); the unit suite on the dev build too (TestSceneDepth's 11 tests run inside the `unit` entry).
+
+### Measured
+
+The hero at 4 km with the built-in skyline linear from 1500 to 8000 m: towers at 2.8 km in front of it, 4.8 km through its base, and 6.5 km behind it. Montages are in build/tmp/b30/r1:
+
+- **m1:** no pass, holdout colour, holdout alpha, and composite over the city plate. The cloud passes in front of the far towers and behind the near ones.
+- **m2, m5, m7:** Draft edges, before and after the guide and the alpha's own pass.
+
+- **Cost** at 1920×1080 on the RTX 2070 SUPER, CLI wall time:
+
+| | no pass | composite |
+|---|---|---|
+| Best 4 spp | 3.48 / 3.53 s | 3.39 / 3.22 s (−3 to −9%: rays on geometry stop early) |
+| Draft | 0.63 / 0.66 s | 0.73 / 0.73 s (+0.1 s: the alpha's own denoise, the guided filter, and the map) |
+
+### Known limits
+
+- **The clouds' shadow in the air in front of a building is lost.** It is light taken off the footage, and an "over" cannot express that, so the colour is clamped at zero. Under the default cirrus it is about 5% of a clear-sky pixel over the whole air column, and much less over a building's few hundred metres.
+- **Only the camera ray sees the geometry.** A building does not shadow the cloud, and light does not bounce off it.
+- **The pass is read in its own frame with transforms off.** A comp-sized layer lines up; a scaled or moved one does not.
+- **Draft edges are a staircase one block wide,** softened by the scale-up and faintly outlined against the sky. The cumulus base meeting a tower shows the block grid. Best antialiases the edge over its samples.
+- **A cloud that intersects a building is cut flat on its face.** That is what Displace Volume is for.
+
+### What needs the host
+
+- Everything. The first check is an AI depth map of real footage (Depth Anything V2 or similar) with Composite on the footage layer itself, and its Nearest and Farthest.
+- Holdout on a solid above the footage.
+- The input buffer's offset under a Region of Interest. The log prints `composite over this layer (WxH, offset x,y)`.
+- A depth pass of moving footage, which re-uploads 16 MB a frame at 1080p.
+
+---
+
 ## 2026-10-02 — LOCAL LIGHTS: AE'S COMP LIGHTS AND A LIGHT LAYER (SABER FOR THUNDER) LIGHT THE CLOUD FROM INSIDE IT. Build 29, still minor 15. A new Lights topic. Use Comp Lights (default on) reads the comp's point, spot, parallel and ambient lights and places each where AE's viewer shows it. Light Layer takes another layer's pixels, such as a Saber bolt on black, as a glowing sheet laid on the face of the cloud the camera sees. Every light goes through the sun's own next-event estimator: a shadow ray through the cloud, the phase function, the albedo. The clouds stay water: a light adds light and the medium is untouched. With no lights a frame is byte-identical to build 28 (GPU and CPU). A light layer costs 35 to 46% at Best and 21 to 37% at Draft (1080p). On the user's 6 km hero, the flat sheet of the first draft left the cloud black; the laid sheet lights the cloud round the bolt. INSTALLED (2026-10-02, 18:00), 28/28 tests, NOT YET SEEN IN THE HOST.
 
 ### What was asked

@@ -44,7 +44,7 @@ void renderRays(uint3 tid : SV_DispatchThreadID,
     if (i >= count) return;
 
     outRadiance[i] = renderSample(scene, phase, bounds, drift,
-                                  origins[i], directions[i], seed + uint(i));
+                                  origins[i], directions[i], seed + uint(i), kNoGeometry).xyz;
 }
 
 // THE STAGED RENDER (build 25): every sample's camera ray and first bounce, then one bounce
@@ -68,7 +68,7 @@ void beginPaths(uint3 tid : SV_DispatchThreadID,
     if (i >= count) return;
 
     paths[i] = beginSample(scene, phase, bounds, drift, origins[i], directions[i],
-                           seed + uint(i));
+                           seed + uint(i), kNoGeometry);
 }
 
 [shader("compute")]

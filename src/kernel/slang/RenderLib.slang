@@ -34,14 +34,17 @@
 // not make it more random and would make the two sides disagree about what the seed
 // means, which is exactly the kind of thing that survives every test until someone
 // renders the same frame twice on different worker counts.
-public float3 renderSample(Scene s, PhaseInput ph,
+//
+// `tGeo` STOPS THE CAMERA RAY AT THE SCENE'S GEOMETRY (build 30), or is kNoGeometry; the
+// fourth component is how much of that geometry shows through, 0 with none. See pathBegin.
+public float4 renderSample(Scene s, PhaseInput ph,
                            StructuredBuffer<float> bounds,
                            StructuredBuffer<float2> drift,
-                           float3 ro, float3 rd, uint seed)
+                           float3 ro, float3 rd, uint seed, float tGeo)
 {
     Rng rng = makeRng(seed);
 
-    TraceResult r = trace(s, ph, bounds, drift, rng, ro, rd);
+    TraceResult r = traceTo(s, ph, bounds, drift, rng, ro, rd, tGeo);
 
     // THE STEP AND BOUNCE COUNTS ARE DROPPED HERE AND THAT IS NOT AN OVERSIGHT.
     // `TraceResult` carries them because slang.transport and slang.bounce are built
@@ -49,7 +52,7 @@ public float3 renderSample(Scene s, PhaseInput ph,
     // furnace test's entire diagnostic rests on `capped`. The renderer has nowhere
     // to put them and no pass that shows them, so it takes the radiance and leaves
     // the instrumentation to the suites that were written for it.
-    return r.pathRadiance;
+    return float4(r.pathRadiance, r.sceneSee);
 }
 
 // THE SAME PATH, BEGUN FOR THE STAGED GPU RENDER (build 25): the seed taken exactly as
@@ -58,7 +61,7 @@ public float3 renderSample(Scene s, PhaseInput ph,
 public PathState beginSample(Scene s, PhaseInput ph,
                              StructuredBuffer<float> bounds,
                              StructuredBuffer<float2> drift,
-                             float3 ro, float3 rd, uint seed)
+                             float3 ro, float3 rd, uint seed, float tGeo)
 {
-    return pathBegin(s, ph, bounds, drift, makeRng(seed), ro, rd);
+    return pathBegin(s, ph, bounds, drift, makeRng(seed), ro, rd, tGeo);
 }

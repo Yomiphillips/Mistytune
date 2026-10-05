@@ -246,6 +246,25 @@
 // THE PARAMETER LIST AND THE FLAGS CHANGED: a Lights topic was inserted after Camera, and
 // out_flags2 gained PF_OutFlag2_I_USE_3D_LIGHTS, without which AE would not re-render when a
 // light moves. Still minor 15.
+// BUILD 30 -- SCENE INTEGRATION: HOLDOUT AND COMPOSITE. The spec's "Composite interleaves
+// cloud with geometry per-pixel". A Depth Pass layer -- an AI depth map of the footage, or a
+// Z pass -- stops every camera ray at the building it shows: cloud nearer than the building
+// is drawn in front of it, cloud behind it is not drawn. The geometry comes out transparent,
+// with alpha from the clouds' own transmittance in front of it, and Composite lays the result
+// over the layer the effect is applied to. With no depth pass a frame is build 29's to the bit.
+//
+// THE PARAMETER LIST CHANGED: a Scene Integration topic was inserted after Lights. Still
+// minor 15.
+// BUILD 31 -- THE CLOUDS ALONE. Asked for from the host: "a hero cloud alone without the sky
+// etc, so I can use with other layers", faster, and "the option to switch off or on the sun.
+// But still have it affect the cloud. Just not show". BACKGROUND: TRANSPARENT stops every
+// camera ray that no depth pass stops at geometry at infinity, and build 30's holdout gives
+// the clouds premultiplied with alpha 1 - T; a ray that met no cloud skips its air, and the
+// denoise runs only on the box round the alpha. SHOW SUN off hides the disc from the camera
+// and nothing else. With both at their defaults a frame is build 30's to the bit.
+//
+// THE PARAMETER LIST CHANGED: Background was inserted under Render Quality, Show Sun after
+// Sun Intensity. Still minor 15.
 #define PLUGIN_MAJOR 0
 #define PLUGIN_MINOR 15
-#define PLUGIN_BUILD 29
+#define PLUGIN_BUILD 31

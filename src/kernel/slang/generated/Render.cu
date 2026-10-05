@@ -4400,6 +4400,8 @@ struct Scene_0
     int ltCount_0;
     StructuredBuffer<float> ltBuffer_0;
     float3  ltAmbient_0;
+    int hideSunDisc_0;
+    int clearSky_0;
 };
 
 static __device__ float sceneTransmittance_0(Scene_0 * s_14, StructuredBuffer<float> bounds_5, StructuredBuffer<float2 > drift_1, Rng_0 * rng_4, float3  p_18, float3  dir_4, int * steps_4)
@@ -4885,7 +4887,7 @@ static __device__ float3  sunIrradianceAt_0(Scene_0 * s_15, float3  p_27)
     return s_15->sunIrradiance_0;
 }
 
-static __device__ float3  cameraSegmentSun_0(Scene_0 * s_16, PhaseInput_0 * ph_0, StructuredBuffer<float> bounds_6, StructuredBuffer<float2 > drift_2, Rng_0 * rng_5, Rng_0 * rng2_0, float3  ro_2, float3  rd_2, int * steps_5, int * hit_0, float3  * hitAt_0, int * hitLayer_0, float * tResume_0)
+static __device__ float3  cameraSegmentSun_0(Scene_0 * s_16, PhaseInput_0 * ph_0, StructuredBuffer<float> bounds_6, StructuredBuffer<float2 > drift_2, Rng_0 * rng_5, Rng_0 * rng2_0, float3  ro_2, float3  rd_2, int * steps_5, int * hit_0, float3  * hitAt_0, int * hitLayer_0, float * tResume_0, float tEnd_3, float * camT_0)
 {
     bool rouletted_0;
     float ph0_0;
@@ -4899,12 +4901,14 @@ static __device__ float3  cameraSegmentSun_0(Scene_0 * s_16, PhaseInput_0 * ph_0
     *hitAt_0 = _S518;
     *hitLayer_0 = int(0);
     *tResume_0 = 0.0f;
+    *camT_0 = 1.0f;
     float _S519 = (F32_max((s_16->neeTentativeScale_0), (1.0f)));
     float tA_0;
     float endA_0;
     bool _S520 = slabRange_0(&s_16->medium_0, ro_2, rd_2, &tA_0, &endA_0);
     float _S521 = (F32_max((tA_0), (0.0f)));
     tA_0 = _S521;
+    endA_0 = (F32_min((endA_0), (tEnd_3)));
     Dda_0 _S522 = ddaInit_0(&s_16->grid_0, ro_2, rd_2, _S521);
     Dda_0 ddaA_0 = _S522;
     float _S523 = gridBound_0(&s_16->medium_0, &s_16->grid_0, bounds_6, drift_2, (&ddaA_0)->cell_0, (&s_16->medium_0)->majorant_0);
@@ -4937,6 +4941,7 @@ static __device__ float3  cameraSegmentSun_0(Scene_0 * s_16, PhaseInput_0 * ph_0
     }
     float _S526 = (F32_max((tB_0), (0.0f)));
     tB_0 = _S526;
+    endB_0 = (F32_min((endB_0), (tEnd_3)));
     MajorantGrid_0 _S527 = gridFor_0(&s_16->medium2_0, &s_16->grid2_0, ro_2);
     MajorantGrid_0 _S528 = _S527;
     Dda_0 _S529 = ddaInit_0(&_S528, ro_2, rd_2, _S526);
@@ -5124,6 +5129,7 @@ static __device__ float3  cameraSegmentSun_0(Scene_0 * s_16, PhaseInput_0 * ph_0
                 if(uLive_1 > 0.5f)
                 {
                     rouletted_0 = true;
+                    tr_7 = tr_8;
                     total_0 = total_1;
                     break;
                 }
@@ -5186,6 +5192,15 @@ static __device__ float3  cameraSegmentSun_0(Scene_0 * s_16, PhaseInput_0 * ph_0
     {
         *hit_0 = int(2);
     }
+    if(rouletted_0)
+    {
+        kept_1 = 0.0f;
+    }
+    else
+    {
+        kept_1 = tr_7;
+    }
+    *camT_0 = kept_1;
     if(!(total_0 > 0.0f))
     {
         haveA_0 = true;
@@ -5418,48 +5433,36 @@ static __device__ bool sceneFreeFlight_0(Scene_0 * s_17, StructuredBuffer<float>
     return false;
 }
 
-static __device__ float groundShadow_0(LayerShadowMap_0 * mapA_0, LayerShadowMap_0 * mapB_0, float3  origin_1, float3  dir_5)
+struct AirSegment_0
 {
-    float _S575 = dir_5.y;
-    bool _S576;
-    if(!(_S575 < 0.0f))
-    {
-        _S576 = true;
-    }
-    else
-    {
-        _S576 = !((origin_1.y) > 0.0f);
-    }
-    if(_S576)
-    {
-        return 1.0f;
-    }
-    float3  ground_0 = origin_1 + dir_5 * make_float3 (origin_1.y / - _S575);
-    *&((&ground_0)->y) = 0.0f;
-    float _S577 = layerMapTransmittance_0(mapA_0, ground_0);
-    float _S578 = layerMapTransmittance_0(mapB_0, ground_0);
-    return _S577 * _S578;
-}
+    float3  airIn_0;
+    float3  airT_0;
+    float shadowAt_0;
+};
 
-static __device__ float3  skyRadiance_0(SkyInput_0 * p_30, float originAltitude_1, float3  rayDir_1, bool includeSunDisc_0, float groundLit_0)
+static __device__ AirSegment_0 airSegment_0(SkyInput_0 * p_30, float originAltitude_1, float3  rayDir_1, float dist_3, float u1_0, float u2_0)
 {
-    float hc_1;
-    float3  _S579 = sunDirection_0(p_30);
-    float _S580 = p_30->planetRadius_0;
+    AirSegment_0 seg_0;
+    float3  _S575 = make_float3 (0.0f, 0.0f, 0.0f);
+    (&seg_0)->airIn_0 = _S575;
+    (&seg_0)->airT_0 = make_float3 (1.0f, 1.0f, 1.0f);
+    (&seg_0)->shadowAt_0 = -1.0f;
+    float3  _S576 = sunDirection_0(p_30);
+    float _S577 = p_30->planetRadius_0;
     float planetRadius_5;
     if((p_30->planetRadius_0) > 1000.0f)
     {
-        planetRadius_5 = _S580;
+        planetRadius_5 = _S577;
     }
     else
     {
         planetRadius_5 = 1000.0f;
     }
-    float _S581 = p_30->scaleHeight_0;
+    float _S578 = p_30->scaleHeight_0;
     float scaleHeight_3;
     if((p_30->scaleHeight_0) > 1.0f)
     {
-        scaleHeight_3 = _S581;
+        scaleHeight_3 = _S578;
     }
     else
     {
@@ -5475,52 +5478,67 @@ static __device__ float3  skyRadiance_0(SkyInput_0 * p_30, float originAltitude_
     {
         observerAltitude_1 = 0.0f;
     }
-    float _S582 = planetRadius_5 + observerAltitude_1;
-    float _S583 = rayDir_1.y;
-    float b_8 = _S582 * _S583;
+    float _S579 = planetRadius_5 + observerAltitude_1;
+    float _S580 = rayDir_1.y;
+    float b_8 = _S579 * _S580;
     float cGround_1 = shellC_0(observerAltitude_1, planetRadius_5, 0.0f);
     float tTop_1 = shellExit_0(b_8, shellC_0(observerAltitude_1, planetRadius_5, atmosphereHeight_1));
+    bool _S581;
     if(tTop_1 <= 0.0f)
     {
-        return make_float3 (0.0f, 0.0f, 0.0f);
-    }
-    float tGround_1 = shellEnter_0(b_8, cGround_1);
-    bool hitsGround_0 = tGround_1 > 0.0f;
-    if(hitsGround_0)
-    {
-        observerAltitude_1 = tGround_1;
+        _S581 = true;
     }
     else
     {
-        observerAltitude_1 = tTop_1;
+        _S581 = !(dist_3 > 0.0f);
+    }
+    if(_S581)
+    {
+        return seg_0;
+    }
+    float tGround_1 = shellEnter_0(b_8, cGround_1);
+    float tMax_3;
+    if(tGround_1 > 0.0f)
+    {
+        tMax_3 = tGround_1;
+    }
+    else
+    {
+        tMax_3 = tTop_1;
+    }
+    if(dist_3 < tMax_3)
+    {
+        tMax_3 = dist_3;
     }
     float3  betaR_1 = rayleighCoefficients_0();
     float betaM_0 = mieCoefficient_0(p_30->turbidity_0);
     float betaMExt_1 = betaM_0 * 1.11000001430511475f;
-    float cosTheta_0 = clampf_0(dot_0(rayDir_1, _S579), -1.0f, 1.0f);
+    float cosTheta_0 = clampf_0(dot_0(rayDir_1, _S576), -1.0f, 1.0f);
     float phaseR_0 = 0.05968309938907623f * (1.0f + cosTheta_0 * cosTheta_0);
     float g_21 = clampf_0(p_30->mieAnisotropy_0, -0.94999998807907104f, 0.94999998807907104f);
-    float _S584 = g_21 * g_21;
-    float hgDenom_0 = 1.0f + _S584 - 2.0f * g_21 * cosTheta_0;
-    float _S585 = 1.0f - _S584;
-    float _S586 = 12.56637096405029297f * hgDenom_0;
-    float tPrev_1;
+    float _S582 = g_21 * g_21;
+    float hgDenom_0 = 1.0f + _S582 - 2.0f * g_21 * cosTheta_0;
+    float _S583 = 1.0f - _S582;
+    float _S584 = 12.56637096405029297f * hgDenom_0;
     if(hgDenom_0 > 9.99999997475242708e-07f)
     {
-        tPrev_1 = hgDenom_0;
+        observerAltitude_1 = hgDenom_0;
     }
     else
     {
-        tPrev_1 = 9.99999997475242708e-07f;
+        observerAltitude_1 = 9.99999997475242708e-07f;
     }
-    float phaseM_0 = _S585 / (_S586 * (F32_sqrt((tPrev_1))));
-    float3  _S587 = make_float3 (0.0f, 0.0f, 0.0f);
-    tPrev_1 = 0.0f;
-    float3  sumR_0 = _S587;
-    float3  sumM_0 = _S587;
+    float phaseM_0 = _S583 / (_S584 * (F32_sqrt((observerAltitude_1))));
+    float tPrev_1 = 0.0f;
+    float3  sumR_0 = _S575;
+    float3  sumM_0 = _S575;
+    float u_4 = u1_0;
+    float pickedFrom_0 = -1.0f;
+    float pickedSpan_0 = 0.0f;
     int i_26 = int(0);
     float depthR_1 = 0.0f;
     float depthM_2 = 0.0f;
+    float lumTotal_0 = 0.0f;
     for(;;)
     {
         if(i_26 < int(24))
@@ -5530,17 +5548,27 @@ static __device__ float3  skyRadiance_0(SkyInput_0 * p_30, float originAltitude_
         {
             break;
         }
-        int _S588 = i_26 + int(1);
-        float tNext_1 = observerAltitude_1 * float(_S588 * _S588) * 0.00173611112404615f;
+        int _S585 = i_26 + int(1);
+        float tNext_1 = tMax_3 * float(_S585 * _S585) * 0.00173611112404615f;
         float dt_1 = tNext_1 - tPrev_1;
         float tMid_1 = (tPrev_1 + tNext_1) * 0.5f;
+        float u_5;
+        float pickedFrom_1;
+        float pickedSpan_1;
         if(dt_1 <= 0.0f)
         {
+            u_5 = u_4;
+            pickedFrom_1 = pickedFrom_0;
+            pickedSpan_1 = pickedSpan_0;
             tPrev_1 = tNext_1;
-            i_26 = _S588;
+            u_4 = u_5;
+            pickedFrom_0 = pickedFrom_1;
+            pickedSpan_0 = pickedSpan_1;
+            i_26 = _S585;
             continue;
         }
         float h_6 = altitudeFromQ_0(cGround_1 + 2.0f * tMid_1 * b_8 + tMid_1 * tMid_1, planetRadius_5);
+        float hc_1;
         if(h_6 < 0.0f)
         {
             hc_1 = 0.0f;
@@ -5549,547 +5577,19 @@ static __device__ float3  skyRadiance_0(SkyInput_0 * p_30, float originAltitude_
         {
             hc_1 = h_6;
         }
-        float _S589 = - hc_1;
-        float dR_0 = (F32_exp((_S589 / scaleHeight_3))) * dt_1;
-        float dM_0 = (F32_exp((_S589 / 1200.0f))) * dt_1;
+        float _S586 = - hc_1;
+        float dR_0 = (F32_exp((_S586 / scaleHeight_3))) * dt_1;
+        float dM_0 = (F32_exp((_S586 / 1200.0f))) * dt_1;
         float midR_0 = depthR_1 + 0.5f * dR_0;
         float midM_0 = depthM_2 + 0.5f * dM_0;
         float depthR_2 = depthR_1 + dR_0;
         float depthM_3 = depthM_2 + dM_0;
-        float3  _S590 = sampleTransmittanceLut_0(p_30, hc_1, lutMuFor_0(make_float3 (rayDir_1.x * tMid_1, _S582 + _S583 * tMid_1, rayDir_1.z * tMid_1), _S579));
-        float _S591 = betaMExt_1 * midM_0;
-        float3  transmittance_1 = make_float3 ((F32_exp((- (betaR_1.x * midR_0 + _S591)))), (F32_exp((- (betaR_1.y * midR_0 + _S591)))), (F32_exp((- (betaR_1.z * midR_0 + _S591))))) * _S590;
-        float3  _S592 = sumM_0 + transmittance_1 * make_float3 (dM_0);
-        sumR_0 = sumR_0 + transmittance_1 * make_float3 (dR_0);
-        sumM_0 = _S592;
-        depthR_1 = depthR_2;
-        depthM_2 = depthM_3;
-        tPrev_1 = tNext_1;
-        i_26 = _S588;
-    }
-    float _S593 = sunIrradianceTop_0(p_30);
-    float3  radiance_0 = (sumR_0 * betaR_1 * make_float3 (phaseR_0) + sumM_0 * make_float3 (betaM_0 * phaseM_0)) * make_float3 (_S593);
-    float3  radiance_1;
-    if(hitsGround_0)
-    {
-        float3  groundPoint_0 = make_float3 (rayDir_1.x * tGround_1, _S582 + _S583 * tGround_1, rayDir_1.z * tGround_1);
-        float nDotL_0 = clampf_0(dot_0(normalizeExact_0(groundPoint_0), _S579), 0.0f, 1.0f);
-        float3  _S594 = sampleTransmittanceLut_0(p_30, 0.0f, lutMuFor_0(groundPoint_0, _S579));
-        float _S595 = betaMExt_1 * depthM_2;
-        float3  viewT_0 = make_float3 ((F32_exp((- (betaR_1.x * depthR_1 + _S595)))), (F32_exp((- (betaR_1.y * depthR_1 + _S595)))), (F32_exp((- (betaR_1.z * depthR_1 + _S595)))));
-        radiance_1 = radiance_0 + viewT_0 * _S594 * make_float3 (p_30->groundAlbedo_0 * nDotL_0 * 0.31830987334251404f * _S593 * groundLit_0) + viewT_0 * p_30->groundSkyLight_0;
-    }
-    else
-    {
-        radiance_1 = radiance_0;
-    }
-    bool _S596;
-    if(!hitsGround_0)
-    {
-        _S596 = includeSunDisc_0;
-    }
-    else
-    {
-        _S596 = false;
-    }
-    if(_S596)
-    {
-        float cosRadius_0 = (F32_cos((toRadians_0(p_30->sunAngularRadius_0))));
-        if(cosTheta_0 > cosRadius_0)
-        {
-            float _S597 = betaMExt_1 * depthM_2;
-            float3  viewT_1 = make_float3 ((F32_exp((- (betaR_1.x * depthR_1 + _S597)))), (F32_exp((- (betaR_1.y * depthR_1 + _S597)))), (F32_exp((- (betaR_1.z * depthR_1 + _S597)))));
-            float solidAngle_0 = 6.28318548202514648f * (1.0f - cosRadius_0);
-            if(solidAngle_0 > 9.99999971718068537e-10f)
-            {
-                hc_1 = solidAngle_0;
-            }
-            else
-            {
-                hc_1 = 9.99999971718068537e-10f;
-            }
-            radiance_1 = radiance_1 + viewT_1 * make_float3 (_S593 / hc_1);
-        }
-    }
-    return radiance_1;
-}
-
-static __device__ float3  environmentRadiance_0(Environment_0 * e_0, float3  origin_2, float3  dir_6, bool includeSunDisc_1, float groundLit_1)
-{
-    if((e_0->envMode_0) == int(1))
-    {
-        float3  _S598 = skyRadiance_0(&e_0->sky_0, origin_2.y, dir_6, includeSunDisc_1, groundLit_1);
-        return _S598;
-    }
-    return e_0->uniformRadiance_0;
-}
-
-static __device__ float3  pathEnvironment_0(Scene_0 * s_18, float3  ro_6, float3  rd_6, bool first_0)
-{
-    float groundLit_2;
-    if((s_18->airMapOn_0) != int(0))
-    {
-        float _S599 = groundShadow_0(&s_18->airMapIce_0, &s_18->airMapCu_0, ro_6, rd_6);
-        groundLit_2 = _S599;
-    }
-    else
-    {
-        groundLit_2 = 1.0f;
-    }
-    float3  _S600 = environmentRadiance_0(&s_18->environment_0, ro_6, rd_6, first_0, groundLit_2);
-    float3  env_0;
-    if(!first_0)
-    {
-        env_0 = _S600 + s_18->ltAmbient_0;
-    }
-    else
-    {
-        env_0 = _S600;
-    }
-    return env_0;
-}
-
-static __device__ bool layerMapRange_0(LayerShadowMap_0 * m_17, float3  ro_7, float3  rd_7, float * t0_5, float * t1_5)
-{
-    *t0_5 = 0.0f;
-    *t1_5 = 1.00000001504746622e+30f;
-    int _S601 = m_17->smDimU_0;
-    int _S602 = m_17->smDimV_0;
-    uint want_1 = uint(m_17->smDimU_0 * m_17->smDimV_0 * m_17->smSlices_0);
-    bool _S603;
-    if(want_1 == 0U)
-    {
-        _S603 = true;
-    }
-    else
-    {
-        _S603 = uint(StructuredBuffer_getCount_0(m_17->smTexels_0)) < want_1;
-    }
-    if(_S603)
-    {
-        return false;
-    }
-    float _S604 = rd_7.y;
-    if((F32_abs((_S604))) < 9.99999971718068537e-10f)
-    {
-        if((ro_7.y) >= (m_17->smTop_0))
-        {
-            return false;
-        }
-    }
-    else
-    {
-        float tt_0 = (m_17->smTop_0 - ro_7.y) / _S604;
-        if(_S604 > 0.0f)
-        {
-            *t1_5 = (F32_min((*t1_5), (tt_0)));
-        }
-        else
-        {
-            *t0_5 = (F32_max((*t0_5), (tt_0)));
-        }
-    }
-    float3  _S605 = m_17->smSun_0;
-    float2  _S606 = float2 {_S605.x, _S605.z};
-    float _S607 = m_17->smSun_0.y;
-    float2  q0_3 = float2 {ro_7.x, ro_7.z} + _S606 * make_float2 ((m_17->smBottom_0 - ro_7.y) / _S607) - m_17->smCentre_0;
-    float2  dq_0 = float2 {rd_7.x, rd_7.z} - _S606 * make_float2 (_S604 / _S607);
-    float2  _S608 = airMapAxisV_0(m_17);
-    float _S609 = m_17->smLo_0.x;
-    float _S610 = m_17->smLo_0.y;
-    float vHi_0 = _S610 + float(_S602) * m_17->smTexel_0.y;
-    bool _S611 = clipAxis_0(dot_1(q0_3, m_17->smAxisU_0), dot_1(dq_0, m_17->smAxisU_0), _S609, _S609 + float(_S601) * m_17->smTexel_0.x, t0_5, t1_5);
-    if(!_S611)
-    {
-        return false;
-    }
-    bool _S612 = clipAxis_0(dot_1(q0_3, _S608), dot_1(dq_0, _S608), _S610, vHi_0, t0_5, t1_5);
-    if(!_S612)
-    {
-        return false;
-    }
-    return (*t1_5) > (*t0_5);
-}
-
-static __device__ float3  airShadowLoss_0(SkyInput_0 * p_31, LayerShadowMap_0 * mapA_1, LayerShadowMap_0 * mapB_1, float3  ro_8, float3  rd_8, float dist_3, float jitter_1)
-{
-    float3  none_0 = make_float3 (0.0f, 0.0f, 0.0f);
-    float r0_0;
-    float r1_0;
-    bool _S613 = layerMapRange_0(mapA_1, ro_8, rd_8, &r0_0, &r1_0);
-    float tA_1;
-    float tB_1;
-    if(_S613)
-    {
-        float _S614 = (F32_max((-1.00000001504746622e+30f), (r1_0)));
-        tA_1 = (F32_min((1.00000001504746622e+30f), (r0_0)));
-        tB_1 = _S614;
-    }
-    else
-    {
-        tA_1 = 1.00000001504746622e+30f;
-        tB_1 = -1.00000001504746622e+30f;
-    }
-    bool _S615 = layerMapRange_0(mapB_1, ro_8, rd_8, &r0_0, &r1_0);
-    if(_S615)
-    {
-        float _S616 = (F32_min((tA_1), (r0_0)));
-        tB_1 = (F32_max((tB_1), (r1_0)));
-        tA_1 = _S616;
-    }
-    if(!(tB_1 > tA_1))
-    {
-        return none_0;
-    }
-    float3  _S617 = sunDirection_0(p_31);
-    float _S618 = p_31->planetRadius_0;
-    float planetRadius_6;
-    if((p_31->planetRadius_0) > 1000.0f)
-    {
-        planetRadius_6 = _S618;
-    }
-    else
-    {
-        planetRadius_6 = 1000.0f;
-    }
-    float _S619 = p_31->scaleHeight_0;
-    float scaleHeight_4;
-    if((p_31->scaleHeight_0) > 1.0f)
-    {
-        scaleHeight_4 = _S619;
-    }
-    else
-    {
-        scaleHeight_4 = 1.0f;
-    }
-    float atmosphereHeight_2 = scaleHeight_4 * 8.0f;
-    float _S620 = ro_8.y;
-    float observerAltitude_2;
-    if(_S620 > 0.0f)
-    {
-        observerAltitude_2 = _S620;
-    }
-    else
-    {
-        observerAltitude_2 = 0.0f;
-    }
-    float _S621 = planetRadius_6 + observerAltitude_2;
-    float _S622 = rd_8.y;
-    float b_9 = _S621 * _S622;
-    float cGround_2 = shellC_0(observerAltitude_2, planetRadius_6, 0.0f);
-    float tTop_2 = shellExit_0(b_9, shellC_0(observerAltitude_2, planetRadius_6, atmosphereHeight_2));
-    bool _S623;
-    if(tTop_2 <= 0.0f)
-    {
-        _S623 = true;
-    }
-    else
-    {
-        _S623 = !(dist_3 > 0.0f);
-    }
-    if(_S623)
-    {
-        return none_0;
-    }
-    float tGround_2 = shellEnter_0(b_9, cGround_2);
-    float tMax_3;
-    if(tGround_2 > 0.0f)
-    {
-        tMax_3 = tGround_2;
-    }
-    else
-    {
-        tMax_3 = tTop_2;
-    }
-    if(dist_3 < tMax_3)
-    {
-        tMax_3 = dist_3;
-    }
-    float _S624 = (F32_max((tA_1), (0.0f)));
-    float _S625 = (F32_min((tB_1), (tMax_3)));
-    if(!(_S625 > _S624))
-    {
-        return none_0;
-    }
-    float3  betaR_2 = rayleighCoefficients_0();
-    float betaM_1 = mieCoefficient_0(p_31->turbidity_0);
-    float _S626 = betaM_1 * 1.11000001430511475f;
-    float cosTheta_1 = clampf_0(dot_0(rd_8, _S617), -1.0f, 1.0f);
-    float phaseR_1 = 0.05968309938907623f * (1.0f + cosTheta_1 * cosTheta_1);
-    float g_22 = clampf_0(p_31->mieAnisotropy_0, -0.94999998807907104f, 0.94999998807907104f);
-    float _S627 = g_22 * g_22;
-    float hgDenom_1 = 1.0f + _S627 - 2.0f * g_22 * cosTheta_1;
-    float _S628 = 1.0f - _S627;
-    float _S629 = 12.56637096405029297f * hgDenom_1;
-    if(hgDenom_1 > 9.99999997475242708e-07f)
-    {
-        tA_1 = hgDenom_1;
-    }
-    else
-    {
-        tA_1 = 9.99999997475242708e-07f;
-    }
-    float phaseM_1 = _S628 / (_S629 * (F32_sqrt((tA_1))));
-    float depthR_3;
-    float depthM_4;
-    float hc_2;
-    int i_27;
-    if(_S624 > 0.0f)
-    {
-        float _S630 = _S624 / 8.0f;
-        i_27 = int(0);
-        depthR_3 = 0.0f;
-        depthM_4 = 0.0f;
-        for(;;)
-        {
-            if(i_27 < int(8))
-            {
-            }
-            else
-            {
-                break;
-            }
-            float tm_0 = (float(i_27) + 0.5f) * _S630;
-            float h_7 = altitudeFromQ_0(cGround_2 + 2.0f * tm_0 * b_9 + tm_0 * tm_0, planetRadius_6);
-            if(h_7 < 0.0f)
-            {
-                hc_2 = 0.0f;
-            }
-            else
-            {
-                hc_2 = h_7;
-            }
-            float _S631 = - hc_2;
-            float depthR_4 = depthR_3 + (F32_exp((_S631 / scaleHeight_4))) * _S630;
-            float depthM_5 = depthM_4 + (F32_exp((_S631 / 1200.0f))) * _S630;
-            i_27 = i_27 + int(1);
-            depthR_3 = depthR_4;
-            depthM_4 = depthM_5;
-        }
-    }
-    else
-    {
-        depthR_3 = 0.0f;
-        depthM_4 = 0.0f;
-    }
-    float _S632 = clampf_0(jitter_1, 0.0f, 1.0f);
-    float _S633 = _S625 - _S624;
-    float3  lossR_0 = none_0;
-    float3  lossM_0 = none_0;
-    i_27 = int(0);
-    for(;;)
-    {
-        if(i_27 < int(48))
-        {
-        }
-        else
-        {
-            break;
-        }
-        float s0_0 = _S624 + _S633 * float(i_27 * i_27) * 0.00043402778101154f;
-        int _S634 = i_27 + int(1);
-        float dt_2 = _S624 + _S633 * float(_S634 * _S634) * 0.00043402778101154f - s0_0;
-        float ts_0 = s0_0 + _S632 * dt_2;
-        float h_8 = altitudeFromQ_0(cGround_2 + 2.0f * ts_0 * b_9 + ts_0 * ts_0, planetRadius_6);
-        if(h_8 < 0.0f)
-        {
-            hc_2 = 0.0f;
-        }
-        else
-        {
-            hc_2 = h_8;
-        }
-        float _S635 = - hc_2;
-        float rhoR_0 = (F32_exp((_S635 / scaleHeight_4)));
-        float rhoM_0 = (F32_exp((_S635 / 1200.0f)));
-        float _S636 = ts_0 - s0_0;
-        float atR_0 = depthR_3 + rhoR_0 * _S636;
-        float atM_0 = depthM_4 + rhoM_0 * _S636;
-        float depthR_5 = depthR_3 + rhoR_0 * dt_2;
-        float depthM_6 = depthM_4 + rhoM_0 * dt_2;
-        float3  pw_0 = ro_8 + rd_8 * make_float3 (ts_0);
-        float _S637 = layerMapTransmittance_0(mapA_1, pw_0);
-        float _S638 = layerMapTransmittance_0(mapB_1, pw_0);
-        float v_9 = _S637 * _S638;
-        if(v_9 >= 1.0f)
-        {
-            i_27 = _S634;
-            depthR_3 = depthR_5;
-            depthM_4 = depthM_6;
-            continue;
-        }
-        float3  _S639 = sampleTransmittanceLut_0(p_31, hc_2, lutMuFor_0(make_float3 (rd_8.x * ts_0, _S621 + _S622 * ts_0, rd_8.z * ts_0), _S617));
-        float _S640 = _S626 * atM_0;
-        float3  w_7 = make_float3 ((F32_exp((- (betaR_2.x * atR_0 + _S640)))), (F32_exp((- (betaR_2.y * atR_0 + _S640)))), (F32_exp((- (betaR_2.z * atR_0 + _S640))))) * _S639 * make_float3 ((1.0f - v_9) * dt_2);
-        float3  _S641 = lossM_0 + w_7 * make_float3 (rhoM_0);
-        lossR_0 = lossR_0 + w_7 * make_float3 (rhoR_0);
-        lossM_0 = _S641;
-        i_27 = _S634;
-        depthR_3 = depthR_5;
-        depthM_4 = depthM_6;
-    }
-    float3  _S642 = lossR_0 * betaR_2 * make_float3 (phaseR_1) + lossM_0 * make_float3 (betaM_1 * phaseM_1);
-    float _S643 = sunIrradianceTop_0(p_31);
-    return _S642 * make_float3 (_S643);
-}
-
-struct AirSegment_0
-{
-    float3  airIn_0;
-    float3  airT_0;
-    float shadowAt_0;
-};
-
-static __device__ AirSegment_0 airSegment_0(SkyInput_0 * p_32, float originAltitude_2, float3  rayDir_2, float dist_4, float u1_0, float u2_0)
-{
-    AirSegment_0 seg_0;
-    float3  _S644 = make_float3 (0.0f, 0.0f, 0.0f);
-    (&seg_0)->airIn_0 = _S644;
-    (&seg_0)->airT_0 = make_float3 (1.0f, 1.0f, 1.0f);
-    (&seg_0)->shadowAt_0 = -1.0f;
-    float3  _S645 = sunDirection_0(p_32);
-    float _S646 = p_32->planetRadius_0;
-    float planetRadius_7;
-    if((p_32->planetRadius_0) > 1000.0f)
-    {
-        planetRadius_7 = _S646;
-    }
-    else
-    {
-        planetRadius_7 = 1000.0f;
-    }
-    float _S647 = p_32->scaleHeight_0;
-    float scaleHeight_5;
-    if((p_32->scaleHeight_0) > 1.0f)
-    {
-        scaleHeight_5 = _S647;
-    }
-    else
-    {
-        scaleHeight_5 = 1.0f;
-    }
-    float atmosphereHeight_3 = scaleHeight_5 * 8.0f;
-    float observerAltitude_3;
-    if(originAltitude_2 > 0.0f)
-    {
-        observerAltitude_3 = originAltitude_2;
-    }
-    else
-    {
-        observerAltitude_3 = 0.0f;
-    }
-    float _S648 = planetRadius_7 + observerAltitude_3;
-    float _S649 = rayDir_2.y;
-    float b_10 = _S648 * _S649;
-    float cGround_3 = shellC_0(observerAltitude_3, planetRadius_7, 0.0f);
-    float tTop_3 = shellExit_0(b_10, shellC_0(observerAltitude_3, planetRadius_7, atmosphereHeight_3));
-    bool _S650;
-    if(tTop_3 <= 0.0f)
-    {
-        _S650 = true;
-    }
-    else
-    {
-        _S650 = !(dist_4 > 0.0f);
-    }
-    if(_S650)
-    {
-        return seg_0;
-    }
-    float tGround_3 = shellEnter_0(b_10, cGround_3);
-    float tMax_4;
-    if(tGround_3 > 0.0f)
-    {
-        tMax_4 = tGround_3;
-    }
-    else
-    {
-        tMax_4 = tTop_3;
-    }
-    if(dist_4 < tMax_4)
-    {
-        tMax_4 = dist_4;
-    }
-    float3  betaR_3 = rayleighCoefficients_0();
-    float betaM_2 = mieCoefficient_0(p_32->turbidity_0);
-    float betaMExt_2 = betaM_2 * 1.11000001430511475f;
-    float cosTheta_2 = clampf_0(dot_0(rayDir_2, _S645), -1.0f, 1.0f);
-    float phaseR_2 = 0.05968309938907623f * (1.0f + cosTheta_2 * cosTheta_2);
-    float g_23 = clampf_0(p_32->mieAnisotropy_0, -0.94999998807907104f, 0.94999998807907104f);
-    float _S651 = g_23 * g_23;
-    float hgDenom_2 = 1.0f + _S651 - 2.0f * g_23 * cosTheta_2;
-    float _S652 = 1.0f - _S651;
-    float _S653 = 12.56637096405029297f * hgDenom_2;
-    if(hgDenom_2 > 9.99999997475242708e-07f)
-    {
-        observerAltitude_3 = hgDenom_2;
-    }
-    else
-    {
-        observerAltitude_3 = 9.99999997475242708e-07f;
-    }
-    float phaseM_2 = _S652 / (_S653 * (F32_sqrt((observerAltitude_3))));
-    float tPrev_2 = 0.0f;
-    float3  sumR_1 = _S644;
-    float3  sumM_1 = _S644;
-    float u_4 = u1_0;
-    float pickedFrom_0 = -1.0f;
-    float pickedSpan_0 = 0.0f;
-    int i_28 = int(0);
-    float depthR_6 = 0.0f;
-    float depthM_7 = 0.0f;
-    float lumTotal_0 = 0.0f;
-    for(;;)
-    {
-        if(i_28 < int(24))
-        {
-        }
-        else
-        {
-            break;
-        }
-        int _S654 = i_28 + int(1);
-        float tNext_2 = tMax_4 * float(_S654 * _S654) * 0.00173611112404615f;
-        float dt_3 = tNext_2 - tPrev_2;
-        float tMid_2 = (tPrev_2 + tNext_2) * 0.5f;
-        float u_5;
-        float pickedFrom_1;
-        float pickedSpan_1;
-        if(dt_3 <= 0.0f)
-        {
-            u_5 = u_4;
-            pickedFrom_1 = pickedFrom_0;
-            pickedSpan_1 = pickedSpan_0;
-            tPrev_2 = tNext_2;
-            u_4 = u_5;
-            pickedFrom_0 = pickedFrom_1;
-            pickedSpan_0 = pickedSpan_1;
-            i_28 = _S654;
-            continue;
-        }
-        float h_9 = altitudeFromQ_0(cGround_3 + 2.0f * tMid_2 * b_10 + tMid_2 * tMid_2, planetRadius_7);
-        float hc_3;
-        if(h_9 < 0.0f)
-        {
-            hc_3 = 0.0f;
-        }
-        else
-        {
-            hc_3 = h_9;
-        }
-        float _S655 = - hc_3;
-        float dR_1 = (F32_exp((_S655 / scaleHeight_5))) * dt_3;
-        float dM_1 = (F32_exp((_S655 / 1200.0f))) * dt_3;
-        float midR_1 = depthR_6 + 0.5f * dR_1;
-        float midM_1 = depthM_7 + 0.5f * dM_1;
-        float depthR_7 = depthR_6 + dR_1;
-        float depthM_8 = depthM_7 + dM_1;
-        float3  _S656 = sampleTransmittanceLut_0(p_32, hc_3, lutMuFor_0(make_float3 (rayDir_2.x * tMid_2, _S648 + _S649 * tMid_2, rayDir_2.z * tMid_2), _S645));
-        float _S657 = betaMExt_2 * midM_1;
-        float3  transmittance_2 = make_float3 ((F32_exp((- (betaR_3.x * midR_1 + _S657)))), (F32_exp((- (betaR_3.y * midR_1 + _S657)))), (F32_exp((- (betaR_3.z * midR_1 + _S657))))) * _S656;
-        float3  _S658 = sumR_1 + transmittance_2 * make_float3 (dR_1);
-        float3  _S659 = sumM_1 + transmittance_2 * make_float3 (dM_1);
-        float3  c_57 = transmittance_2 * (betaR_3 * make_float3 (phaseR_2 * dR_1) + make_float3 (betaM_2 * (phaseM_2 * dM_1)));
+        float3  _S587 = sampleTransmittanceLut_0(p_30, hc_1, lutMuFor_0(make_float3 (rayDir_1.x * tMid_1, _S579 + _S580 * tMid_1, rayDir_1.z * tMid_1), _S576));
+        float _S588 = betaMExt_1 * midM_0;
+        float3  transmittance_1 = make_float3 ((F32_exp((- (betaR_1.x * midR_0 + _S588)))), (F32_exp((- (betaR_1.y * midR_0 + _S588)))), (F32_exp((- (betaR_1.z * midR_0 + _S588))))) * _S587;
+        float3  _S589 = sumR_0 + transmittance_1 * make_float3 (dR_0);
+        float3  _S590 = sumM_0 + transmittance_1 * make_float3 (dM_0);
+        float3  c_57 = transmittance_1 * (betaR_1 * make_float3 (phaseR_0 * dR_0) + make_float3 (betaM_0 * (phaseM_0 * dM_0)));
         float lum_0 = c_57.x + c_57.y + c_57.z;
         float lumTotal_1;
         if(lum_0 > 0.0f)
@@ -6099,8 +5599,8 @@ static __device__ AirSegment_0 airSegment_0(SkyInput_0 * p_32, float originAltit
             if(u_4 < keep_3)
             {
                 u_5 = u_4 / keep_3;
-                pickedFrom_1 = tPrev_2;
-                pickedSpan_1 = dt_3;
+                pickedFrom_1 = tPrev_1;
+                pickedSpan_1 = dt_1;
             }
             else
             {
@@ -6117,21 +5617,21 @@ static __device__ AirSegment_0 airSegment_0(SkyInput_0 * p_32, float originAltit
             pickedSpan_1 = pickedSpan_0;
             lumTotal_1 = lumTotal_0;
         }
-        sumR_1 = _S658;
-        sumM_1 = _S659;
-        depthR_6 = depthR_7;
-        depthM_7 = depthM_8;
+        sumR_0 = _S589;
+        sumM_0 = _S590;
+        depthR_1 = depthR_2;
+        depthM_2 = depthM_3;
         lumTotal_0 = lumTotal_1;
-        tPrev_2 = tNext_2;
+        tPrev_1 = tNext_1;
         u_4 = u_5;
         pickedFrom_0 = pickedFrom_1;
         pickedSpan_0 = pickedSpan_1;
-        i_28 = _S654;
+        i_26 = _S585;
     }
-    float _S660 = sunIrradianceTop_0(p_32);
-    (&seg_0)->airIn_0 = (sumR_1 * betaR_3 * make_float3 (phaseR_2) + sumM_1 * make_float3 (betaM_2 * phaseM_2)) * make_float3 (_S660);
-    float _S661 = betaMExt_2 * depthM_7;
-    (&seg_0)->airT_0 = make_float3 ((F32_exp((- (betaR_3.x * depthR_6 + _S661)))), (F32_exp((- (betaR_3.y * depthR_6 + _S661)))), (F32_exp((- (betaR_3.z * depthR_6 + _S661)))));
+    float _S591 = sunIrradianceTop_0(p_30);
+    (&seg_0)->airIn_0 = (sumR_0 * betaR_1 * make_float3 (phaseR_0) + sumM_0 * make_float3 (betaM_0 * phaseM_0)) * make_float3 (_S591);
+    float _S592 = betaMExt_1 * depthM_2;
+    (&seg_0)->airT_0 = make_float3 ((F32_exp((- (betaR_1.x * depthR_1 + _S592)))), (F32_exp((- (betaR_1.y * depthR_1 + _S592)))), (F32_exp((- (betaR_1.z * depthR_1 + _S592)))));
     if(pickedFrom_0 >= 0.0f)
     {
         (&seg_0)->shadowAt_0 = pickedFrom_0 + clampf_0(u2_0, 0.0f, 1.0f) * pickedSpan_0;
@@ -6139,31 +5639,555 @@ static __device__ AirSegment_0 airSegment_0(SkyInput_0 * p_32, float originAltit
     return seg_0;
 }
 
-static __device__ float airShadow_0(Scene_0 * s_19, StructuredBuffer<float> bounds_10, StructuredBuffer<float2 > drift_4, Rng_0 * rng_9, AirSegment_0 * seg_1, float3  ro_9, float3  rd_9, int * steps_9)
+static __device__ bool layerMapRange_0(LayerShadowMap_0 * m_17, float3  ro_6, float3  rd_6, float * t0_5, float * t1_5)
 {
-    bool _S662;
-    if((s_19->aerialMode_0) < int(2))
+    *t0_5 = 0.0f;
+    *t1_5 = 1.00000001504746622e+30f;
+    int _S593 = m_17->smDimU_0;
+    int _S594 = m_17->smDimV_0;
+    uint want_1 = uint(m_17->smDimU_0 * m_17->smDimV_0 * m_17->smSlices_0);
+    bool _S595;
+    if(want_1 == 0U)
     {
-        _S662 = true;
+        _S595 = true;
     }
     else
     {
-        _S662 = (seg_1->shadowAt_0) < 0.0f;
+        _S595 = uint(StructuredBuffer_getCount_0(m_17->smTexels_0)) < want_1;
     }
-    if(_S662)
+    if(_S595)
+    {
+        return false;
+    }
+    float _S596 = rd_6.y;
+    if((F32_abs((_S596))) < 9.99999971718068537e-10f)
+    {
+        if((ro_6.y) >= (m_17->smTop_0))
+        {
+            return false;
+        }
+    }
+    else
+    {
+        float tt_0 = (m_17->smTop_0 - ro_6.y) / _S596;
+        if(_S596 > 0.0f)
+        {
+            *t1_5 = (F32_min((*t1_5), (tt_0)));
+        }
+        else
+        {
+            *t0_5 = (F32_max((*t0_5), (tt_0)));
+        }
+    }
+    float3  _S597 = m_17->smSun_0;
+    float2  _S598 = float2 {_S597.x, _S597.z};
+    float _S599 = m_17->smSun_0.y;
+    float2  q0_3 = float2 {ro_6.x, ro_6.z} + _S598 * make_float2 ((m_17->smBottom_0 - ro_6.y) / _S599) - m_17->smCentre_0;
+    float2  dq_0 = float2 {rd_6.x, rd_6.z} - _S598 * make_float2 (_S596 / _S599);
+    float2  _S600 = airMapAxisV_0(m_17);
+    float _S601 = m_17->smLo_0.x;
+    float _S602 = m_17->smLo_0.y;
+    float vHi_0 = _S602 + float(_S594) * m_17->smTexel_0.y;
+    bool _S603 = clipAxis_0(dot_1(q0_3, m_17->smAxisU_0), dot_1(dq_0, m_17->smAxisU_0), _S601, _S601 + float(_S593) * m_17->smTexel_0.x, t0_5, t1_5);
+    if(!_S603)
+    {
+        return false;
+    }
+    bool _S604 = clipAxis_0(dot_1(q0_3, _S600), dot_1(dq_0, _S600), _S602, vHi_0, t0_5, t1_5);
+    if(!_S604)
+    {
+        return false;
+    }
+    return (*t1_5) > (*t0_5);
+}
+
+static __device__ float3  airShadowLoss_0(SkyInput_0 * p_31, LayerShadowMap_0 * mapA_0, LayerShadowMap_0 * mapB_0, float3  ro_7, float3  rd_7, float dist_4, float jitter_1)
+{
+    float3  none_0 = make_float3 (0.0f, 0.0f, 0.0f);
+    float r0_0;
+    float r1_0;
+    bool _S605 = layerMapRange_0(mapA_0, ro_7, rd_7, &r0_0, &r1_0);
+    float tA_1;
+    float tB_1;
+    if(_S605)
+    {
+        float _S606 = (F32_max((-1.00000001504746622e+30f), (r1_0)));
+        tA_1 = (F32_min((1.00000001504746622e+30f), (r0_0)));
+        tB_1 = _S606;
+    }
+    else
+    {
+        tA_1 = 1.00000001504746622e+30f;
+        tB_1 = -1.00000001504746622e+30f;
+    }
+    bool _S607 = layerMapRange_0(mapB_0, ro_7, rd_7, &r0_0, &r1_0);
+    if(_S607)
+    {
+        float _S608 = (F32_min((tA_1), (r0_0)));
+        tB_1 = (F32_max((tB_1), (r1_0)));
+        tA_1 = _S608;
+    }
+    if(!(tB_1 > tA_1))
+    {
+        return none_0;
+    }
+    float3  _S609 = sunDirection_0(p_31);
+    float _S610 = p_31->planetRadius_0;
+    float planetRadius_6;
+    if((p_31->planetRadius_0) > 1000.0f)
+    {
+        planetRadius_6 = _S610;
+    }
+    else
+    {
+        planetRadius_6 = 1000.0f;
+    }
+    float _S611 = p_31->scaleHeight_0;
+    float scaleHeight_4;
+    if((p_31->scaleHeight_0) > 1.0f)
+    {
+        scaleHeight_4 = _S611;
+    }
+    else
+    {
+        scaleHeight_4 = 1.0f;
+    }
+    float atmosphereHeight_2 = scaleHeight_4 * 8.0f;
+    float _S612 = ro_7.y;
+    float observerAltitude_2;
+    if(_S612 > 0.0f)
+    {
+        observerAltitude_2 = _S612;
+    }
+    else
+    {
+        observerAltitude_2 = 0.0f;
+    }
+    float _S613 = planetRadius_6 + observerAltitude_2;
+    float _S614 = rd_7.y;
+    float b_9 = _S613 * _S614;
+    float cGround_2 = shellC_0(observerAltitude_2, planetRadius_6, 0.0f);
+    float tTop_2 = shellExit_0(b_9, shellC_0(observerAltitude_2, planetRadius_6, atmosphereHeight_2));
+    bool _S615;
+    if(tTop_2 <= 0.0f)
+    {
+        _S615 = true;
+    }
+    else
+    {
+        _S615 = !(dist_4 > 0.0f);
+    }
+    if(_S615)
+    {
+        return none_0;
+    }
+    float tGround_2 = shellEnter_0(b_9, cGround_2);
+    float tMax_4;
+    if(tGround_2 > 0.0f)
+    {
+        tMax_4 = tGround_2;
+    }
+    else
+    {
+        tMax_4 = tTop_2;
+    }
+    if(dist_4 < tMax_4)
+    {
+        tMax_4 = dist_4;
+    }
+    float _S616 = (F32_max((tA_1), (0.0f)));
+    float _S617 = (F32_min((tB_1), (tMax_4)));
+    if(!(_S617 > _S616))
+    {
+        return none_0;
+    }
+    float3  betaR_2 = rayleighCoefficients_0();
+    float betaM_1 = mieCoefficient_0(p_31->turbidity_0);
+    float _S618 = betaM_1 * 1.11000001430511475f;
+    float cosTheta_1 = clampf_0(dot_0(rd_7, _S609), -1.0f, 1.0f);
+    float phaseR_1 = 0.05968309938907623f * (1.0f + cosTheta_1 * cosTheta_1);
+    float g_22 = clampf_0(p_31->mieAnisotropy_0, -0.94999998807907104f, 0.94999998807907104f);
+    float _S619 = g_22 * g_22;
+    float hgDenom_1 = 1.0f + _S619 - 2.0f * g_22 * cosTheta_1;
+    float _S620 = 1.0f - _S619;
+    float _S621 = 12.56637096405029297f * hgDenom_1;
+    if(hgDenom_1 > 9.99999997475242708e-07f)
+    {
+        tA_1 = hgDenom_1;
+    }
+    else
+    {
+        tA_1 = 9.99999997475242708e-07f;
+    }
+    float phaseM_1 = _S620 / (_S621 * (F32_sqrt((tA_1))));
+    float depthR_3;
+    float depthM_4;
+    float hc_2;
+    int i_27;
+    if(_S616 > 0.0f)
+    {
+        float _S622 = _S616 / 8.0f;
+        i_27 = int(0);
+        depthR_3 = 0.0f;
+        depthM_4 = 0.0f;
+        for(;;)
+        {
+            if(i_27 < int(8))
+            {
+            }
+            else
+            {
+                break;
+            }
+            float tm_0 = (float(i_27) + 0.5f) * _S622;
+            float h_7 = altitudeFromQ_0(cGround_2 + 2.0f * tm_0 * b_9 + tm_0 * tm_0, planetRadius_6);
+            if(h_7 < 0.0f)
+            {
+                hc_2 = 0.0f;
+            }
+            else
+            {
+                hc_2 = h_7;
+            }
+            float _S623 = - hc_2;
+            float depthR_4 = depthR_3 + (F32_exp((_S623 / scaleHeight_4))) * _S622;
+            float depthM_5 = depthM_4 + (F32_exp((_S623 / 1200.0f))) * _S622;
+            i_27 = i_27 + int(1);
+            depthR_3 = depthR_4;
+            depthM_4 = depthM_5;
+        }
+    }
+    else
+    {
+        depthR_3 = 0.0f;
+        depthM_4 = 0.0f;
+    }
+    float _S624 = clampf_0(jitter_1, 0.0f, 1.0f);
+    float _S625 = _S617 - _S616;
+    float3  lossR_0 = none_0;
+    float3  lossM_0 = none_0;
+    i_27 = int(0);
+    for(;;)
+    {
+        if(i_27 < int(48))
+        {
+        }
+        else
+        {
+            break;
+        }
+        float s0_0 = _S616 + _S625 * float(i_27 * i_27) * 0.00043402778101154f;
+        int _S626 = i_27 + int(1);
+        float dt_2 = _S616 + _S625 * float(_S626 * _S626) * 0.00043402778101154f - s0_0;
+        float ts_0 = s0_0 + _S624 * dt_2;
+        float h_8 = altitudeFromQ_0(cGround_2 + 2.0f * ts_0 * b_9 + ts_0 * ts_0, planetRadius_6);
+        if(h_8 < 0.0f)
+        {
+            hc_2 = 0.0f;
+        }
+        else
+        {
+            hc_2 = h_8;
+        }
+        float _S627 = - hc_2;
+        float rhoR_0 = (F32_exp((_S627 / scaleHeight_4)));
+        float rhoM_0 = (F32_exp((_S627 / 1200.0f)));
+        float _S628 = ts_0 - s0_0;
+        float atR_0 = depthR_3 + rhoR_0 * _S628;
+        float atM_0 = depthM_4 + rhoM_0 * _S628;
+        float depthR_5 = depthR_3 + rhoR_0 * dt_2;
+        float depthM_6 = depthM_4 + rhoM_0 * dt_2;
+        float3  pw_0 = ro_7 + rd_7 * make_float3 (ts_0);
+        float _S629 = layerMapTransmittance_0(mapA_0, pw_0);
+        float _S630 = layerMapTransmittance_0(mapB_0, pw_0);
+        float v_9 = _S629 * _S630;
+        if(v_9 >= 1.0f)
+        {
+            i_27 = _S626;
+            depthR_3 = depthR_5;
+            depthM_4 = depthM_6;
+            continue;
+        }
+        float3  _S631 = sampleTransmittanceLut_0(p_31, hc_2, lutMuFor_0(make_float3 (rd_7.x * ts_0, _S613 + _S614 * ts_0, rd_7.z * ts_0), _S609));
+        float _S632 = _S618 * atM_0;
+        float3  w_7 = make_float3 ((F32_exp((- (betaR_2.x * atR_0 + _S632)))), (F32_exp((- (betaR_2.y * atR_0 + _S632)))), (F32_exp((- (betaR_2.z * atR_0 + _S632))))) * _S631 * make_float3 ((1.0f - v_9) * dt_2);
+        float3  _S633 = lossM_0 + w_7 * make_float3 (rhoM_0);
+        lossR_0 = lossR_0 + w_7 * make_float3 (rhoR_0);
+        lossM_0 = _S633;
+        i_27 = _S626;
+        depthR_3 = depthR_5;
+        depthM_4 = depthM_6;
+    }
+    float3  _S634 = lossR_0 * betaR_2 * make_float3 (phaseR_1) + lossM_0 * make_float3 (betaM_1 * phaseM_1);
+    float _S635 = sunIrradianceTop_0(p_31);
+    return _S634 * make_float3 (_S635);
+}
+
+static __device__ float airShadow_0(Scene_0 * s_18, StructuredBuffer<float> bounds_10, StructuredBuffer<float2 > drift_4, Rng_0 * rng_9, AirSegment_0 * seg_1, float3  ro_8, float3  rd_8, int * steps_9)
+{
+    bool _S636;
+    if((s_18->aerialMode_0) < int(2))
+    {
+        _S636 = true;
+    }
+    else
+    {
+        _S636 = (seg_1->shadowAt_0) < 0.0f;
+    }
+    if(_S636)
     {
         return 1.0f;
     }
-    float _S663 = sceneTransmittance_0(s_19, bounds_10, drift_4, rng_9, ro_9 + rd_9 * make_float3 (seg_1->shadowAt_0), s_19->sunDir_0, steps_9);
-    return _S663;
+    float _S637 = sceneTransmittance_0(s_18, bounds_10, drift_4, rng_9, ro_8 + rd_8 * make_float3 (seg_1->shadowAt_0), s_18->sunDir_0, steps_9);
+    return _S637;
+}
+
+static __device__ float groundShadow_0(LayerShadowMap_0 * mapA_1, LayerShadowMap_0 * mapB_1, float3  origin_1, float3  dir_5)
+{
+    float _S638 = dir_5.y;
+    bool _S639;
+    if(!(_S638 < 0.0f))
+    {
+        _S639 = true;
+    }
+    else
+    {
+        _S639 = !((origin_1.y) > 0.0f);
+    }
+    if(_S639)
+    {
+        return 1.0f;
+    }
+    float3  ground_0 = origin_1 + dir_5 * make_float3 (origin_1.y / - _S638);
+    *&((&ground_0)->y) = 0.0f;
+    float _S640 = layerMapTransmittance_0(mapA_1, ground_0);
+    float _S641 = layerMapTransmittance_0(mapB_1, ground_0);
+    return _S640 * _S641;
+}
+
+static __device__ float3  skyRadiance_0(SkyInput_0 * p_32, float originAltitude_2, float3  rayDir_2, bool includeSunDisc_0, float groundLit_0)
+{
+    float hc_3;
+    float3  _S642 = sunDirection_0(p_32);
+    float _S643 = p_32->planetRadius_0;
+    float planetRadius_7;
+    if((p_32->planetRadius_0) > 1000.0f)
+    {
+        planetRadius_7 = _S643;
+    }
+    else
+    {
+        planetRadius_7 = 1000.0f;
+    }
+    float _S644 = p_32->scaleHeight_0;
+    float scaleHeight_5;
+    if((p_32->scaleHeight_0) > 1.0f)
+    {
+        scaleHeight_5 = _S644;
+    }
+    else
+    {
+        scaleHeight_5 = 1.0f;
+    }
+    float atmosphereHeight_3 = scaleHeight_5 * 8.0f;
+    float observerAltitude_3;
+    if(originAltitude_2 > 0.0f)
+    {
+        observerAltitude_3 = originAltitude_2;
+    }
+    else
+    {
+        observerAltitude_3 = 0.0f;
+    }
+    float _S645 = planetRadius_7 + observerAltitude_3;
+    float _S646 = rayDir_2.y;
+    float b_10 = _S645 * _S646;
+    float cGround_3 = shellC_0(observerAltitude_3, planetRadius_7, 0.0f);
+    float tTop_3 = shellExit_0(b_10, shellC_0(observerAltitude_3, planetRadius_7, atmosphereHeight_3));
+    if(tTop_3 <= 0.0f)
+    {
+        return make_float3 (0.0f, 0.0f, 0.0f);
+    }
+    float tGround_3 = shellEnter_0(b_10, cGround_3);
+    bool hitsGround_0 = tGround_3 > 0.0f;
+    if(hitsGround_0)
+    {
+        observerAltitude_3 = tGround_3;
+    }
+    else
+    {
+        observerAltitude_3 = tTop_3;
+    }
+    float3  betaR_3 = rayleighCoefficients_0();
+    float betaM_2 = mieCoefficient_0(p_32->turbidity_0);
+    float betaMExt_2 = betaM_2 * 1.11000001430511475f;
+    float cosTheta_2 = clampf_0(dot_0(rayDir_2, _S642), -1.0f, 1.0f);
+    float phaseR_2 = 0.05968309938907623f * (1.0f + cosTheta_2 * cosTheta_2);
+    float g_23 = clampf_0(p_32->mieAnisotropy_0, -0.94999998807907104f, 0.94999998807907104f);
+    float _S647 = g_23 * g_23;
+    float hgDenom_2 = 1.0f + _S647 - 2.0f * g_23 * cosTheta_2;
+    float _S648 = 1.0f - _S647;
+    float _S649 = 12.56637096405029297f * hgDenom_2;
+    float tPrev_2;
+    if(hgDenom_2 > 9.99999997475242708e-07f)
+    {
+        tPrev_2 = hgDenom_2;
+    }
+    else
+    {
+        tPrev_2 = 9.99999997475242708e-07f;
+    }
+    float phaseM_2 = _S648 / (_S649 * (F32_sqrt((tPrev_2))));
+    float3  _S650 = make_float3 (0.0f, 0.0f, 0.0f);
+    tPrev_2 = 0.0f;
+    float3  sumR_1 = _S650;
+    float3  sumM_1 = _S650;
+    int i_28 = int(0);
+    float depthR_6 = 0.0f;
+    float depthM_7 = 0.0f;
+    for(;;)
+    {
+        if(i_28 < int(24))
+        {
+        }
+        else
+        {
+            break;
+        }
+        int _S651 = i_28 + int(1);
+        float tNext_2 = observerAltitude_3 * float(_S651 * _S651) * 0.00173611112404615f;
+        float dt_3 = tNext_2 - tPrev_2;
+        float tMid_2 = (tPrev_2 + tNext_2) * 0.5f;
+        if(dt_3 <= 0.0f)
+        {
+            tPrev_2 = tNext_2;
+            i_28 = _S651;
+            continue;
+        }
+        float h_9 = altitudeFromQ_0(cGround_3 + 2.0f * tMid_2 * b_10 + tMid_2 * tMid_2, planetRadius_7);
+        if(h_9 < 0.0f)
+        {
+            hc_3 = 0.0f;
+        }
+        else
+        {
+            hc_3 = h_9;
+        }
+        float _S652 = - hc_3;
+        float dR_1 = (F32_exp((_S652 / scaleHeight_5))) * dt_3;
+        float dM_1 = (F32_exp((_S652 / 1200.0f))) * dt_3;
+        float midR_1 = depthR_6 + 0.5f * dR_1;
+        float midM_1 = depthM_7 + 0.5f * dM_1;
+        float depthR_7 = depthR_6 + dR_1;
+        float depthM_8 = depthM_7 + dM_1;
+        float3  _S653 = sampleTransmittanceLut_0(p_32, hc_3, lutMuFor_0(make_float3 (rayDir_2.x * tMid_2, _S645 + _S646 * tMid_2, rayDir_2.z * tMid_2), _S642));
+        float _S654 = betaMExt_2 * midM_1;
+        float3  transmittance_2 = make_float3 ((F32_exp((- (betaR_3.x * midR_1 + _S654)))), (F32_exp((- (betaR_3.y * midR_1 + _S654)))), (F32_exp((- (betaR_3.z * midR_1 + _S654))))) * _S653;
+        float3  _S655 = sumM_1 + transmittance_2 * make_float3 (dM_1);
+        sumR_1 = sumR_1 + transmittance_2 * make_float3 (dR_1);
+        sumM_1 = _S655;
+        depthR_6 = depthR_7;
+        depthM_7 = depthM_8;
+        tPrev_2 = tNext_2;
+        i_28 = _S651;
+    }
+    float _S656 = sunIrradianceTop_0(p_32);
+    float3  radiance_0 = (sumR_1 * betaR_3 * make_float3 (phaseR_2) + sumM_1 * make_float3 (betaM_2 * phaseM_2)) * make_float3 (_S656);
+    float3  radiance_1;
+    if(hitsGround_0)
+    {
+        float3  groundPoint_0 = make_float3 (rayDir_2.x * tGround_3, _S645 + _S646 * tGround_3, rayDir_2.z * tGround_3);
+        float nDotL_0 = clampf_0(dot_0(normalizeExact_0(groundPoint_0), _S642), 0.0f, 1.0f);
+        float3  _S657 = sampleTransmittanceLut_0(p_32, 0.0f, lutMuFor_0(groundPoint_0, _S642));
+        float _S658 = betaMExt_2 * depthM_7;
+        float3  viewT_0 = make_float3 ((F32_exp((- (betaR_3.x * depthR_6 + _S658)))), (F32_exp((- (betaR_3.y * depthR_6 + _S658)))), (F32_exp((- (betaR_3.z * depthR_6 + _S658)))));
+        radiance_1 = radiance_0 + viewT_0 * _S657 * make_float3 (p_32->groundAlbedo_0 * nDotL_0 * 0.31830987334251404f * _S656 * groundLit_0) + viewT_0 * p_32->groundSkyLight_0;
+    }
+    else
+    {
+        radiance_1 = radiance_0;
+    }
+    bool _S659;
+    if(!hitsGround_0)
+    {
+        _S659 = includeSunDisc_0;
+    }
+    else
+    {
+        _S659 = false;
+    }
+    if(_S659)
+    {
+        float cosRadius_0 = (F32_cos((toRadians_0(p_32->sunAngularRadius_0))));
+        if(cosTheta_2 > cosRadius_0)
+        {
+            float _S660 = betaMExt_2 * depthM_7;
+            float3  viewT_1 = make_float3 ((F32_exp((- (betaR_3.x * depthR_6 + _S660)))), (F32_exp((- (betaR_3.y * depthR_6 + _S660)))), (F32_exp((- (betaR_3.z * depthR_6 + _S660)))));
+            float solidAngle_0 = 6.28318548202514648f * (1.0f - cosRadius_0);
+            if(solidAngle_0 > 9.99999971718068537e-10f)
+            {
+                hc_3 = solidAngle_0;
+            }
+            else
+            {
+                hc_3 = 9.99999971718068537e-10f;
+            }
+            radiance_1 = radiance_1 + viewT_1 * make_float3 (_S656 / hc_3);
+        }
+    }
+    return radiance_1;
+}
+
+static __device__ float3  environmentRadiance_0(Environment_0 * e_0, float3  origin_2, float3  dir_6, bool includeSunDisc_1, float groundLit_1)
+{
+    if((e_0->envMode_0) == int(1))
+    {
+        float3  _S661 = skyRadiance_0(&e_0->sky_0, origin_2.y, dir_6, includeSunDisc_1, groundLit_1);
+        return _S661;
+    }
+    return e_0->uniformRadiance_0;
+}
+
+static __device__ float3  pathEnvironment_0(Scene_0 * s_19, float3  ro_9, float3  rd_9, bool first_0)
+{
+    float groundLit_2;
+    if((s_19->airMapOn_0) != int(0))
+    {
+        float _S662 = groundShadow_0(&s_19->airMapIce_0, &s_19->airMapCu_0, ro_9, rd_9);
+        groundLit_2 = _S662;
+    }
+    else
+    {
+        groundLit_2 = 1.0f;
+    }
+    bool _S663;
+    if(first_0)
+    {
+        _S663 = (s_19->hideSunDisc_0) == int(0);
+    }
+    else
+    {
+        _S663 = false;
+    }
+    float3  _S664 = environmentRadiance_0(&s_19->environment_0, ro_9, rd_9, _S663, groundLit_2);
+    float3  env_0;
+    if(!first_0)
+    {
+        env_0 = _S664 + s_19->ltAmbient_0;
+    }
+    else
+    {
+        env_0 = _S664;
+    }
+    return env_0;
 }
 
 static __device__ float3  lightTriple_0(StructuredBuffer<float> b_11, int i_29)
 {
-    float _S664 = __ldg((&(b_11)[i_29]));
-    float _S665 = __ldg((&(b_11)[i_29 + int(1)]));
-    float _S666 = __ldg((&(b_11)[i_29 + int(2)]));
-    return make_float3 (_S664, _S665, _S666);
+    float _S665 = __ldg((&(b_11)[i_29]));
+    float _S666 = __ldg((&(b_11)[i_29 + int(1)]));
+    float _S667 = __ldg((&(b_11)[i_29 + int(2)]));
+    return make_float3 (_S665, _S666, _S667);
 }
 
 static __device__ int sheetLevelStart_0(int k_12)
@@ -6175,16 +6199,16 @@ static __device__ float lightEdge_0(float lo_12, float hi_11, float x_41)
 {
     if(!(hi_11 > lo_12))
     {
-        float _S667;
+        float _S668;
         if(x_41 >= lo_12)
         {
-            _S667 = 1.0f;
+            _S668 = 1.0f;
         }
         else
         {
-            _S667 = 0.0f;
+            _S668 = 0.0f;
         }
-        return _S667;
+        return _S668;
     }
     float t_17 = clamp_0((x_41 - lo_12) / (hi_11 - lo_12), 0.0f, 1.0f);
     return t_17 * t_17 * (3.0f - 2.0f * t_17);
@@ -6203,17 +6227,17 @@ static __device__ LightSample_0 sampleLocalLight_0(StructuredBuffer<float> b_12,
     float imp_0;
     float imp1_0;
     LightSample_0 ls_0;
-    float3  _S668 = make_float3 (0.0f, 1.0f, 0.0f);
-    (&ls_0)->lsDir_0 = _S668;
+    float3  _S669 = make_float3 (0.0f, 1.0f, 0.0f);
+    (&ls_0)->lsDir_0 = _S669;
     (&ls_0)->lsDist_0 = 0.0f;
     (&ls_0)->lsIrradiance_0 = make_float3 (0.0f, 0.0f, 0.0f);
-    int _S669 = (I32_min((count_0), (int(16))));
-    if(_S669 <= int(0))
+    int _S670 = (I32_min((count_0), (int(16))));
+    if(_S670 <= int(0))
     {
         return ls_0;
     }
-    float _S670 = randFloat_0(rng_10);
-    int _S671 = _S669 - int(1);
+    float _S671 = randFloat_0(rng_10);
+    int _S672 = _S670 - int(1);
     int i_30 = int(0);
     for(;;)
     {
@@ -6222,16 +6246,16 @@ static __device__ LightSample_0 sampleLocalLight_0(StructuredBuffer<float> b_12,
         }
         else
         {
-            k_13 = _S671;
+            k_13 = _S672;
             break;
         }
-        if(i_30 >= _S669)
+        if(i_30 >= _S670)
         {
-            k_13 = _S671;
+            k_13 = _S672;
             break;
         }
-        float _S672 = __ldg((&(b_12)[int(8) + i_30 * int(20) + int(1)]));
-        if(_S670 < _S672)
+        float _S673 = __ldg((&(b_12)[int(8) + i_30 * int(20) + int(1)]));
+        if(_S671 < _S673)
         {
             k_13 = i_30;
             break;
@@ -6239,68 +6263,68 @@ static __device__ LightSample_0 sampleLocalLight_0(StructuredBuffer<float> b_12,
         i_30 = i_30 + int(1);
     }
     int r_13 = int(8) + k_13 * int(20);
-    float _S673 = __ldg((&(b_12)[r_13]));
-    int kind_0 = int(_S673);
-    float _S674 = __ldg((&(b_12)[r_13 + int(2)]));
-    if(!(_S674 > 0.0f))
+    float _S674 = __ldg((&(b_12)[r_13]));
+    int kind_0 = int(_S674);
+    float _S675 = __ldg((&(b_12)[r_13 + int(2)]));
+    if(!(_S675 > 0.0f))
     {
         return ls_0;
     }
-    int _S675 = r_13 + int(9);
-    float3  rgb_0 = lightTriple_0(b_12, _S675);
+    int _S676 = r_13 + int(9);
+    float3  rgb_0 = lightTriple_0(b_12, _S676);
     if(kind_0 == int(2))
     {
         (&ls_0)->lsDir_0 = lightTriple_0(b_12, r_13 + int(6));
         (&ls_0)->lsDist_0 = 1.00000001504746622e+30f;
-        (&ls_0)->lsIrradiance_0 = rgb_0 / make_float3 (_S674);
+        (&ls_0)->lsIrradiance_0 = rgb_0 / make_float3 (_S675);
         return ls_0;
     }
-    float _S676 = __ldg((&(b_12)[r_13 + int(12)]));
-    bool _S677;
+    float _S677 = __ldg((&(b_12)[r_13 + int(12)]));
+    bool _S678;
     float floorSq_0;
     float3  q_14;
     float3  rgb_1;
     if(kind_0 == int(3))
     {
-        float _S678 = __ldg((&(b_12)[r_13 + int(13)]));
-        int w_8 = int(_S678);
-        float _S679 = __ldg((&(b_12)[r_13 + int(14)]));
-        int h_10 = int(_S679);
-        float _S680 = __ldg((&(b_12)[r_13 + int(15)]));
-        int texels_0 = int(_S680);
-        float _S681 = __ldg((&(b_12)[r_13 + int(19)]));
-        int tree_0 = int(_S681);
-        float _S682 = __ldg((&(b_12)[tree_0]));
-        int levels_0 = int(_S682);
+        float _S679 = __ldg((&(b_12)[r_13 + int(13)]));
+        int w_8 = int(_S679);
+        float _S680 = __ldg((&(b_12)[r_13 + int(14)]));
+        int h_10 = int(_S680);
+        float _S681 = __ldg((&(b_12)[r_13 + int(15)]));
+        int texels_0 = int(_S681);
+        float _S682 = __ldg((&(b_12)[r_13 + int(19)]));
+        int tree_0 = int(_S682);
+        float _S683 = __ldg((&(b_12)[tree_0]));
+        int levels_0 = int(_S683);
         float3  origin_3 = lightTriple_0(b_12, r_13 + int(3));
         float3  axisU_0 = lightTriple_0(b_12, r_13 + int(6));
-        float3  eye_0 = lightTriple_0(b_12, _S675);
+        float3  eye_0 = lightTriple_0(b_12, _S676);
         float3  axisV_0 = lightTriple_0(b_12, r_13 + int(16));
         if(w_8 <= int(0))
         {
-            _S677 = true;
+            _S678 = true;
         }
         else
         {
-            _S677 = h_10 <= int(0);
+            _S678 = h_10 <= int(0);
         }
-        if(_S677)
+        if(_S678)
         {
-            _S677 = true;
+            _S678 = true;
         }
         else
         {
-            _S677 = levels_0 < int(0);
+            _S678 = levels_0 < int(0);
         }
-        if(_S677)
+        if(_S678)
         {
-            _S677 = true;
+            _S678 = true;
         }
         else
         {
-            _S677 = levels_0 > int(12);
+            _S678 = levels_0 > int(12);
         }
-        if(_S677)
+        if(_S678)
         {
             return ls_0;
         }
@@ -6322,8 +6346,8 @@ static __device__ LightSample_0 sampleLocalLight_0(StructuredBuffer<float> b_12,
                 break;
             }
             int child_0 = lv_0 + int(1);
-            int _S683 = int(1) << child_0;
-            int _S684 = tree_0 + int(1) + int(5) * sheetLevelStart_0(child_0);
+            int _S684 = int(1) << child_0;
+            int _S685 = tree_0 + int(1) + int(5) * sheetLevelStart_0(child_0);
             float imp0_0 = 0.0f;
             float imp1_1 = 0.0f;
             float imp2_0 = 0.0f;
@@ -6338,14 +6362,14 @@ static __device__ LightSample_0 sampleLocalLight_0(StructuredBuffer<float> b_12,
                 {
                     break;
                 }
-                int at_3 = _S684 + int(5) * ((int(2) * cy_0 + (c_58 >> int(1))) * _S683 + (int(2) * cx_0 + (c_58 & int(1))));
-                float _S685 = __ldg((&(b_12)[at_3]));
-                if(_S685 > 0.0f)
+                int at_3 = _S685 + int(5) * ((int(2) * cy_0 + (c_58 >> int(1))) * _S684 + (int(2) * cx_0 + (c_58 & int(1))));
+                float _S686 = __ldg((&(b_12)[at_3]));
+                if(_S686 > 0.0f)
                 {
                     float3  d_26 = lightTriple_0(b_12, at_3 + int(1)) - p_33;
-                    float _S686 = dot_0(d_26, d_26);
-                    float _S687 = __ldg((&(b_12)[at_3 + int(4)]));
-                    imp_0 = _S685 / (F32_max((_S686), (_S687)));
+                    float _S687 = dot_0(d_26, d_26);
+                    float _S688 = __ldg((&(b_12)[at_3 + int(4)]));
+                    imp_0 = _S686 / (F32_max((_S687), (_S688)));
                 }
                 else
                 {
@@ -6377,11 +6401,11 @@ static __device__ LightSample_0 sampleLocalLight_0(StructuredBuffer<float> b_12,
                             imp1_0 = imp2_0;
                             imp2_1 = imp_0;
                         }
-                        float _S688 = imp1_0;
-                        float _S689 = imp2_1;
+                        float _S689 = imp1_0;
+                        float _S690 = imp2_1;
                         imp1_0 = imp1_1;
-                        imp2_1 = _S688;
-                        imp3_1 = _S689;
+                        imp2_1 = _S689;
+                        imp3_1 = _S690;
                     }
                     imp1_1 = imp1_0;
                     imp2_0 = imp2_1;
@@ -6389,15 +6413,15 @@ static __device__ LightSample_0 sampleLocalLight_0(StructuredBuffer<float> b_12,
                 }
                 c_58 = c_58 + int(1);
             }
-            float _S690 = imp0_0 + imp1_1;
-            float _S691 = _S690 + imp2_0;
-            float total_3 = _S691 + imp3_0;
+            float _S691 = imp0_0 + imp1_1;
+            float _S692 = _S691 + imp2_0;
+            float total_3 = _S692 + imp3_0;
             if(!(total_3 > 0.0f))
             {
                 return ls_0;
             }
-            float _S692 = randFloat_0(rng_10);
-            float u_6 = _S692 * total_3;
+            float _S693 = randFloat_0(rng_10);
+            float u_6 = _S693 * total_3;
             int pickC_0;
             if(u_6 < imp0_0)
             {
@@ -6406,14 +6430,14 @@ static __device__ LightSample_0 sampleLocalLight_0(StructuredBuffer<float> b_12,
             }
             else
             {
-                if(u_6 < _S690)
+                if(u_6 < _S691)
                 {
                     imp_0 = imp1_1;
                     pickC_0 = int(1);
                 }
                 else
                 {
-                    if(u_6 < _S691)
+                    if(u_6 < _S692)
                     {
                         imp_0 = imp2_0;
                         pickC_0 = int(2);
@@ -6461,48 +6485,48 @@ static __device__ LightSample_0 sampleLocalLight_0(StructuredBuffer<float> b_12,
                 pickC_1 = pickC_0;
             }
             float pdf_0 = floorSq_0 * (imp1_0 / total_3);
-            int _S693 = int(2) * cx_0 + (pickC_1 & int(1));
-            int _S694 = int(2) * cy_0 + (pickC_1 >> int(1));
-            cx_0 = _S693;
-            cy_0 = _S694;
+            int _S694 = int(2) * cx_0 + (pickC_1 & int(1));
+            int _S695 = int(2) * cy_0 + (pickC_1 >> int(1));
+            cx_0 = _S694;
+            cy_0 = _S695;
             lv_0 = child_0;
             floorSq_0 = pdf_0;
         }
         if(cx_0 >= w_8)
         {
-            _S677 = true;
+            _S678 = true;
         }
         else
         {
-            _S677 = cy_0 >= h_10;
+            _S678 = cy_0 >= h_10;
         }
-        if(_S677)
+        if(_S678)
         {
-            _S677 = true;
+            _S678 = true;
         }
         else
         {
-            _S677 = !(floorSq_0 > 0.0f);
+            _S678 = !(floorSq_0 > 0.0f);
         }
-        if(_S677)
+        if(_S678)
         {
             return ls_0;
         }
         int tx_0 = texels_0 + int(4) * (cy_0 * w_8 + cx_0);
-        float _S695 = __ldg((&(b_12)[tx_0 + int(3)]));
+        float _S696 = __ldg((&(b_12)[tx_0 + int(3)]));
         float u2_1 = randFloat_0(rng_10);
         float u3_0 = randFloat_0(rng_10);
-        float floorSq_1 = _S676 * (_S695 * _S695);
-        float3  _S696 = lightTriple_0(b_12, tx_0) * make_float3 (floorSq_1 / floorSq_0);
-        q_14 = eye_0 + (origin_3 + axisU_0 * make_float3 (float(cx_0) + u2_1) + axisV_0 * make_float3 (float(cy_0) + u3_0) - eye_0) * make_float3 (_S695);
-        rgb_1 = _S696;
+        float floorSq_1 = _S677 * (_S696 * _S696);
+        float3  _S697 = lightTriple_0(b_12, tx_0) * make_float3 (floorSq_1 / floorSq_0);
+        q_14 = eye_0 + (origin_3 + axisU_0 * make_float3 (float(cx_0) + u2_1) + axisV_0 * make_float3 (float(cy_0) + u3_0) - eye_0) * make_float3 (_S696);
+        rgb_1 = _S697;
         floorSq_0 = floorSq_1;
     }
     else
     {
         q_14 = lightTriple_0(b_12, r_13 + int(3));
         rgb_1 = rgb_0;
-        floorSq_0 = _S676;
+        floorSq_0 = _S677;
     }
     float3  d_27 = q_14 - p_33;
     float dSq_0 = dot_0(d_27, d_27);
@@ -6513,7 +6537,7 @@ static __device__ LightSample_0 sampleLocalLight_0(StructuredBuffer<float> b_12,
     }
     else
     {
-        q_14 = _S668;
+        q_14 = _S669;
     }
     (&ls_0)->lsDir_0 = q_14;
     (&ls_0)->lsDist_0 = dist_5;
@@ -6521,9 +6545,9 @@ static __device__ LightSample_0 sampleLocalLight_0(StructuredBuffer<float> b_12,
     float3  e_2;
     if(kind_0 == int(1))
     {
-        float _S697 = __ldg((&(b_12)[r_13 + int(13)]));
-        float _S698 = __ldg((&(b_12)[r_13 + int(14)]));
-        e_2 = e_1 * make_float3 (lightEdge_0(_S697, _S698, dot_0(- (&ls_0)->lsDir_0, lightTriple_0(b_12, r_13 + int(6)))));
+        float _S698 = __ldg((&(b_12)[r_13 + int(13)]));
+        float _S699 = __ldg((&(b_12)[r_13 + int(14)]));
+        e_2 = e_1 * make_float3 (lightEdge_0(_S698, _S699, dot_0(- (&ls_0)->lsDir_0, lightTriple_0(b_12, r_13 + int(6)))));
     }
     else
     {
@@ -6531,69 +6555,69 @@ static __device__ LightSample_0 sampleLocalLight_0(StructuredBuffer<float> b_12,
     }
     if(kind_0 != int(3))
     {
-        float _S699 = __ldg((&(b_12)[r_13 + int(16)]));
-        _S677 = _S699 > 0.0f;
+        float _S700 = __ldg((&(b_12)[r_13 + int(16)]));
+        _S678 = _S700 > 0.0f;
     }
     else
     {
-        _S677 = false;
+        _S678 = false;
     }
-    if(_S677)
+    if(_S678)
     {
-        float _S700 = __ldg((&(b_12)[r_13 + int(15)]));
-        float _S701 = __ldg((&(b_12)[r_13 + int(16)]));
-        e_2 = e_2 * make_float3 (1.0f - lightEdge_0(_S700, _S701, dist_5));
+        float _S701 = __ldg((&(b_12)[r_13 + int(15)]));
+        float _S702 = __ldg((&(b_12)[r_13 + int(16)]));
+        e_2 = e_2 * make_float3 (1.0f - lightEdge_0(_S701, _S702, dist_5));
     }
-    (&ls_0)->lsIrradiance_0 = e_2 / make_float3 (_S674);
+    (&ls_0)->lsIrradiance_0 = e_2 / make_float3 (_S675);
     return ls_0;
 }
 
 static __device__ float sceneTransmittanceUpTo_0(Scene_0 * s_20, StructuredBuffer<float> bounds_11, StructuredBuffer<float2 > drift_5, Rng_0 * rng_11, float3  p_34, float3  dir_7, float tMax_5, int * steps_10)
 {
-    float _S702 = transmittanceUpTo_0(&s_20->medium_0, &s_20->grid_0, bounds_11, drift_5, rng_11, p_34, dir_7, tMax_5, steps_10);
-    bool _S703;
+    float _S703 = transmittanceUpTo_0(&s_20->medium_0, &s_20->grid_0, bounds_11, drift_5, rng_11, p_34, dir_7, tMax_5, steps_10);
+    bool _S704;
     if((s_20->layer2On_0) != int(0))
     {
-        _S703 = _S702 > 0.0f;
+        _S704 = _S703 > 0.0f;
     }
     else
     {
-        _S703 = false;
+        _S704 = false;
     }
     float tr_10;
-    if(_S703)
+    if(_S704)
     {
-        MajorantGrid_0 _S704 = gridFor_0(&s_20->medium2_0, &s_20->grid2_0, p_34);
-        MajorantGrid_0 _S705 = _S704;
-        float _S706 = transmittanceUpTo_0(&s_20->medium2_0, &_S705, bounds_11, drift_5, rng_11, p_34, dir_7, tMax_5, steps_10);
-        tr_10 = _S702 * _S706;
+        MajorantGrid_0 _S705 = gridFor_0(&s_20->medium2_0, &s_20->grid2_0, p_34);
+        MajorantGrid_0 _S706 = _S705;
+        float _S707 = transmittanceUpTo_0(&s_20->medium2_0, &_S706, bounds_11, drift_5, rng_11, p_34, dir_7, tMax_5, steps_10);
+        tr_10 = _S703 * _S707;
     }
     else
     {
-        tr_10 = _S702;
+        tr_10 = _S703;
     }
     return tr_10;
 }
 
 static __device__ float3  sampleHG_0(Rng_0 * rng_12, float3  wo_0, float g_24, float * cosT_6)
 {
-    float _S707 = clamp_0(g_24, -0.99900001287460327f, 0.99900001287460327f);
+    float _S708 = clamp_0(g_24, -0.99900001287460327f, 0.99900001287460327f);
     float u1_1 = randFloat_0(rng_12);
     float u2_2 = randFloat_0(rng_12);
-    if((F32_abs((_S707))) < 0.00100000004749745f)
+    if((F32_abs((_S708))) < 0.00100000004749745f)
     {
         *cosT_6 = 1.0f - 2.0f * u1_1;
     }
     else
     {
-        float _S708 = _S707 * _S707;
-        float _S709 = 2.0f * _S707;
-        float s_21 = (1.0f - _S708) / (1.0f - _S707 + _S709 * u1_1);
-        *cosT_6 = (1.0f + _S708 - s_21 * s_21) / _S709;
+        float _S709 = _S708 * _S708;
+        float _S710 = 2.0f * _S708;
+        float s_21 = (1.0f - _S709) / (1.0f - _S708 + _S710 * u1_1);
+        *cosT_6 = (1.0f + _S709 - s_21 * s_21) / _S710;
     }
-    float _S710 = clamp_0(*cosT_6, -1.0f, 1.0f);
-    *cosT_6 = _S710;
-    float sinT_0 = (F32_sqrt(((F32_max((0.0f), (1.0f - _S710 * _S710))))));
+    float _S711 = clamp_0(*cosT_6, -1.0f, 1.0f);
+    *cosT_6 = _S711;
+    float sinT_0 = (F32_sqrt(((F32_max((0.0f), (1.0f - _S711 * _S711))))));
     float phi_0 = 6.28318548202514648f * u2_2;
     float3  w_9 = normalize_0(wo_0);
     float3  a_7;
@@ -6627,14 +6651,14 @@ static __device__ float3  sampleDraine_0(Rng_0 * rng_13, float3  wo_1, float g_2
         {
             break;
         }
-        float _S711 = randFloat_0(rng_13);
-        if((_S711 * (1.0f + a_8)) <= (1.0f + a_8 * *cosT_7 * *cosT_7))
+        float _S712 = randFloat_0(rng_13);
+        if((_S712 * (1.0f + a_8)) <= (1.0f + a_8 * *cosT_7 * *cosT_7))
         {
             break;
         }
-        float3  _S712 = sampleHG_0(rng_13, wo_1, g_25, cosT_7);
+        float3  _S713 = sampleHG_0(rng_13, wo_1, g_25, cosT_7);
         int i_32 = i_31 + int(1);
-        dir_9 = _S712;
+        dir_9 = _S713;
         i_31 = i_32;
     }
     return dir_9;
@@ -6644,54 +6668,54 @@ static __device__ float3  samplePhaseDir_0(PhaseInput_0 * p_35, Rng_0 * rng_14, 
 {
     float cosT_8;
     float3  dir_10;
-    float _S713;
+    float _S714;
     if((p_35->useIce_0) != int(0))
     {
-        float _S714 = randFloat_0(rng_14);
-        if(_S714 < 0.72000002861022949f)
+        float _S715 = randFloat_0(rng_14);
+        if(_S715 < 0.72000002861022949f)
         {
-            float3  _S715 = sampleHG_0(rng_14, wo_2, 0.85000002384185791f, &cosT_8);
-            dir_10 = _S715;
+            float3  _S716 = sampleHG_0(rng_14, wo_2, 0.85000002384185791f, &cosT_8);
+            dir_10 = _S716;
         }
         else
         {
-            float3  _S716 = sampleHG_0(rng_14, wo_2, 0.0f, &cosT_8);
-            dir_10 = _S716;
+            float3  _S717 = sampleHG_0(rng_14, wo_2, 0.0f, &cosT_8);
+            dir_10 = _S717;
         }
         float pdf_1 = 0.72000002861022949f * hg_0(cosT_8, 0.85000002384185791f) + 0.02228168956935406f;
         if(pdf_1 > 9.99999971718068537e-10f)
         {
-            _S713 = phaseIce_0(cosT_8) / pdf_1;
+            _S714 = phaseIce_0(cosT_8) / pdf_1;
         }
         else
         {
-            _S713 = 0.0f;
+            _S714 = 0.0f;
         }
-        *weight_0 = _S713;
+        *weight_0 = _S714;
     }
     else
     {
-        float _S717 = randFloat_0(rng_14);
-        if(_S717 < (p_35->draineW_0))
+        float _S718 = randFloat_0(rng_14);
+        if(_S718 < (p_35->draineW_0))
         {
-            float3  _S718 = sampleDraine_0(rng_14, wo_2, p_35->draineG_0, p_35->draineAlpha_0, &cosT_8);
-            dir_10 = _S718;
-        }
-        else
-        {
-            float3  _S719 = sampleHG_0(rng_14, wo_2, p_35->hgG_0, &cosT_8);
+            float3  _S719 = sampleDraine_0(rng_14, wo_2, p_35->draineG_0, p_35->draineAlpha_0, &cosT_8);
             dir_10 = _S719;
         }
-        float _S720 = phaseLiquid_0(p_35, cosT_8);
-        if(_S720 > 9.99999971718068537e-10f)
+        else
         {
-            _S713 = 1.0f;
+            float3  _S720 = sampleHG_0(rng_14, wo_2, p_35->hgG_0, &cosT_8);
+            dir_10 = _S720;
+        }
+        float _S721 = phaseLiquid_0(p_35, cosT_8);
+        if(_S721 > 9.99999971718068537e-10f)
+        {
+            _S714 = 1.0f;
         }
         else
         {
-            _S713 = 0.0f;
+            _S714 = 0.0f;
         }
-        *weight_0 = _S713;
+        *weight_0 = _S714;
     }
     return dir_10;
 }
@@ -6708,11 +6732,12 @@ struct PathState_0
     int psEvents_0;
     int psCapped_0;
     int psSteps_0;
+    float psSee_0;
 };
 
 static __device__ bool pathScatter_0(Scene_0 * s_22, PhaseInput_0 * ph_1, StructuredBuffer<float> bounds_12, StructuredBuffer<float2 > drift_6, PathState_0 * st_1, float3  p_36, int layer_1, bool nee_0)
 {
-    float3  _S721 = s_22->albedo_0;
+    float3  _S722 = s_22->albedo_0;
     PhaseInput_0 matterPhase_0;
     float3  matterAlbedo_1;
     if(layer_1 != int(0))
@@ -6723,52 +6748,52 @@ static __device__ bool pathScatter_0(Scene_0 * s_22, PhaseInput_0 * ph_1, Struct
     else
     {
         matterPhase_0 = *ph_1;
-        matterAlbedo_1 = _S721;
+        matterAlbedo_1 = _S722;
     }
     if(nee_0)
     {
-        float3  _S722 = s_22->sunDir_0;
-        float _S723 = sceneTransmittance_0(s_22, bounds_12, drift_6, &st_1->psRng_0, p_36 + s_22->sunDir_0 * make_float3 (s_22->shadowOffset_0), s_22->sunDir_0, &st_1->psSteps_0);
-        if(_S723 > 0.0f)
+        float3  _S723 = s_22->sunDir_0;
+        float _S724 = sceneTransmittance_0(s_22, bounds_12, drift_6, &st_1->psRng_0, p_36 + s_22->sunDir_0 * make_float3 (s_22->shadowOffset_0), s_22->sunDir_0, &st_1->psSteps_0);
+        if(_S724 > 0.0f)
         {
-            float _S724 = dot_0(st_1->psDir_0, _S722);
-            PhaseInput_0 _S725 = matterPhase_0;
-            float _S726 = phaseAt_0(&_S725, _S724);
-            float3  _S727 = st_1->psThroughput_0 * matterAlbedo_1 * make_float3 (_S726) * make_float3 (_S723);
-            float3  _S728 = sunIrradianceAt_0(s_22, p_36);
-            st_1->psRadiance_0 = st_1->psRadiance_0 + _S727 * _S728;
+            float _S725 = dot_0(st_1->psDir_0, _S723);
+            PhaseInput_0 _S726 = matterPhase_0;
+            float _S727 = phaseAt_0(&_S726, _S725);
+            float3  _S728 = st_1->psThroughput_0 * matterAlbedo_1 * make_float3 (_S727) * make_float3 (_S724);
+            float3  _S729 = sunIrradianceAt_0(s_22, p_36);
+            st_1->psRadiance_0 = st_1->psRadiance_0 + _S728 * _S729;
         }
     }
-    int _S729 = s_22->ltCount_0;
+    int _S730 = s_22->ltCount_0;
     if((s_22->ltCount_0) > int(0))
     {
-        Rng_0 _S730 = st_1->psRng_0;
-        Rng_0 _S731 = splitRng_0(&_S730, 281U);
-        Rng_0 lr_0 = _S731;
-        LightSample_0 ls_1 = sampleLocalLight_0(s_22->ltBuffer_0, _S729, p_36, &lr_0);
+        Rng_0 _S731 = st_1->psRng_0;
+        Rng_0 _S732 = splitRng_0(&_S731, 281U);
+        Rng_0 lr_0 = _S732;
+        LightSample_0 ls_1 = sampleLocalLight_0(s_22->ltBuffer_0, _S730, p_36, &lr_0);
         if(any_0((ls_1.lsIrradiance_0) > make_float3 (0.0f, 0.0f, 0.0f)))
         {
-            float _S732 = sceneTransmittanceUpTo_0(s_22, bounds_12, drift_6, &lr_0, p_36, ls_1.lsDir_0, ls_1.lsDist_0, &st_1->psSteps_0);
-            if(_S732 > 0.0f)
+            float _S733 = sceneTransmittanceUpTo_0(s_22, bounds_12, drift_6, &lr_0, p_36, ls_1.lsDir_0, ls_1.lsDist_0, &st_1->psSteps_0);
+            if(_S733 > 0.0f)
             {
-                float _S733 = dot_0(st_1->psDir_0, ls_1.lsDir_0);
-                PhaseInput_0 _S734 = matterPhase_0;
-                float _S735 = phaseAt_0(&_S734, _S733);
-                st_1->psRadiance_0 = st_1->psRadiance_0 + st_1->psThroughput_0 * matterAlbedo_1 * make_float3 (_S735) * make_float3 (_S732) * ls_1.lsIrradiance_0;
+                float _S734 = dot_0(st_1->psDir_0, ls_1.lsDir_0);
+                PhaseInput_0 _S735 = matterPhase_0;
+                float _S736 = phaseAt_0(&_S735, _S734);
+                st_1->psRadiance_0 = st_1->psRadiance_0 + st_1->psThroughput_0 * matterAlbedo_1 * make_float3 (_S736) * make_float3 (_S733) * ls_1.lsIrradiance_0;
             }
         }
     }
-    PhaseInput_0 _S736 = matterPhase_0;
+    PhaseInput_0 _S737 = matterPhase_0;
     float w_10;
-    float3  _S737 = samplePhaseDir_0(&_S736, &st_1->psRng_0, st_1->psDir_0, &w_10);
+    float3  _S738 = samplePhaseDir_0(&_S737, &st_1->psRng_0, st_1->psDir_0, &w_10);
     st_1->psThroughput_0 = st_1->psThroughput_0 * (matterAlbedo_1 * make_float3 (w_10));
     st_1->psOrigin_0 = p_36;
-    st_1->psDir_0 = _S737;
+    st_1->psDir_0 = _S738;
     if((st_1->psBounce_0) >= (s_22->rrStartBounce_0))
     {
         float p2_0 = clamp_0((F32_max((st_1->psThroughput_0.x), ((F32_max((st_1->psThroughput_0.y), (st_1->psThroughput_0.z)))))), 0.05000000074505806f, 1.0f);
-        float _S738 = randFloat_0(&st_1->psRng_0);
-        if(_S738 > p2_0)
+        float _S739 = randFloat_0(&st_1->psRng_0);
+        if(_S739 > p2_0)
         {
             return false;
         }
@@ -6777,11 +6802,11 @@ static __device__ bool pathScatter_0(Scene_0 * s_22, PhaseInput_0 * ph_1, Struct
     return true;
 }
 
-static __device__ PathState_0 pathBegin_0(Scene_0 * s_23, PhaseInput_0 * ph_2, StructuredBuffer<float> bounds_13, StructuredBuffer<float2 > drift_7, Rng_0 * rng_15, float3  ro_10, float3  rd_10)
+static __device__ PathState_0 pathBegin_0(Scene_0 * s_23, PhaseInput_0 * ph_2, StructuredBuffer<float> bounds_13, StructuredBuffer<float2 > drift_7, Rng_0 * rng_15, float3  ro_10, float3  rd_10, float tGeo_0)
 {
     PathState_0 st_2;
-    float3  _S739 = make_float3 (0.0f, 0.0f, 0.0f);
-    (&st_2)->psRadiance_0 = _S739;
+    float3  _S740 = make_float3 (0.0f, 0.0f, 0.0f);
+    (&st_2)->psRadiance_0 = _S740;
     (&st_2)->psThroughput_0 = make_float3 (1.0f, 1.0f, 1.0f);
     (&st_2)->psOrigin_0 = ro_10;
     (&st_2)->psDir_0 = rd_10;
@@ -6791,28 +6816,31 @@ static __device__ PathState_0 pathBegin_0(Scene_0 * s_23, PhaseInput_0 * ph_2, S
     (&st_2)->psEvents_0 = int(0);
     (&st_2)->psCapped_0 = int(0);
     (&st_2)->psSteps_0 = int(0);
-    int _S740 = (I32_min((s_23->maxBounces_0), (int(256))));
+    (&st_2)->psSee_0 = 0.0f;
+    int _S741 = (I32_min((s_23->maxBounces_0), (int(256))));
+    bool geo_0 = tGeo_0 < 1.00000001504746622e+30f;
+    float camT_1 = 1.0f;
     bool sunAlongCamera_0;
     if((s_23->neeTentativeScale_0) > 0.0f)
     {
-        sunAlongCamera_0 = _S740 > int(0);
+        sunAlongCamera_0 = _S741 > int(0);
     }
     else
     {
         sunAlongCamera_0 = false;
     }
     int cameraHit_0 = int(0);
-    float3  cameraHitAt_0 = _S739;
+    float3  cameraHitAt_0 = _S740;
     int cameraHitLayer_0 = int(0);
     float cameraResume_0 = 0.0f;
     if(sunAlongCamera_0)
     {
-        Rng_0 _S741 = splitRng_0(rng_15, 1510U);
-        Rng_0 segmentRng_0 = _S741;
-        Rng_0 _S742 = splitRng_0(rng_15, 1511U);
-        Rng_0 _S743 = _S742;
-        float3  _S744 = cameraSegmentSun_0(s_23, ph_2, bounds_13, drift_7, &segmentRng_0, &_S743, ro_10, rd_10, &(&st_2)->psSteps_0, &cameraHit_0, &cameraHitAt_0, &cameraHitLayer_0, &cameraResume_0);
-        (&st_2)->psRadiance_0 = (&st_2)->psRadiance_0 + (&st_2)->psThroughput_0 * _S744;
+        Rng_0 _S742 = splitRng_0(rng_15, 1510U);
+        Rng_0 segmentRng_0 = _S742;
+        Rng_0 _S743 = splitRng_0(rng_15, 1511U);
+        Rng_0 _S744 = _S743;
+        float3  _S745 = cameraSegmentSun_0(s_23, ph_2, bounds_13, drift_7, &segmentRng_0, &_S744, ro_10, rd_10, &(&st_2)->psSteps_0, &cameraHit_0, &cameraHitAt_0, &cameraHitLayer_0, &cameraResume_0, tGeo_0, &camT_1);
+        (&st_2)->psRadiance_0 = (&st_2)->psRadiance_0 + (&st_2)->psThroughput_0 * _S745;
     }
     bool airOn_0;
     if(((&s_23->environment_0)->envMode_0) == int(1))
@@ -6823,9 +6851,9 @@ static __device__ PathState_0 pathBegin_0(Scene_0 * s_23, PhaseInput_0 * ph_2, S
     {
         airOn_0 = false;
     }
-    Rng_0 _S745 = splitRng_0(rng_15, 2590U);
-    Rng_0 airRng_0 = _S745;
-    if(_S740 <= int(0))
+    Rng_0 _S746 = splitRng_0(rng_15, 2590U);
+    Rng_0 airRng_0 = _S746;
+    if(_S741 <= int(0))
     {
         (&st_2)->psCapped_0 = int(1);
         return st_2;
@@ -6843,28 +6871,120 @@ static __device__ PathState_0 pathBegin_0(Scene_0 * s_23, PhaseInput_0 * ph_2, S
     }
     if(collided_0)
     {
-        bool _S746 = cameraHit_0 == int(1);
+        bool _S747 = cameraHit_0 == int(1);
         p_37 = cameraHitAt_0;
         layer_2 = cameraHitLayer_0;
-        collided_0 = _S746;
+        collided_0 = _S747;
     }
     else
     {
         if(sunAlongCamera_0)
         {
-            bool _S747 = sceneFreeFlight_0(s_23, bounds_13, drift_7, &(&st_2)->psRng_0, ro_10 + rd_10 * make_float3 (cameraResume_0), rd_10, &p_37, &layer_2, &(&st_2)->psSteps_0);
-            collided_0 = _S747;
+            bool _S748 = sceneFreeFlight_0(s_23, bounds_13, drift_7, &(&st_2)->psRng_0, ro_10 + rd_10 * make_float3 (cameraResume_0), rd_10, &p_37, &layer_2, &(&st_2)->psSteps_0);
+            collided_0 = _S748;
         }
         else
         {
-            bool _S748 = sceneFreeFlight_0(s_23, bounds_13, drift_7, &(&st_2)->psRng_0, ro_10, rd_10, &p_37, &layer_2, &(&st_2)->psSteps_0);
-            collided_0 = _S748;
+            bool _S749 = sceneFreeFlight_0(s_23, bounds_13, drift_7, &(&st_2)->psRng_0, ro_10, rd_10, &p_37, &layer_2, &(&st_2)->psSteps_0);
+            collided_0 = _S749;
         }
     }
-    float3  env_1;
-    if(!collided_0)
+    bool _S750;
+    if(geo_0)
     {
-        float3  _S749 = pathEnvironment_0(s_23, ro_10, rd_10, true);
+        _S750 = collided_0;
+    }
+    else
+    {
+        _S750 = false;
+    }
+    if(_S750)
+    {
+        _S750 = (dot_0(p_37 - ro_10, rd_10)) > tGeo_0;
+    }
+    else
+    {
+        _S750 = false;
+    }
+    if(_S750)
+    {
+        collided_0 = false;
+    }
+    if(geo_0)
+    {
+        float _S751;
+        if(sunAlongCamera_0)
+        {
+            _S751 = camT_1;
+        }
+        else
+        {
+            if(collided_0)
+            {
+                _S751 = 0.0f;
+            }
+            else
+            {
+                _S751 = 1.0f;
+            }
+        }
+        (&st_2)->psSee_0 = _S751;
+    }
+    bool _S752 = !collided_0;
+    if(_S752)
+    {
+        collided_0 = geo_0;
+    }
+    else
+    {
+        collided_0 = false;
+    }
+    float3  airIn_1;
+    if(collided_0)
+    {
+        if((s_23->clearSky_0) != int(0))
+        {
+            sunAlongCamera_0 = ((&st_2)->psSee_0) >= 1.0f;
+        }
+        else
+        {
+            sunAlongCamera_0 = false;
+        }
+        if(sunAlongCamera_0)
+        {
+            return st_2;
+        }
+        if(airOn_0)
+        {
+            float u1_2 = randFloat_0(&airRng_0);
+            float u2_3 = randFloat_0(&airRng_0);
+            AirSegment_0 _S753 = airSegment_0(&(&s_23->environment_0)->sky_0, ro_10.y, rd_10, tGeo_0, u1_2, u2_3);
+            if((s_23->aerialMode_0) >= int(2))
+            {
+                sunAlongCamera_0 = (s_23->airMapOn_0) != int(0);
+            }
+            else
+            {
+                sunAlongCamera_0 = false;
+            }
+            if(sunAlongCamera_0)
+            {
+                float3  _S754 = airShadowLoss_0(&(&s_23->environment_0)->sky_0, &s_23->airMapIce_0, &s_23->airMapCu_0, ro_10, rd_10, tGeo_0, u2_3);
+                airIn_1 = max_0(_S753.airIn_0 - _S754, _S740);
+            }
+            else
+            {
+                AirSegment_0 _S755 = _S753;
+                float _S756 = airShadow_0(s_23, bounds_13, drift_7, &airRng_0, &_S755, ro_10, rd_10, &(&st_2)->psSteps_0);
+                airIn_1 = _S753.airIn_0 * make_float3 (_S756);
+            }
+            (&st_2)->psRadiance_0 = (&st_2)->psRadiance_0 + (&st_2)->psThroughput_0 * (airIn_1 - make_float3 ((&st_2)->psSee_0) * _S753.airIn_0);
+        }
+        return st_2;
+    }
+    if(_S752)
+    {
+        float3  _S757 = pathEnvironment_0(s_23, ro_10, rd_10, true);
         if(airOn_0)
         {
             sunAlongCamera_0 = (s_23->aerialMode_0) >= int(2);
@@ -6875,35 +6995,36 @@ static __device__ PathState_0 pathBegin_0(Scene_0 * s_23, PhaseInput_0 * ph_2, S
         }
         if(sunAlongCamera_0)
         {
-            float u1_2 = randFloat_0(&airRng_0);
-            float u2_3 = randFloat_0(&airRng_0);
+            float u1_3 = randFloat_0(&airRng_0);
+            float u2_4 = randFloat_0(&airRng_0);
             if((s_23->airMapOn_0) != int(0))
             {
-                float3  _S750 = airShadowLoss_0(&(&s_23->environment_0)->sky_0, &s_23->airMapIce_0, &s_23->airMapCu_0, ro_10, rd_10, 1.00000001504746622e+30f, u2_3);
-                env_1 = max_0(_S749 - _S750, _S739);
+                float3  _S758 = airShadowLoss_0(&(&s_23->environment_0)->sky_0, &s_23->airMapIce_0, &s_23->airMapCu_0, ro_10, rd_10, 1.00000001504746622e+30f, u2_4);
+                airIn_1 = max_0(_S757 - _S758, _S740);
             }
             else
             {
-                AirSegment_0 _S751 = airSegment_0(&(&s_23->environment_0)->sky_0, ro_10.y, rd_10, 1.00000001504746622e+30f, u1_2, u2_3);
-                AirSegment_0 _S752 = _S751;
-                float _S753 = airShadow_0(s_23, bounds_13, drift_7, &airRng_0, &_S752, ro_10, rd_10, &(&st_2)->psSteps_0);
-                env_1 = _S749 - _S751.airIn_0 * make_float3 (1.0f - _S753);
+                AirSegment_0 _S759 = airSegment_0(&(&s_23->environment_0)->sky_0, ro_10.y, rd_10, 1.00000001504746622e+30f, u1_3, u2_4);
+                AirSegment_0 _S760 = _S759;
+                float _S761 = airShadow_0(s_23, bounds_13, drift_7, &airRng_0, &_S760, ro_10, rd_10, &(&st_2)->psSteps_0);
+                airIn_1 = _S757 - _S759.airIn_0 * make_float3 (1.0f - _S761);
             }
         }
         else
         {
-            env_1 = _S749;
+            airIn_1 = _S757;
         }
-        (&st_2)->psRadiance_0 = (&st_2)->psRadiance_0 + (&st_2)->psThroughput_0 * env_1;
+        (&st_2)->psRadiance_0 = (&st_2)->psRadiance_0 + (&st_2)->psThroughput_0 * airIn_1;
         return st_2;
     }
     (&st_2)->psEvents_0 = (&st_2)->psEvents_0 + int(1);
     if(airOn_0)
     {
-        float u1_3 = randFloat_0(&airRng_0);
-        float u2_4 = randFloat_0(&airRng_0);
+        float u1_4 = randFloat_0(&airRng_0);
+        float u2_5 = randFloat_0(&airRng_0);
         float dist_6 = length_0(p_37 - ro_10);
-        AirSegment_0 _S754 = airSegment_0(&(&s_23->environment_0)->sky_0, ro_10.y, rd_10, dist_6, u1_3, u2_4);
+        float _S762 = ro_10.y;
+        AirSegment_0 _S763 = airSegment_0(&(&s_23->environment_0)->sky_0, _S762, rd_10, dist_6, u1_4, u2_5);
         if((s_23->aerialMode_0) >= int(2))
         {
             airOn_0 = (s_23->airMapOn_0) != int(0);
@@ -6914,20 +7035,25 @@ static __device__ PathState_0 pathBegin_0(Scene_0 * s_23, PhaseInput_0 * ph_2, S
         }
         if(airOn_0)
         {
-            float3  _S755 = airShadowLoss_0(&(&s_23->environment_0)->sky_0, &s_23->airMapIce_0, &s_23->airMapCu_0, ro_10, rd_10, dist_6, u2_4);
-            env_1 = max_0(_S754.airIn_0 - _S755, _S739);
+            float3  _S764 = airShadowLoss_0(&(&s_23->environment_0)->sky_0, &s_23->airMapIce_0, &s_23->airMapCu_0, ro_10, rd_10, dist_6, u2_5);
+            airIn_1 = max_0(_S763.airIn_0 - _S764, _S740);
         }
         else
         {
-            AirSegment_0 _S756 = _S754;
-            float _S757 = airShadow_0(s_23, bounds_13, drift_7, &airRng_0, &_S756, ro_10, rd_10, &(&st_2)->psSteps_0);
-            env_1 = _S754.airIn_0 * make_float3 (_S757);
+            AirSegment_0 _S765 = _S763;
+            float _S766 = airShadow_0(s_23, bounds_13, drift_7, &airRng_0, &_S765, ro_10, rd_10, &(&st_2)->psSteps_0);
+            airIn_1 = _S763.airIn_0 * make_float3 (_S766);
         }
-        (&st_2)->psRadiance_0 = (&st_2)->psRadiance_0 + (&st_2)->psThroughput_0 * env_1;
-        (&st_2)->psThroughput_0 = (&st_2)->psThroughput_0 * _S754.airT_0;
+        (&st_2)->psRadiance_0 = (&st_2)->psRadiance_0 + (&st_2)->psThroughput_0 * airIn_1;
+        if(geo_0)
+        {
+            AirSegment_0 _S767 = airSegment_0(&(&s_23->environment_0)->sky_0, _S762, rd_10, tGeo_0, u1_4, u2_5);
+            (&st_2)->psRadiance_0 = (&st_2)->psRadiance_0 - (&st_2)->psThroughput_0 * (make_float3 ((&st_2)->psSee_0) * _S767.airIn_0);
+        }
+        (&st_2)->psThroughput_0 = (&st_2)->psThroughput_0 * _S763.airT_0;
     }
-    bool _S758 = pathScatter_0(s_23, ph_2, bounds_13, drift_7, &st_2, p_37, layer_2, !sunAlongCamera_0);
-    if(_S758)
+    bool _S768 = pathScatter_0(s_23, ph_2, bounds_13, drift_7, &st_2, p_37, layer_2, !sunAlongCamera_0);
+    if(_S768)
     {
         (&st_2)->psBounce_0 = int(1);
         (&st_2)->psAlive_0 = int(1);
@@ -6949,18 +7075,18 @@ static __device__ void pathBounce_0(Scene_0 * s_24, PhaseInput_0 * ph_3, Structu
     }
     float3  p_38;
     int layer_3;
-    bool _S759 = sceneFreeFlight_0(s_24, bounds_14, drift_8, &st_3->psRng_0, st_3->psOrigin_0, st_3->psDir_0, &p_38, &layer_3, &st_3->psSteps_0);
-    if(!_S759)
+    bool _S769 = sceneFreeFlight_0(s_24, bounds_14, drift_8, &st_3->psRng_0, st_3->psOrigin_0, st_3->psDir_0, &p_38, &layer_3, &st_3->psSteps_0);
+    if(!_S769)
     {
-        float3  _S760 = st_3->psThroughput_0;
-        float3  _S761 = pathEnvironment_0(s_24, st_3->psOrigin_0, st_3->psDir_0, false);
-        st_3->psRadiance_0 = st_3->psRadiance_0 + _S760 * _S761;
+        float3  _S770 = st_3->psThroughput_0;
+        float3  _S771 = pathEnvironment_0(s_24, st_3->psOrigin_0, st_3->psDir_0, false);
+        st_3->psRadiance_0 = st_3->psRadiance_0 + _S770 * _S771;
         st_3->psAlive_0 = int(0);
         return;
     }
     st_3->psEvents_0 = st_3->psEvents_0 + int(1);
-    bool _S762 = pathScatter_0(s_24, ph_3, bounds_14, drift_8, st_3, p_38, layer_3, true);
-    if(_S762)
+    bool _S772 = pathScatter_0(s_24, ph_3, bounds_14, drift_8, st_3, p_38, layer_3, true);
+    if(_S772)
     {
         st_3->psBounce_0 = st_3->psBounce_0 + int(1);
     }
@@ -6977,26 +7103,27 @@ struct TraceResult_0
     int scatterEvents_0;
     int capped_0;
     int trackingSteps_0;
+    float sceneSee_0;
 };
 
-static __device__ TraceResult_0 trace_0(Scene_0 * s_25, PhaseInput_0 * ph_4, StructuredBuffer<float> bounds_15, StructuredBuffer<float2 > drift_9, Rng_0 * rng_16, float3  ro_11, float3  rd_11)
+static __device__ TraceResult_0 traceTo_0(Scene_0 * s_25, PhaseInput_0 * ph_4, StructuredBuffer<float> bounds_15, StructuredBuffer<float2 > drift_9, Rng_0 * rng_16, float3  ro_11, float3  rd_11, float tGeo_1)
 {
-    Rng_0 _S763 = *rng_16;
-    PathState_0 _S764 = pathBegin_0(s_25, ph_4, bounds_15, drift_9, &_S763, ro_11, rd_11);
-    PathState_0 st_4 = _S764;
+    Rng_0 _S773 = *rng_16;
+    PathState_0 _S774 = pathBegin_0(s_25, ph_4, bounds_15, drift_9, &_S773, ro_11, rd_11, tGeo_1);
+    PathState_0 st_4 = _S774;
     int i_33 = int(1);
     for(;;)
     {
-        bool _S765;
+        bool _S775;
         if(i_33 < int(256))
         {
-            _S765 = ((&st_4)->psAlive_0) != int(0);
+            _S775 = ((&st_4)->psAlive_0) != int(0);
         }
         else
         {
-            _S765 = false;
+            _S775 = false;
         }
-        if(_S765)
+        if(_S775)
         {
         }
         else
@@ -7016,14 +7143,15 @@ static __device__ TraceResult_0 trace_0(Scene_0 * s_25, PhaseInput_0 * ph_4, Str
     (&r_14)->scatterEvents_0 = (&st_4)->psEvents_0;
     (&r_14)->capped_0 = (&st_4)->psCapped_0;
     (&r_14)->trackingSteps_0 = (&st_4)->psSteps_0;
+    (&r_14)->sceneSee_0 = (&st_4)->psSee_0;
     return r_14;
 }
 
-static __device__ float3  renderSample_0(Scene_0 * s_26, PhaseInput_0 * ph_5, StructuredBuffer<float> bounds_16, StructuredBuffer<float2 > drift_10, float3  ro_12, float3  rd_12, uint seed_1)
+static __device__ float4  renderSample_0(Scene_0 * s_26, PhaseInput_0 * ph_5, StructuredBuffer<float> bounds_16, StructuredBuffer<float2 > drift_10, float3  ro_12, float3  rd_12, uint seed_1, float tGeo_2)
 {
     Rng_0 rng_17 = makeRng_0(seed_1);
-    TraceResult_0 _S766 = trace_0(s_26, ph_5, bounds_16, drift_10, &rng_17, ro_12, rd_12);
-    return _S766.pathRadiance_0;
+    TraceResult_0 _S776 = traceTo_0(s_26, ph_5, bounds_16, drift_10, &rng_17, ro_12, rd_12, tGeo_2);
+    return make_float4 (_S776.pathRadiance_0.x, _S776.pathRadiance_0.y, _S776.pathRadiance_0.z, _S776.sceneSee_0);
 }
 
 extern "C" __global__ void renderRays(Scene_0 scene_0, PhaseInput_0 phase_0, StructuredBuffer<float> bounds_17, StructuredBuffer<float2 > drift_11, StructuredBuffer<float3 > origins_0, StructuredBuffer<float3 > directions_0, RWStructuredBuffer<float3 > outRadiance_0, uint seed_2, int count_1)
@@ -7033,22 +7161,22 @@ extern "C" __global__ void renderRays(Scene_0 scene_0, PhaseInput_0 phase_0, Str
     {
         return;
     }
-    float3  * _S767 = (&(outRadiance_0)[i_34]);
-    float3  _S768 = slang_ldg_0((&(origins_0)[i_34]));
-    float3  _S769 = slang_ldg_0((&(directions_0)[i_34]));
-    uint _S770 = seed_2 + uint(i_34);
-    Scene_0 _S771 = scene_0;
-    PhaseInput_0 _S772 = phase_0;
-    float3  _S773 = renderSample_0(&_S771, &_S772, bounds_17, drift_11, _S768, _S769, _S770);
-    *_S767 = _S773;
+    float3  * _S777 = (&(outRadiance_0)[i_34]);
+    float3  _S778 = slang_ldg_0((&(origins_0)[i_34]));
+    float3  _S779 = slang_ldg_0((&(directions_0)[i_34]));
+    uint _S780 = seed_2 + uint(i_34);
+    Scene_0 _S781 = scene_0;
+    PhaseInput_0 _S782 = phase_0;
+    float4  _S783 = renderSample_0(&_S781, &_S782, bounds_17, drift_11, _S778, _S779, _S780, 1.00000001504746622e+30f);
+    *_S777 = float3 {_S783.x, _S783.y, _S783.z};
     return;
 }
 
-static __device__ PathState_0 beginSample_0(Scene_0 * s_27, PhaseInput_0 * ph_6, StructuredBuffer<float> bounds_18, StructuredBuffer<float2 > drift_12, float3  ro_13, float3  rd_13, uint seed_3)
+static __device__ PathState_0 beginSample_0(Scene_0 * s_27, PhaseInput_0 * ph_6, StructuredBuffer<float> bounds_18, StructuredBuffer<float2 > drift_12, float3  ro_13, float3  rd_13, uint seed_3, float tGeo_3)
 {
-    Rng_0 _S774 = makeRng_0(seed_3);
-    PathState_0 _S775 = pathBegin_0(s_27, ph_6, bounds_18, drift_12, &_S774, ro_13, rd_13);
-    return _S775;
+    Rng_0 _S784 = makeRng_0(seed_3);
+    PathState_0 _S785 = pathBegin_0(s_27, ph_6, bounds_18, drift_12, &_S784, ro_13, rd_13, tGeo_3);
+    return _S785;
 }
 
 extern "C" __global__ void beginPaths(Scene_0 scene_1, PhaseInput_0 phase_1, StructuredBuffer<float> bounds_19, StructuredBuffer<float2 > drift_13, StructuredBuffer<float3 > origins_1, StructuredBuffer<float3 > directions_1, RWStructuredBuffer<PathState_0> paths_0, uint seed_4, int count_2)
@@ -7058,14 +7186,14 @@ extern "C" __global__ void beginPaths(Scene_0 scene_1, PhaseInput_0 phase_1, Str
     {
         return;
     }
-    PathState_0 * _S776 = (&(paths_0)[i_35]);
-    float3  _S777 = slang_ldg_0((&(origins_1)[i_35]));
-    float3  _S778 = slang_ldg_0((&(directions_1)[i_35]));
-    uint _S779 = seed_4 + uint(i_35);
-    Scene_0 _S780 = scene_1;
-    PhaseInput_0 _S781 = phase_1;
-    PathState_0 _S782 = beginSample_0(&_S780, &_S781, bounds_19, drift_13, _S777, _S778, _S779);
-    *_S776 = _S782;
+    PathState_0 * _S786 = (&(paths_0)[i_35]);
+    float3  _S787 = slang_ldg_0((&(origins_1)[i_35]));
+    float3  _S788 = slang_ldg_0((&(directions_1)[i_35]));
+    uint _S789 = seed_4 + uint(i_35);
+    Scene_0 _S790 = scene_1;
+    PhaseInput_0 _S791 = phase_1;
+    PathState_0 _S792 = beginSample_0(&_S790, &_S791, bounds_19, drift_13, _S787, _S788, _S789, 1.00000001504746622e+30f);
+    *_S786 = _S792;
     return;
 }
 
@@ -7077,48 +7205,48 @@ extern "C" __global__ void bouncePaths(Scene_0 scene_2, PhaseInput_0 phase_2, St
         return;
     }
     PathState_0 st_5 = *(&(paths_1)[i_36]);
-    Scene_0 _S783 = scene_2;
-    PhaseInput_0 _S784 = phase_2;
-    pathBounce_0(&_S783, &_S784, bounds_20, drift_14, &st_5);
+    Scene_0 _S793 = scene_2;
+    PhaseInput_0 _S794 = phase_2;
+    pathBounce_0(&_S793, &_S794, bounds_20, drift_14, &st_5);
     *(&(paths_1)[i_36]) = st_5;
     return;
 }
 
 static __device__ void layerMapColumn_0(Medium_0 * med_0, StructuredBuffer<float2 > drift_15, LayerShadowMap_0 * m_18, int texel_0, RWStructuredBuffer<float> outTexels_0)
 {
-    int _S785 = m_18->smDimU_0;
+    int _S795 = m_18->smDimU_0;
     int stride_0 = m_18->smDimU_0 * m_18->smDimV_0;
-    bool _S786;
+    bool _S796;
     if(texel_0 < int(0))
     {
-        _S786 = true;
+        _S796 = true;
     }
     else
     {
-        _S786 = texel_0 >= stride_0;
+        _S796 = texel_0 >= stride_0;
     }
-    if(_S786)
+    if(_S796)
     {
         return;
     }
-    int iu_1 = texel_0 % _S785;
-    int iv_1 = texel_0 / _S785;
-    float2  _S787 = m_18->smLo_0;
-    float2  _S788 = m_18->smTexel_0;
-    float2  _S789 = m_18->smCentre_0 + m_18->smAxisU_0 * make_float2 (m_18->smLo_0.x + (float(iu_1) + 0.5f) * m_18->smTexel_0.x);
-    float2  _S790 = airMapAxisV_0(m_18);
-    float2  q_15 = _S789 + _S790 * make_float2 (_S787.y + (float(iv_1) + 0.5f) * _S788.y);
+    int iu_1 = texel_0 % _S795;
+    int iv_1 = texel_0 / _S795;
+    float2  _S797 = m_18->smLo_0;
+    float2  _S798 = m_18->smTexel_0;
+    float2  _S799 = m_18->smCentre_0 + m_18->smAxisU_0 * make_float2 (m_18->smLo_0.x + (float(iu_1) + 0.5f) * m_18->smTexel_0.x);
+    float2  _S800 = airMapAxisV_0(m_18);
+    float2  q_15 = _S799 + _S800 * make_float2 (_S797.y + (float(iv_1) + 0.5f) * _S798.y);
     float3  base_0 = make_float3 (q_15.x, m_18->smBottom_0, q_15.y);
-    float3  _S791 = m_18->smSun_0;
-    int _S792 = m_18->smSlices_0;
-    int _S793 = m_18->smSlices_0 - int(1);
-    float _S794 = (m_18->smTop_0 - m_18->smBottom_0) / (float(_S793) * m_18->smSun_0.y);
-    float _S795 = (F32_max((m_18->smStep_0), (1.0f)));
+    float3  _S801 = m_18->smSun_0;
+    int _S802 = m_18->smSlices_0;
+    int _S803 = m_18->smSlices_0 - int(1);
+    float _S804 = (m_18->smTop_0 - m_18->smBottom_0) / (float(_S803) * m_18->smSun_0.y);
+    float _S805 = (F32_max((m_18->smStep_0), (1.0f)));
     float t0_6;
     float t1_6;
-    bool _S796 = slabRange_0(med_0, base_0, m_18->smSun_0, &t0_6, &t1_6);
-    *(&(outTexels_0)[_S793 * stride_0 + texel_0]) = 1.0f;
-    int k_14 = _S792 - int(2);
+    bool _S806 = slabRange_0(med_0, base_0, m_18->smSun_0, &t0_6, &t1_6);
+    *(&(outTexels_0)[_S803 * stride_0 + texel_0]) = 1.0f;
+    int k_14 = _S802 - int(2);
     float tau_0 = 0.0f;
     for(;;)
     {
@@ -7129,24 +7257,24 @@ static __device__ void layerMapColumn_0(Medium_0 * med_0, StructuredBuffer<float
         {
             break;
         }
-        if(_S796)
+        if(_S806)
         {
-            _S786 = tau_0 < 12.0f;
+            _S796 = tau_0 < 12.0f;
         }
         else
         {
-            _S786 = false;
+            _S796 = false;
         }
         float tau_1;
-        if(_S786)
+        if(_S796)
         {
-            float _S797 = (F32_max((float(k_14) * _S794), (t0_6)));
-            float _S798 = (F32_min((float(k_14 + int(1)) * _S794), (t1_6)));
-            if(_S798 > _S797)
+            float _S807 = (F32_max((float(k_14) * _S804), (t0_6)));
+            float _S808 = (F32_min((float(k_14 + int(1)) * _S804), (t1_6)));
+            if(_S808 > _S807)
             {
-                float _S799 = _S798 - _S797;
-                int n_0 = clamp_1(int((F32_ceil((_S799 / _S795)))), int(1), int(1024));
-                float _S800 = _S799 / float(n_0);
+                float _S809 = _S808 - _S807;
+                int n_0 = clamp_1(int((F32_ceil((_S809 / _S805)))), int(1), int(1024));
+                float _S810 = _S809 / float(n_0);
                 int j_13 = int(0);
                 tau_1 = tau_0;
                 for(;;)
@@ -7158,8 +7286,8 @@ static __device__ void layerMapColumn_0(Medium_0 * med_0, StructuredBuffer<float
                     {
                         break;
                     }
-                    float _S801 = densityAt_0(med_0, drift_15, base_0 + _S791 * make_float3 (_S797 + (float(j_13) + 0.5f) * _S800));
-                    float tau_2 = tau_1 + _S801 * _S800;
+                    float _S811 = densityAt_0(med_0, drift_15, base_0 + _S801 * make_float3 (_S807 + (float(j_13) + 0.5f) * _S810));
+                    float tau_2 = tau_1 + _S811 * _S810;
                     j_13 = j_13 + int(1);
                     tau_1 = tau_2;
                 }
@@ -7173,17 +7301,17 @@ static __device__ void layerMapColumn_0(Medium_0 * med_0, StructuredBuffer<float
         {
             tau_1 = tau_0;
         }
-        float * _S802 = (&(outTexels_0)[k_14 * stride_0 + texel_0]);
-        float _S803;
+        float * _S812 = (&(outTexels_0)[k_14 * stride_0 + texel_0]);
+        float _S813;
         if(tau_1 < 12.0f)
         {
-            _S803 = (F32_exp((- tau_1)));
+            _S813 = (F32_exp((- tau_1)));
         }
         else
         {
-            _S803 = 0.0f;
+            _S813 = 0.0f;
         }
-        *_S802 = _S803;
+        *_S812 = _S813;
         k_14 = k_14 - int(1);
         tau_0 = tau_1;
     }
@@ -7197,9 +7325,9 @@ extern "C" __global__ void buildAirMap(Medium_0 medium_1, StructuredBuffer<float
     {
         return;
     }
-    Medium_0 _S804 = medium_1;
-    LayerShadowMap_0 _S805 = map_1;
-    layerMapColumn_0(&_S804, drift_16, &_S805, i_37, outTexels_1);
+    Medium_0 _S814 = medium_1;
+    LayerShadowMap_0 _S815 = map_1;
+    layerMapColumn_0(&_S814, drift_16, &_S815, i_37, outTexels_1);
     return;
 }
 

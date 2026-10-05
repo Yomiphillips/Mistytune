@@ -556,3 +556,129 @@ PL_TEST(TheBlendLeavesAlphaAloneAtEveryAmount) {
                 PL_CHECK_EQ(f.at(x, y)[3], alphaBefore[i]);
     }
 }
+
+// ---------------------------------------------------------------------------
+// The crop round the alpha (build 31). No library needed: it is a pure function of the
+// buffer, and denoiseCpu filters only what it returns.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A zeroed W x H frame, ARGB or BGRA, pitch W + 3 so a crop that ignored the pitch would show.
+struct CropFrame {
+    int w, h, pitch;
+    std::vector<float> px;
+    cloud::DenoiseOrder order;
+    CropFrame(int w_, int h_, cloud::DenoiseOrder o)
+        : w(w_), h(h_), pitch(w_ + 3), px(static_cast<size_t>(w_ + 3) * h_ * 4, 0.0f), order(o) {}
+    void alpha(int x, int y, float a) {
+        px[(static_cast<size_t>(y) * pitch + x) * 4 + (order == cloud::DenoiseOrder::BgraFloat4 ? 3 : 0)] = a;
+    }
+    cloud::DenoiseImage image() {
+        cloud::DenoiseImage img;
+        img.data = px.data();
+        img.widthPx = w;
+        img.heightPx = h;
+        img.pitchPx = pitch;
+        img.order = order;
+        img.alphaGuide = true;
+        return img;
+    }
+};
+
+} // namespace
+
+PL_TEST(NoAlphaAnywhereIsNothingToDenoise) {
+    CropFrame f(300, 200, cloud::DenoiseOrder::ArgbFloat4);
+    const cloud::DenoiseCrop c = cloud::alphaCrop(f.image());
+    PL_CHECK_EQ(c.width, 0);
+}
+
+PL_TEST(TheCropHoldsTheAlphaWithItsMarginInWholeSteps) {
+    for (cloud::DenoiseOrder o : { cloud::DenoiseOrder::ArgbFloat4, cloud::DenoiseOrder::BgraFloat4 }) {
+        CropFrame f(1000, 600, o);
+        f.alpha(400, 300, 0.5f);
+        f.alpha(470, 340, 1.0f);
+        const cloud::DenoiseCrop c = cloud::alphaCrop(f.image(), 32, 128);
+        // Every alpha pixel inside, with the margin clear round it...
+        PL_CHECK(c.x <= 400 - 32 && c.x + c.width >= 471 + 32);
+        PL_CHECK(c.y <= 300 - 32 && c.y + c.height >= 341 + 32);
+        // ...the size a whole number of steps, and inside the frame.
+        PL_CHECK_EQ(c.width % 128, 0);
+        PL_CHECK_EQ(c.height % 128, 0);
+        PL_CHECK(c.x >= 0 && c.y >= 0 && c.x + c.width <= 1000 && c.y + c.height <= 600);
+        // Far smaller than the frame: the point of it.
+        PL_CHECK(c.width <= 256 && c.height <= 256);
+    }
+}
+
+PL_TEST(ACropAtTheEdgeSlidesInsideRatherThanShrinking) {
+    CropFrame f(1000, 600, cloud::DenoiseOrder::ArgbFloat4);
+    f.alpha(999, 599, 1.0f);
+    const cloud::DenoiseCrop c = cloud::alphaCrop(f.image(), 32, 128);
+    PL_CHECK_EQ(c.width, 128);
+    PL_CHECK_EQ(c.height, 128);
+    PL_CHECK_EQ(c.x + c.width, 1000);
+    PL_CHECK_EQ(c.y + c.height, 600);
+}
+
+PL_TEST(ACropPastTheFrameIsTheWholeFrame) {
+    CropFrame f(200, 100, cloud::DenoiseOrder::ArgbFloat4);
+    f.alpha(0, 0, 1.0f);
+    f.alpha(199, 99, 1.0f);
+    const cloud::DenoiseCrop c = cloud::alphaCrop(f.image(), 32, 128);
+    PL_CHECK(c.x == 0 && c.y == 0 && c.width == 200 && c.height == 100);
+}
+
+PL_TEST(TheCroppedImageIsAWindowIntoTheSameBuffer) {
+    CropFrame f(300, 200, cloud::DenoiseOrder::ArgbFloat4);
+    f.alpha(150, 100, 1.0f);
+    const cloud::DenoiseImage img = f.image();
+    const cloud::DenoiseCrop c = cloud::alphaCrop(img, 8, 16);
+    const cloud::DenoiseImage w = cloud::croppedTo(img, c);
+    PL_CHECK_EQ(w.pitchPx, img.pitchPx);
+    PL_CHECK_EQ(w.widthPx, c.width);
+    PL_CHECK_EQ(w.heightPx, c.height);
+    PL_CHECK(w.alphaGuide);
+    const float* corner = w.data + (static_cast<size_t>(100 - c.y) * w.pitchPx + (150 - c.x)) * 4;
+    PL_CHECK_EQ(corner[0], 1.0f);
+}
+
+PL_TEST(TheCloudsAlonesPinholesFillButADepthPassesZerosStay) {
+    // Build 31. A 64x64 frame: a grey disc of alpha 1 with every seventh pixel inside it a
+    // hole -- alpha 0, colour 0, one sample that missed -- and clear sky round it. With a depth
+    // pass a zero is a building and must stay; for the clouds alone the holes are noise and
+    // the denoised alpha fills them. The clear sky round the disc is exactly zero either way.
+    if (!cloud::denoiserAvailable()) return;
+    for (bool exact : { true, false }) {
+        CropFrame f(64, 64, cloud::DenoiseOrder::ArgbFloat4);
+        std::vector<int> holes;
+        for (int y = 0; y < 64; ++y)
+            for (int x = 0; x < 64; ++x) {
+                const int dx = x - 32, dy = y - 32;
+                if (dx * dx + dy * dy > 20 * 20) continue;
+                const int k = y * 64 + x;
+                if (k % 7 == 0) { holes.push_back(k); continue; }
+                float* p = &f.px[(static_cast<size_t>(y) * f.pitch + x) * 4];
+                p[0] = 1.0f; p[1] = p[2] = p[3] = 0.6f;
+            }
+        cloud::DenoiseImage img = f.image();
+        img.exactZeros = exact;
+        PL_CHECK_EQ(cloud::denoiseFrame(img), true);
+
+        double holeAlpha = 0.0;
+        for (int k : holes) holeAlpha += f.px[(static_cast<size_t>(k / 64) * f.pitch + k % 64) * 4];
+        holeAlpha /= static_cast<double>(holes.size());
+        std::printf("    exactZeros %d: mean alpha in the holes %.3f\n", exact ? 1 : 0, holeAlpha);
+        if (exact) PL_CHECK(holeAlpha == 0.0);
+        else       PL_CHECK(holeAlpha > 0.5);
+
+        for (int y = 0; y < 64; ++y)
+            for (int x = 0; x < 64; ++x) {
+                const int dx = x - 32, dy = y - 32;
+                if (dx * dx + dy * dy < 28 * 28) continue;
+                const float* p = &f.px[(static_cast<size_t>(y) * f.pitch + x) * 4];
+                PL_CHECK(p[0] == 0.0f && p[1] == 0.0f && p[2] == 0.0f && p[3] == 0.0f);
+            }
+    }
+}

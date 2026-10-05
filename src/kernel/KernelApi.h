@@ -13,6 +13,7 @@
 #include "RenderRequest.h"
 #include "../engine/LocalLights.h"
 #include "../engine/Pareidolia.h"
+#include "../engine/SceneDepth.h"
 
 #include <vector>
 
@@ -123,6 +124,16 @@ inline void deriveRenderInputs(RenderRequest& req) {
     req.lightFloats = lights ? static_cast<int>(ls->packed.size()) : 0;
     req.lightHash   = lights ? ls->hash : 0;
     for (int c = 0; c < 3; ++c) req.ambientLight[c] = ls ? ls->ambient[c] : 0.0f;
+
+    // THE SCENE'S DEPTH PASS (build 30): the texels' HOST address, which renderCuda swaps for
+    // a device copy. A map with no geometry in it is no map.
+    const cloud::SceneDepthMap* sd = req.sceneDepth;
+    const bool scene = sd && !sd->empty() &&
+                       sd->texels.size() >= static_cast<size_t>(sd->width) * sd->height * 2;
+    req.sceneBuffer = scene ? sd->texels.data() : nullptr;
+    req.sceneWidth  = scene ? sd->width : 0;
+    req.sceneHeight = scene ? sd->height : 0;
+    req.sceneHash   = scene ? sd->hash : 0;
 }
 
 // Was this binary built with a CUDA toolkit, and is a usable device present?

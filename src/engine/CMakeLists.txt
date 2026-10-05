@@ -74,6 +74,11 @@ add_library(plugin_engine STATIC
     LocalLights.h
     LocalLights.cpp
 
+    # Scene integration (build 30): a depth pass of the footage, in metres, that stops the
+    # camera ray at the geometry -- holdout and composite.
+    SceneDepth.h
+    SceneDepth.cpp
+
     # The classifier readout: the sky the parameters describe, named by genus and
     # species. Rule-based and host-free, per PLAN.md, so every rule has a test.
     Classifier.h

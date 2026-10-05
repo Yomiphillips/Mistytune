@@ -35,7 +35,7 @@ void cpuRenderRays(uint3 tid : SV_DispatchThreadID,
     if (i >= count) return;
 
     outRadiance[i] = renderSample(scene, phase, bounds, drift,
-                                  origins[i], directions[i], seed + uint(i));
+                                  origins[i], directions[i], seed + uint(i), kNoGeometry).xyz;
 }
 
 // The twin of Render.slang's buildAirMap, named apart for the same `extern "C"` reason.

@@ -89,7 +89,7 @@ struct CpuVectors {
 // ever stop agreeing, slang.cpuParity is what says so, and tests/golden/ is what
 // stops a CPU reference certifying a GPU render it no longer matches.
 MT_RENDER Vec3 mistytuneTrace(const RenderRequest& req, Vec3 ro, Vec3 rd,
-                              unsigned int seed) {
+                              unsigned int seed, float tGeo, float& see) {
     namespace be = mistytune_cpu_backend;
 
     be::Scene_0      scene{};
@@ -105,12 +105,13 @@ MT_RENDER Vec3 mistytuneTrace(const RenderRequest& req, Vec3 ro, Vec3 rd,
                      const_cast<void*>(req.driftBuffer));
     drift.count = static_cast<size_t>(cloud::kDriftKnots);
 
-    const be::Vector<float, 3> radiance =
+    const be::Vector<float, 4> radiance =
         be::renderSample_0(&scene, &phase, bounds, drift,
                            CpuVectors::v3(ro.x, ro.y, ro.z),
                            CpuVectors::v3(rd.x, rd.y, rd.z),
-                           seed);
+                           seed, tGeo);
 
+    see = radiance.w;
     return vec3(radiance.x, radiance.y, radiance.z);
 }
 
@@ -533,6 +534,25 @@ bool denoiseCpu(const RenderRequest& req) {
     img.order = (req.dest.order == ChannelOrder::BGRA)
               ? cloud::DenoiseOrder::BgraFloat4
               : cloud::DenoiseOrder::ArgbFloat4;
+
+    // A DEPTH PASS'S GEOMETRY IN THE FRAME (build 30): its alpha guides the filter. The
+    // caller's request, so the host map rather than the derived buffer says so. AND A
+    // TRANSPARENT BACKGROUND (build 31), whose open sky is geometry at infinity.
+    const bool depthPass = req.sceneDepth != nullptr && !req.sceneDepth->empty();
+    img.alphaGuide = depthPass || req.view.transparentSky;
+
+    // A DEPTH PASS'S ZERO IS A BUILDING, AND STAYS ZERO; THE OPEN SKY'S IS ONE SAMPLE MISSING A
+    // CLOUD'S EDGE. See DenoiseImage::exactZeros.
+    img.exactZeros = depthPass;
+
+    // ONLY THE BOX ROUND WHAT HAS ALPHA (build 31): outside it the guided filter's answer is
+    // exactly zero whatever it does. A frame with no alpha anywhere is already its own
+    // denoised self.
+    if (img.alphaGuide) {
+        const cloud::DenoiseCrop crop = cloud::alphaCrop(img);
+        if (crop.width <= 0 || crop.height <= 0) return true;
+        img = cloud::croppedTo(img, crop);
+    }
 
     return cloud::denoiseFrame(img);
 }

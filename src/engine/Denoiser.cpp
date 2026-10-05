@@ -268,18 +268,37 @@ struct Session {
     int        filterH = 0;
     std::vector<float> staging;   // packed RGB, three floats per pixel
 
+    // THE ALPHA GUIDE (build 30): its own buffer, and whether the filter is bound with it.
+    OIDNBuffer guide = nullptr;
+    size_t     guideBytes = 0;
+    bool       filterGuided = false;
+    std::vector<float> guideStaging;
+
+    // ...and the alpha's own filter, which denoises the guide in place before the colour's
+    // filter reads it. Low dynamic range: an alpha is 0..1.
+    OIDNFilter alphaFilter = nullptr;
+    int        alphaFilterW = 0;
+    int        alphaFilterH = 0;
+
     ~Session() { release(); }
 
     void release() {
         const Api& a = api();
         if (!a.ok) { device = nullptr; filter = nullptr; buffer = nullptr; return; }
         if (filter) { a.releaseFilter(filter); filter = nullptr; }
+        if (alphaFilter) { a.releaseFilter(alphaFilter); alphaFilter = nullptr; }
         if (buffer) { a.releaseBuffer(buffer); buffer = nullptr; }
+        if (guide)  { a.releaseBuffer(guide);  guide = nullptr; }
         if (device) { a.releaseDevice(device); device = nullptr; }
         bufferBytes = 0;
+        guideBytes = 0;
+        filterGuided = false;
+        alphaFilterW = alphaFilterH = 0;
         filterW = filterH = 0;
         staging.clear();
         staging.shrink_to_fit();
+        guideStaging.clear();
+        guideStaging.shrink_to_fit();
     }
 };
 
@@ -304,6 +323,10 @@ const char* denoiserDescription() { return api().description.c_str(); }
 
 void denoiserShutdown() { session().release(); }
 
+// A DENOISED ALPHA BELOW HALF AN 8-BIT LEVEL IS NOTHING: what the filter leaves over a clear
+// stretch of sky is noise of its own, and would lay a faint film over the layers underneath.
+constexpr float kAlphaNothing = 0.5f / 255.0f;
+
 bool denoiseFrame(const DenoiseImage& img) {
     const Api& a = api();
     if (!a.ok) return false;
@@ -324,6 +347,8 @@ bool denoiseFrame(const DenoiseImage& img) {
         a.commitDevice(s.device);
         if (!deviceClean(a, s.device)) { s.release(); return false; }
     }
+
+    const bool guided = img.alphaGuide;
 
     const size_t pixels = static_cast<size_t>(img.widthPx) *
                           static_cast<size_t>(img.heightPx);
@@ -373,10 +398,56 @@ bool denoiseFrame(const DenoiseImage& img) {
 
     a.writeBuffer(s.buffer, 0, bytes, s.staging.data());
 
+    // THE ALPHA GUIDE, packed grey: see DenoiseImage::alphaGuide.
+    if (guided) {
+        if (s.guideStaging.size() != pixels * 3) s.guideStaging.resize(pixels * 3);
+        for (int y = 0; y < img.heightPx; ++y) {
+            const float* src = img.data + static_cast<size_t>(y) * img.pitchPx * 4;
+            float* dst = s.guideStaging.data() + static_cast<size_t>(y) * img.widthPx * 3;
+            for (int x = 0; x < img.widthPx; ++x) {
+                float al = src[static_cast<size_t>(x) * 4 + (bgra ? 3 : 0)];
+                al = al > 0.0f ? (al < 1.0f ? al : 1.0f) : 0.0f;   // NaN is 0
+                dst[x * 3 + 0] = dst[x * 3 + 1] = dst[x * 3 + 2] = al;
+            }
+        }
+        if (s.guide == nullptr || s.guideBytes < bytes) {
+            if (s.guide) { a.releaseBuffer(s.guide); s.guide = nullptr; }
+            s.guide = a.newBuffer(s.device, bytes);
+            if (s.guide == nullptr) { s.guideBytes = 0; return false; }
+            s.guideBytes = bytes;
+            s.filterW = s.filterH = 0;             // a new buffer is a new binding
+            s.alphaFilterW = s.alphaFilterH = 0;
+        }
+        a.writeBuffer(s.guide, 0, bytes, s.guideStaging.data());
+
+        // THE ALPHA'S OWN FILTER, IN PLACE ON THE GUIDE, so the colour's filter below reads
+        // the denoised alpha straight off the device.
+        if (s.alphaFilter == nullptr || s.alphaFilterW != img.widthPx ||
+            s.alphaFilterH != img.heightPx) {
+            if (s.alphaFilter) { a.releaseFilter(s.alphaFilter); s.alphaFilter = nullptr; }
+            s.alphaFilter = a.newFilter(s.device, "RT");
+            if (s.alphaFilter == nullptr) return false;
+            a.setFilterImage(s.alphaFilter, "color", s.guide, kFormatFloat3,
+                             static_cast<size_t>(img.widthPx),
+                             static_cast<size_t>(img.heightPx), 0, 0, 0);
+            a.setFilterImage(s.alphaFilter, "output", s.guide, kFormatFloat3,
+                             static_cast<size_t>(img.widthPx),
+                             static_cast<size_t>(img.heightPx), 0, 0, 0);
+            a.setFilterBool(s.alphaFilter, "hdr", false);
+            a.commitFilter(s.alphaFilter);
+            if (!deviceClean(a, s.device)) { s.release(); return false; }
+            s.alphaFilterW = img.widthPx;
+            s.alphaFilterH = img.heightPx;
+        }
+        a.executeFilter(s.alphaFilter);
+        if (!deviceClean(a, s.device)) { s.release(); return false; }
+    }
+
     // REBOUND ONLY WHEN THE GEOMETRY MOVES. oidnCommitFilter is the expensive call --
     // it is where the network is set up for the size -- and a Draft scrub renders the
     // same size over and over. Rebinding per frame would pay that every time.
-    if (s.filter == nullptr || s.filterW != img.widthPx || s.filterH != img.heightPx) {
+    if (s.filter == nullptr || s.filterW != img.widthPx || s.filterH != img.heightPx ||
+        s.filterGuided != guided) {
         if (s.filter) { a.releaseFilter(s.filter); s.filter = nullptr; }
 
         s.filter = a.newFilter(s.device, "RT");
@@ -390,6 +461,11 @@ bool denoiseFrame(const DenoiseImage& img) {
         a.setFilterImage(s.filter, "output", s.buffer, kFormatFloat3,
                          static_cast<size_t>(img.widthPx),
                          static_cast<size_t>(img.heightPx), 0, 0, 0);
+        if (guided) {
+            a.setFilterImage(s.filter, "albedo", s.guide, kFormatFloat3,
+                             static_cast<size_t>(img.widthPx),
+                             static_cast<size_t>(img.heightPx), 0, 0, 0);
+        }
 
         // HDR, BECAUSE THE BUFFER IS SCENE-REFERRED RADIANCE WITH A SUN IN IT. The
         // LDR filter assumes values in 0..1 and would flatten everything above it.
@@ -400,6 +476,7 @@ bool denoiseFrame(const DenoiseImage& img) {
 
         s.filterW = img.widthPx;
         s.filterH = img.heightPx;
+        s.filterGuided = guided;
     }
 
     a.executeFilter(s.filter);
@@ -408,9 +485,17 @@ bool denoiseFrame(const DenoiseImage& img) {
     a.readBuffer(s.buffer, 0, bytes, s.staging.data());
     if (!deviceClean(a, s.device)) { s.release(); return false; }
 
+    // THE DENOISED ALPHA, back beside the colour.
+    if (guided) {
+        a.readBuffer(s.guide, 0, bytes, s.guideStaging.data());
+        if (!deviceClean(a, s.device)) { s.release(); return false; }
+    }
+
     // ===================================================================
     // UNPACKED BACK AND BLENDED, ALPHA UNTOUCHED. Alpha is coverage, not light -- the
-    // same rule src/engine/OutputConvert.h and applyOutputTransform already follow.
+    // same rule src/engine/OutputConvert.h and applyOutputTransform already follow. THE ONE
+    // EXCEPTION is a depth pass's alpha (build 30), which is rendered transmittance and was
+    // denoised above: see DenoiseImage::alphaGuide.
     //
     // THE BLEND IS FREE AND NEEDS NO SECOND BUFFER, which is why it is here rather than
     // in a pass of its own: the destination still holds the ORIGINAL radiance at this
@@ -424,6 +509,8 @@ bool denoiseFrame(const DenoiseImage& img) {
     for (int y = 0; y < img.heightPx; ++y) {
         float* dst = img.data + static_cast<size_t>(y) * img.pitchPx * 4;
         const float* src = s.staging.data() + static_cast<size_t>(y) * img.widthPx * 3;
+        const float* ga  = guided ? s.guideStaging.data() + static_cast<size_t>(y) * img.widthPx * 3
+                                  : nullptr;
         for (int x = 0; x < img.widthPx; ++x) {
             float* p = dst + static_cast<size_t>(x) * 4;
             const float* q = src + static_cast<size_t>(x) * 3;
@@ -436,10 +523,83 @@ bool denoiseFrame(const DenoiseImage& img) {
                 p[2] += (q[1] - p[2]) * amount;
                 p[3] += (q[2] - p[3]) * amount;
             }
+            if (guided) {
+                // ZERO STAYS ZERO, colour and alpha: the footage comes through untouched. For
+                // the clouds alone, only where the denoised alpha is nothing too -- see
+                // DenoiseImage::exactZeros.
+                float& al = bgra ? p[3] : p[0];
+                float d = ga[x * 3 + 1];
+                d = d > 0.0f ? (d < 1.0f ? d : 1.0f) : 0.0f;
+                if (!(al > 0.0f) && (img.exactZeros || !(d > kAlphaNothing))) {
+                    al = 0.0f;
+                    if (bgra) p[0] = p[1] = p[2] = 0.0f; else p[1] = p[2] = p[3] = 0.0f;
+                } else {
+                    if (!(al > 0.0f)) al = 0.0f;   // NaN is 0
+                    al += (d - al) * amount;
+                }
+            }
         }
     }
 
     return true;
+}
+
+namespace {
+
+// One axis of the crop: [lo, hi] widened by the margin, rounded up to the quantum, inside
+// [0, size). Past the end, the box slides back rather than shrinking, so its size is the step.
+void cropAxis(int32_t lo, int32_t hi, int32_t size, int32_t margin, int32_t quantum,
+              int32_t& start, int32_t& extent) {
+    int32_t a = lo - margin;
+    if (a < 0) a = 0;
+    int32_t b = hi + 1 + margin;
+    if (b > size) b = size;
+    int32_t n = b - a;
+    if (quantum > 1) n = ((n + quantum - 1) / quantum) * quantum;
+    if (n >= size) { start = 0; extent = size; return; }
+    if (a + n > size) a = size - n;
+    start = a;
+    extent = n;
+}
+
+} // namespace
+
+DenoiseCrop alphaCrop(const DenoiseImage& img, int32_t margin, int32_t quantum) {
+    DenoiseCrop c;
+    if (img.data == nullptr || img.widthPx <= 0 || img.heightPx <= 0) return c;
+    if (img.pitchPx < img.widthPx) return c;
+
+    const int a = img.order == DenoiseOrder::BgraFloat4 ? 3 : 0;
+    int32_t x0 = img.widthPx, x1 = -1, y0 = img.heightPx, y1 = -1;
+    for (int32_t y = 0; y < img.heightPx; ++y) {
+        const float* row = img.data + static_cast<size_t>(y) * img.pitchPx * 4;
+        int32_t first = -1, last = -1;
+        for (int32_t x = 0; x < img.widthPx; ++x) {
+            if (row[static_cast<size_t>(x) * 4 + a] > 0.0f) {   // NaN is no alpha
+                if (first < 0) first = x;
+                last = x;
+            }
+        }
+        if (first < 0) continue;
+        if (first < x0) x0 = first;
+        if (last > x1) x1 = last;
+        if (y < y0) y0 = y;
+        y1 = y;
+    }
+    if (x1 < 0) return c;
+
+    if (margin < 0) margin = 0;
+    cropAxis(x0, x1, img.widthPx, margin, quantum, c.x, c.width);
+    cropAxis(y0, y1, img.heightPx, margin, quantum, c.y, c.height);
+    return c;
+}
+
+DenoiseImage croppedTo(const DenoiseImage& img, const DenoiseCrop& c) {
+    DenoiseImage out = img;
+    out.data = img.data + (static_cast<size_t>(c.y) * img.pitchPx + c.x) * 4;
+    out.widthPx  = c.width;
+    out.heightPx = c.height;
+    return out;
 }
 
 } // namespace plugin::cloud

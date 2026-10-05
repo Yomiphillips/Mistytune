@@ -59,6 +59,9 @@ add_executable(plugin_tests
     # Local lights (build 29): a comp light lands where the camera says, the sheet keeps
     # its power and its frame, and the packed buffer is what LightLib.slang reads.
     unit/TestLights.cpp
+    # Scene integration (build 30): the depth pass reads as its encoding says, and through
+    # the kernel the holdout laid over what is behind the geometry gives back the render.
+    unit/TestSceneDepth.cpp
 
     # The output conversion: 8, 16 and 32 bpc, the sRGB curve and the alpha rule.
     # PLAN.md's Phase 1 exit asks for all three bit depths to be CORRECT, and until

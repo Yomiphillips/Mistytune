@@ -245,6 +245,12 @@ thread_local DeviceScratch g_lights;
 thread_local uint64_t      g_lightsHash     = 0;
 thread_local void*         g_lightsUploaded = nullptr;
 
+// THE SCENE'S DEPTH PASS (build 30), uploaded when its hash moves. A depth pass of moving
+// footage moves every frame: at 1080p that is one 16 MB copy, a few milliseconds.
+thread_local DeviceScratch g_scene;
+thread_local uint64_t      g_sceneHash     = 0;
+thread_local void*         g_sceneUploaded = nullptr;
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -258,7 +264,7 @@ thread_local void*         g_lightsUploaded = nullptr;
 // has its own definition over the C++ backend -- but nvcc still needs it to exist
 // for the host compilation of Shading.h.
 MT_RENDER Vec3 mistytuneTrace(const RenderRequest& req, Vec3 ro, Vec3 rd,
-                              unsigned int seed) {
+                              unsigned int seed, float tGeo, float& see) {
     Scene_0      scene{};
     PhaseInput_0 phase{};
     fillSlangScene<CudaVectors>(req, scene, phase);
@@ -275,11 +281,12 @@ MT_RENDER Vec3 mistytuneTrace(const RenderRequest& req, Vec3 ro, Vec3 rd,
     drift.data  = static_cast<float2*>(const_cast<void*>(req.driftBuffer));
     drift.count = static_cast<size_t>(cloud::kDriftKnots);
 
-    const float3 radiance = renderSample_0(&scene, &phase, bounds, drift,
+    const float4 radiance = renderSample_0(&scene, &phase, bounds, drift,
                                            make_float3(ro.x, ro.y, ro.z),
                                            make_float3(rd.x, rd.y, rd.z),
-                                           seed);
+                                           seed, tGeo);
 
+    see = radiance.w;
     return vec3(radiance.x, radiance.y, radiance.z);
 }
 
@@ -368,14 +375,15 @@ __global__ void stagedBeginKernel(RenderRequest req, int rowStart, int rows,
 
     Vec3         dir;
     unsigned int h;
-    pixelSampleRay(req, px, py, s, dir, h);
+    float        tGeo;
+    pixelSampleRay(req, px, py, s, dir, h, tGeo);
     const Vec3 origin = primaryRayOrigin(req.view);
 
     StagedScene sc;
     fillStagedScene(req, sc);
     const PathState_0 st = beginSample_0(&sc.scene, &sc.phase, sc.bounds, sc.drift,
                                          make_float3(origin.x, origin.y, origin.z),
-                                         make_float3(dir.x, dir.y, dir.z), h);
+                                         make_float3(dir.x, dir.y, dir.z), h, tGeo);
     paths[i] = st;
     if (st.psAlive_0 != 0) living[appendLiving(livingCount)] = static_cast<int>(i);
 }
@@ -405,12 +413,14 @@ __global__ void stagedFinishKernel(RenderRequest req, int rowStart, int rows,
     const int       S    = req.sampleCount;
     const long long base = (static_cast<long long>(r) * req.dest.widthPx + px) * S;
 
-    Vec3 sum = vec3(0.0f, 0.0f, 0.0f);
+    Vec3  sum    = vec3(0.0f, 0.0f, 0.0f);
+    float seeSum = 0.0f;
     for (int s = 0; s < S; ++s) {
         const float3 c = paths[base + s].psRadiance_0;
         sum = sum + vec3(c.x, c.y, c.z);
+        seeSum += paths[base + s].psSee_0;
     }
-    finishPixel(req, px, rowStart + r, sum);
+    finishPixel(req, px, rowStart + r, sum, seeSum);
 }
 
 // The output transform over a finished frame. Same shape, same bounds check, and
@@ -715,6 +725,27 @@ bool renderCuda(const RenderRequest& req) {
             g_lightsHash     = work.lightHash;
         }
         work.lightBuffer = lightDev;
+    }
+
+    // THE SCENE'S DEPTH PASS: HOST POINTER IN, DEVICE POINTER OUT, like the lights above.
+    if (work.sceneBuffer && work.sceneWidth > 0 && work.sceneHeight > 0) {
+        const size_t sceneBytes = sizeof(float) * 2u * static_cast<size_t>(work.sceneWidth) *
+                                  static_cast<size_t>(work.sceneHeight);
+        void* sceneDev = g_scene.reserve(sceneBytes);
+        if (!sceneDev) return false;   // reserve() has already set the error
+
+        if (sceneDev != g_sceneUploaded || work.sceneHash != g_sceneHash) {
+            g_sceneUploaded = nullptr;
+            const cudaError_t sceneErr = cudaMemcpy(sceneDev, work.sceneBuffer, sceneBytes,
+                                                    cudaMemcpyHostToDevice);
+            if (sceneErr != cudaSuccess) {
+                setError("scene depth upload", sceneErr);
+                return false;
+            }
+            g_sceneUploaded = sceneDev;
+            g_sceneHash     = work.sceneHash;
+        }
+        work.sceneBuffer = sceneDev;
     }
 
     // THE CLOUDS' SHADOW MAPS, built on this device at most once per change. See

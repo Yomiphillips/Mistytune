@@ -222,6 +222,23 @@ void printUsage() {
         "  --light-layer-flat          the sheet as one plane through the hero, as before (A/B)\n"
         "  --light-layer-dump <path>   also write the layer as a PPM, to look at\n"
         "\n"
+        "  --depth <file|city>  build 30: a depth pass of the footage, read like --shape, or\n"
+        "                   a built-in skyline. Every camera ray stops at its geometry.\n"
+        "  --depth-encoding <ai|near|far>  brighter is nearer as a disparity (AI depth,\n"
+        "                   default), brighter is nearer linearly, or brighter is farther\n"
+        "  --depth-near <m>  the pass's nearest end, along the lens's axis (default 10)\n"
+        "  --depth-far <m>   its farthest end (default 2000)\n"
+        "  --sky-cutoff <pct>  the far end of the pass that is open sky (default 2)\n"
+        "  --scene <holdout|composite>  leave the geometry transparent, or lay the clouds\n"
+        "                   over --plate (default composite)\n"
+        "  --plate <file|city>  the footage Composite lays the clouds over, in the output's\n"
+        "                   encoding; city is a plate for the built-in skyline\n"
+        "  --alpha-out <path>  also write the output's alpha as a PGM\n"
+        "  --transparent    build 31: Background Transparent -- the clouds alone, premultiplied,\n"
+        "                   over nothing; the sun and sky still light them\n"
+        "  --hide-sun       Show Sun off: the camera does not see the disc, the clouds are\n"
+        "                   lit as before\n"
+        "\n"
         "  --device         print what the renderer would use, and exit\n"
         "  --fingerprint    print the field and view hashes, and exit\n"
         "\n"
@@ -559,6 +576,78 @@ bool builtinBolt(const char* name, int w, int h, ShapeImage& img) {
     return true;
 }
 
+// THE BUILT-IN SKYLINE (build 30): a depth pass the frame's size, a row of towers along the
+// bottom 45% of it in three ranks, over open sky. Brighter is nearer, in DEPTH UNITS -- the
+// near rank at 0.8, the middle at 0.5, the far at 0.25 -- so --depth-near and --depth-far
+// place them in metres. The `plate` variant is the same skyline as footage: each rank a
+// flat grey, darker nearer, over a pale sky -- what Composite lays the clouds over.
+bool builtinCity(const char* name, int w, int h, bool plate, ShapeImage& img) {
+    if (!argIs(name, "city")) return false;
+    img.width = w;
+    img.height = h;
+    img.argb.assign(static_cast<size_t>(w) * h * 4, 0.0f);
+
+    struct Rank { double value, grey, minTop, maxTop, minWide, maxWide; };
+    const Rank ranks[3] = {
+        { 0.25, 0.42, 0.55, 0.70, 0.05, 0.12 },   // far: tallest
+        { 0.50, 0.30, 0.65, 0.80, 0.06, 0.14 },
+        { 0.80, 0.16, 0.78, 0.90, 0.08, 0.18 },   // near: lowest
+    };
+    std::vector<double> value(static_cast<size_t>(w) * h, 0.0);
+    std::vector<double> grey(static_cast<size_t>(w) * h, -1.0);
+    unsigned state = 0xc17ba5edu;
+    auto rnd = [&]() {
+        state = state * 747796405u + 2891336453u;
+        return static_cast<double>((state >> 8) & 0xffffff) / 16777216.0;
+    };
+    for (const Rank& r : ranks) {
+        double x = -rnd() * r.maxWide * w;
+        while (x < w) {
+            const double wide = (r.minWide + rnd() * (r.maxWide - r.minWide)) * w;
+            const double top  = (r.minTop + rnd() * (r.maxTop - r.minTop)) * h;
+            const int x0 = std::max(0, static_cast<int>(x));
+            const int x1 = std::min(w, static_cast<int>(x + wide));
+            for (int y = std::max(0, static_cast<int>(top)); y < h; ++y)
+                for (int i = x0; i < x1; ++i) {
+                    value[static_cast<size_t>(y) * w + i] = r.value;
+                    grey[static_cast<size_t>(y) * w + i]  = r.grey;
+                }
+            x += wide + rnd() * 0.04 * w;
+        }
+    }
+    for (size_t q = 0; q < value.size(); ++q) {
+        float* p = img.argb.data() + q * 4;
+        p[0] = 1.0f;
+        if (plate) {
+            const bool sky = grey[q] < 0.0;
+            p[1] = static_cast<float>(sky ? 0.55 : grey[q]);
+            p[2] = static_cast<float>(sky ? 0.68 : grey[q]);
+            p[3] = static_cast<float>(sky ? 0.85 : grey[q] * 1.05);
+        } else {
+            p[1] = p[2] = p[3] = static_cast<float>(value[q]);
+        }
+    }
+    return true;
+}
+
+// The output's alpha as an 8-bit PGM, 255 opaque.
+bool writeAlphaPgm(const char* path, const std::vector<float>& argb, int width, int height) {
+    FILE* f = std::fopen(path, "wb");
+    if (!f) return false;
+    std::fprintf(f, "P5\n%d %d\n255\n", width, height);
+    std::vector<unsigned char> row(static_cast<size_t>(width));
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            float a = argb[(static_cast<size_t>(y) * width + x) * 4];
+            a = a < 0.0f ? 0.0f : (a > 1.0f ? 1.0f : a);
+            row[static_cast<size_t>(x)] = static_cast<unsigned char>(a * 255.0f + 0.5f);
+        }
+        std::fwrite(row.data(), 1, row.size(), f);
+    }
+    std::fclose(f);
+    return true;
+}
+
 bool dumpLightLayer(const char* path, const ShapeImage& img) {
     std::vector<float> argb = img.argb;
     return writePpm(path, argb, img.width, img.height);
@@ -802,9 +891,41 @@ int main(int argc, char** argv) {
     float lightLayerDepth = 0.0f;
     bool  lightLayerFlat = false;
 
+    // SCENE INTEGRATION (build 30).
+    const char* depthPath = nullptr;
+    const char* platePath = nullptr;
+    const char* alphaOut  = nullptr;
+    cloud::SceneDepthParams sceneParams;
+
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
         const bool hasNext = (i + 1) < argc;
+
+        // SCENE INTEGRATION (build 30), a chain of its own: MSVC stops at 128 nested blocks,
+        // and the main chain below is one block per option.
+        bool sceneOption = true;
+        if (argIs(a, "--depth") && hasNext)      depthPath = argv[++i];
+        else if (argIs(a, "--plate") && hasNext)      platePath = argv[++i];
+        else if (argIs(a, "--alpha-out") && hasNext)  alphaOut  = argv[++i];
+        else if (argIs(a, "--depth-near") && hasNext) sceneParams.nearestM  = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--depth-far") && hasNext)  sceneParams.farthestM = static_cast<float>(std::atof(argv[++i]));
+        else if (argIs(a, "--sky-cutoff") && hasNext) sceneParams.skyCutoff = static_cast<float>(std::atof(argv[++i]) / 100.0);
+        else if (argIs(a, "--depth-encoding") && hasNext) {
+            const char* v = argv[++i];
+            sceneParams.encoding = argIs(v, "near") ? cloud::DepthEncoding::LinearNearBright
+                                 : argIs(v, "far")  ? cloud::DepthEncoding::LinearFarBright
+                                                    : cloud::DepthEncoding::DisparityNearBright;
+        }
+        else if (argIs(a, "--scene") && hasNext) {
+            const char* v = argv[++i];
+            sceneParams.mode = argIs(v, "holdout") ? cloud::SceneMode::Holdout
+                                                   : cloud::SceneMode::Composite;
+        }
+        // THE CLOUDS ALONE (build 31): the effect's Background and Show Sun.
+        else if (argIs(a, "--transparent"))  req.view.transparentSky = true;
+        else if (argIs(a, "--hide-sun"))     req.field.atmosphere.showSunDisc = false;
+        else sceneOption = false;
+        if (sceneOption) continue;
 
         if (argIs(a, "--help") || argIs(a, "-?")) { printUsage(); return 0; }
         else if (argIs(a, "-o") && hasNext)          outPath = argv[++i];
@@ -927,6 +1048,7 @@ int main(int argc, char** argv) {
         else if (argIs(a, "--light-layer-strength") && hasNext)  lightLayerStrength = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--light-layer-depth") && hasNext)     lightLayerDepth    = static_cast<float>(std::atof(argv[++i]));
         else if (argIs(a, "--light-layer-flat"))                  lightLayerFlat     = true;
+
         else if (argIs(a, "--shape") && hasNext)           shapePath = argv[++i];
         else if (argIs(a, "--shape-dump") && hasNext)      shapeDump = argv[++i];
         else if (argIs(a, "--relief") && hasNext)          reliefPath = argv[++i];
@@ -1254,6 +1376,40 @@ int main(int argc, char** argv) {
                     static_cast<double>(anchor.depth), lightSet.packed.size());
     }
 
+    // SCENE INTEGRATION (build 30): the depth pass, resolved to metres as the effect resolves
+    // it, and the plate Composite lays the clouds over.
+    cloud::SceneDepthMap sceneMap;
+    ShapeImage plateImage;
+    bool havePlate = false;
+    if (depthPath) {
+        ShapeImage depthImage;
+        if (!builtinCity(depthPath, req.view.widthPx, req.view.heightPx, false, depthImage) &&
+            !loadShapeImage(depthPath, depthImage)) {
+            std::fprintf(stderr, "could not read the depth pass %s\n", depthPath);
+            return 2;
+        }
+        if (cloud::buildSceneDepthMap(depthImage.view(), sceneParams, sceneMap)) {
+            req.sceneDepth = &sceneMap;
+            std::printf("depth pass: %dx%d, %d texels of geometry, %.0f to %.0f m, %s\n",
+                        sceneMap.width, sceneMap.height, sceneMap.geometryTexels,
+                        static_cast<double>(sceneParams.nearestM),
+                        static_cast<double>(sceneParams.farthestM),
+                        sceneParams.mode == cloud::SceneMode::Holdout ? "holdout" : "composite");
+        } else {
+            std::printf("depth pass: all open sky -- no scene\n");
+        }
+        if (platePath && sceneParams.mode == cloud::SceneMode::Composite) {
+            if (!builtinCity(platePath, req.view.widthPx, req.view.heightPx, true, plateImage) &&
+                !loadShapeImage(platePath, plateImage)) {
+                std::fprintf(stderr, "could not read the plate %s\n", platePath);
+                return 2;
+            }
+            havePlate = true;
+        }
+    }
+    if (req.view.transparentSky) std::printf("background: transparent (clouds only)\n");
+    if (!req.field.atmosphere.showSunDisc) std::printf("sun disc: hidden\n");
+
     // THE WINDOW, WHICH IS WHAT AFTER EFFECTS ACTUALLY ASKS FOR MOST OF THE TIME.
     //
     // -w/-h are the FRAME: the whole picture the lens sees. Without --window the
@@ -1432,6 +1588,17 @@ int main(int argc, char** argv) {
         req.dest.pitchPx  = destW;
     }
     kernel::transformCpu(req, threads);
+
+    // COMPOSITE (build 30), as the effect does it: after the transform, over the plate, in the
+    // output's encoding. The window's origin is where the buffer sits on the plate.
+    if (havePlate && req.sceneDepth) {
+        cloud::compositeOverPlate(pixels.data(), destW, destH, destW, plateImage.view(),
+                                  req.view.originX, req.view.originY);
+    }
+    if (alphaOut && !writeAlphaPgm(alphaOut, pixels, destW, destH)) {
+        std::fprintf(stderr, "could not write %s\n", alphaOut);
+        return 1;
+    }
 
     // ---------------------------------------------------------------------
     // THE RESOLVE PATH, CHECKED RATHER THAN ASSUMED TO EXIST.

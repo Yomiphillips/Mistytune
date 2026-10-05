@@ -251,6 +251,19 @@ public struct Scene
     int                     ltCount;
     StructuredBuffer<float> ltBuffer;
     float3                  ltAmbient;
+
+    // ===================================================================
+    // THE CLOUDS ALONE (build 31). hideSunDisc keeps the sun's disc out of what the CAMERA
+    // sees and changes nothing else: the sun reaches every scattering event by next events,
+    // never through the disc. clearSky is Background: Transparent, under which every camera
+    // ray is stopped at geometry at infinity (Shading.h's kSkyGeometry); it lets pathBegin
+    // skip the air on a ray that met no cloud at all, whose pixel is nothing.
+    //
+    // ZERO IN A ZEROED STRUCT, so every scene a test builds by hand shows the disc and
+    // computes every ray in full.
+    // ===================================================================
+    int hideSunDisc;
+    int clearSky;
 };
 
 // A STRUCTURAL CEILING, SEPARATE FROM THE PARAMETER. A GPU loop wants a bound the
@@ -262,12 +275,21 @@ public struct Scene
 // and the furnace test's whole diagnostic rests on `capped` being the truth.
 public static const int kBounceCeiling = 256;
 
+// NO SCENE GEOMETRY ON THIS CAMERA RAY (build 30). Every distance the camera walk compares
+// with it is shorter, so a ray given this runs exactly the arithmetic it ran before.
+public static const float kNoGeometry = 1e30f;
+
 public struct TraceResult
 {
     float3 pathRadiance;
     int    scatterEvents;   // real collisions, not counting null ones
     int    capped;          // nonzero: the path was still alive when the budget ran out
     int    trackingSteps;           // tracking iterations, summed over free flight and shadows
+
+    // HOW MUCH OF THE SCENE'S GEOMETRY SHOWS THROUGH (build 30): the clouds' transmittance to
+    // it, for a camera ray that ends on geometry, and 0 for one that does not -- the sky is
+    // opaque. The pixel's alpha is one minus its mean. See pathBegin.
+    float  sceneSee;
 };
 
 // The sun's irradiance arriving at a point in the medium, before the cloud's own
@@ -612,16 +634,27 @@ bool segmentStep(Medium m, MajorantGrid g, StructuredBuffer<float> bounds,
 // THE PATH'S OWN STREAM IS UNTOUCHED BY THIS. The coin is the walk's fourth draw, every
 // step, so as the cloud drifts the first collision moves with the density under fixed
 // points, as the sum's estimate does.
+//
+// ===========================================================================
+// THE WALK STOPS AT THE SCENE'S GEOMETRY (build 30), `tEnd` along the ray: a building in the
+// footage's depth pass. Nothing past it is walked, summed or collided with -- the geometry
+// hides it -- and kNoGeometry leaves every slab's own end where it was. `camT` is the walk's
+// RATIO-TRACKED transmittance to its end, the product of (1 - sigma/rate) over every point,
+// doubled by each roulette survival and zero when the roulette ended it: unbiased for the
+// clouds' transmittance, and smooth where the yes-or-no of an escape would be one bit. It is
+// what the geometry's alpha is made from.
 // ===========================================================================
 float3 cameraSegmentSun(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
                         StructuredBuffer<float2> drift,
                         inout Rng rng, Rng rng2, float3 ro, float3 rd, inout int steps,
-                        out int hit, out float3 hitAt, out int hitLayer, out float tResume)
+                        out int hit, out float3 hitAt, out int hitLayer, out float tResume,
+                        float tEnd, out float camT)
 {
     hit      = 0;
     hitAt    = float3(0.0f, 0.0f, 0.0f);
     hitLayer = 0;
     tResume  = 0.0f;
+    camT     = 1.0f;
 
     const float3 none = float3(0.0f, 0.0f, 0.0f);
 
@@ -650,6 +683,7 @@ float3 cameraSegmentSun(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
     float tA, endA;
     bool  haveA = slabRange(s.medium, ro, rd, tA, endA);
     tA = max(tA, 0.0f);
+    endA = min(endA, tEnd);
     Dda   ddaA    = ddaInit(s.grid, ro, rd, tA);
     float rateA   = gridBound(s.medium, s.grid, bounds, drift, ddaA.cell, s.medium.majorant) * scale;
     int   budgetA = kTrackCap;
@@ -665,6 +699,7 @@ float3 cameraSegmentSun(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
     float tB = 0.0f, endB = 0.0f;
     bool  haveB = s.layer2On != 0 && slabRange(s.medium2, ro, rd, tB, endB);
     tB = max(tB, 0.0f);
+    endB = min(endB, tEnd);
     MajorantGrid gridB = gridFor(s.medium2, s.grid2, ro);
     Dda   ddaB    = ddaInit(gridB, ro, rd, tB);
     float rateB   = gridBound(s.medium2, gridB, bounds, drift, ddaB.cell, s.medium2.majorant) * scale;
@@ -768,6 +803,10 @@ float3 cameraSegmentSun(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
     // NO COLLISION ACCEPTED, AND THE WALK DID NOT REACH THE END OF THE MEDIUM: the roulette
     // stopped it, or a budget ran out. trace() tracks on from the last point walked.
     if (hit == 0 && (rouletted || budgetA <= 0 || budgetB <= 0)) hit = 2;
+
+    // THE CLOUDS' TRANSMITTANCE TO THE END OF THE WALK -- zero when the roulette ended it,
+    // which is the other half of the doubling that keeps it unbiased.
+    camT = rouletted ? 0.0f : tr;
 
     if (!(total > 0.0f) || !(kept > 0.0f)) return none;
 
@@ -879,6 +918,7 @@ public struct PathState
     int    psEvents;       // real collisions so far
     int    psCapped;       // nonzero: still alive when the budget ran out
     int    psSteps;        // tracking iterations, every walk included
+    float  psSee;          // build 30: how much scene geometry shows through; see pathBegin
 };
 
 // What a path that leaves the medium carries home. `first` is bounce 0, where the camera
@@ -900,7 +940,12 @@ float3 pathEnvironment(Scene s, float3 ro, float3 rd, bool first)
     // clear, and brightened the deck's own underside.
     float groundLit = s.airMapOn != 0
                     ? groundShadow(s.airMapIce, s.airMapCu, ro, rd) : 1.0f;
-    float3 env = environmentRadiance(s.environment, ro, rd, first, groundLit);
+    //
+    // THE DISC ONLY FOR THE CAMERA, AND NOT EVEN THEN WHEN SHOW SUN IS OFF (build 31). A
+    // bounced path never sees it -- see includeSunDisc -- so hiding it leaves every cloud lit
+    // exactly as it was.
+    float3 env = environmentRadiance(s.environment, ro, rd, first && s.hideSunDisc == 0,
+                                     groundLit);
 
     // AE's AMBIENT LIGHT (build 29), for a path that has scattered: the cloud is lit by it
     // and the sky behind the cloud is not brightened by it. Zero without one.
@@ -1032,8 +1077,27 @@ bool pathScatter(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
 // The camera ray and the path's whole first bounce: the camera segment's sun, the first
 // collision, the air in front of it, and the scatter. The path leaves with psBounce 1, or
 // ended.
+//
+// ===========================================================================
+// `tGeo` IS WHERE THE SCENE'S GEOMETRY STOPS THIS CAMERA RAY (build 30) -- a building in the
+// footage's depth pass, along the ray -- or kNoGeometry. See src/engine/SceneDepth.h for the
+// whole argument; in short, a ray that ends on geometry returns
+//
+//     R - T H        and, in psSee, T
+//
+// where R is everything the ray gathers in front of the geometry with the geometry black, T
+// the clouds' transmittance to it (the camera walk's ratio-tracked estimate), and H the
+// clear air's airlight over the same stretch, which the footage already has. The pixel's
+// alpha is 1 - mean(T), and AE's own "over" of the pixel on the footage is then the truth.
+//
+// ONLY THE CAMERA RAY SEES THE GEOMETRY. A bounced path does not hit the building, and the
+// building casts no shadow on the cloud: the depth pass says where the geometry is from the
+// lens and nowhere else. kNoGeometry draws no number and moves no value, so a frame without
+// a depth pass is bit-for-bit build 29's.
+// ===========================================================================
 public PathState pathBegin(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
-                           StructuredBuffer<float2> drift, Rng rng, float3 ro, float3 rd)
+                           StructuredBuffer<float2> drift, Rng rng, float3 ro, float3 rd,
+                           float tGeo)
 {
     PathState st;
     st.psRadiance   = float3(0.0f, 0.0f, 0.0f);
@@ -1046,8 +1110,13 @@ public PathState pathBegin(Scene s, PhaseInput ph, StructuredBuffer<float> bound
     st.psEvents     = 0;
     st.psCapped     = 0;
     st.psSteps      = 0;
+    st.psSee        = 0.0f;
 
     int budget = min(s.maxBounces, kBounceCeiling);
+
+    // THE SCENE'S GEOMETRY ON THIS RAY, and the clouds' transmittance to it.
+    bool  geo  = tGeo < kNoGeometry;
+    float camT = 1.0f;
 
     // THE CAMERA SEGMENT'S SUN, AS A SUM, when asked for -- and then the first
     // collision's own next event below is skipped, because this replaces it. Taken
@@ -1075,7 +1144,8 @@ public PathState pathBegin(Scene s, PhaseInput ph, StructuredBuffer<float> bound
         st.psRadiance += st.psThroughput * cameraSegmentSun(s, ph, bounds, drift, segmentRng,
                                                             segmentRng2, ro, rd, st.psSteps,
                                                             cameraHit, cameraHitAt,
-                                                            cameraHitLayer, cameraResume);
+                                                            cameraHitLayer, cameraResume,
+                                                            tGeo, camT);
     }
 
     // THE AIR IN FRONT OF THE FIRST EVENT, on its own stream for the reason the segment's
@@ -1114,6 +1184,52 @@ public PathState pathBegin(Scene s, PhaseInput ph, StructuredBuffer<float> bound
     else
     {
         collided = sceneFreeFlight(s, bounds, drift, st.psRng, ro, rd, p, layer, st.psSteps);
+    }
+
+    // A COLLISION BEHIND THE GEOMETRY IS HIDDEN BY IT. The free flight's distance is exact,
+    // so cutting it at tGeo is exactly the flight that stops there. The camera walk above was
+    // already cut, so only these two tracked flights need it.
+    if (geo && collided && dot(p - ro, rd) > tGeo) collided = false;
+
+    // HOW MUCH OF THE GEOMETRY SHOWS THROUGH: the walk's smooth estimate when it walked, else
+    // the flight's own yes-or-no, which is the same expectation.
+    if (geo) st.psSee = sunAlongCamera ? camT : (collided ? 0.0f : 1.0f);
+
+    if (!collided && geo)
+    {
+        // THE RAY REACHED THE GEOMETRY, which is black here: the footage is its colour. What
+        // the ray gathered is the air in front of it, shadowed as the air in front of a cloud
+        // is, less T times the same air clear -- which the footage already has. A building
+        // with nothing in front of it comes out as nothing, or a little less where a cloud's
+        // shadow lies in the air before it.
+        //
+        // A TRANSPARENT BACKGROUND'S RAY THAT MET NO CLOUD AT ALL (build 31) STOPS HERE. All it
+        // could gather is the air less the same air clear: zero, or below it where a cloud's
+        // shadow lies in that air -- light taken off a background the clouds alone know
+        // nothing of, which finishPixel clamps away. So the pixel is nothing, and the
+        // airlight's march, the dearest thing on the ray, is not run for it.
+        if (s.clearSky != 0 && st.psSee >= 1.0f) return st;
+
+        if (airOn)
+        {
+            float u1 = randFloat(airRng);
+            float u2 = randFloat(airRng);
+            AirSegment seg = airSegment(s.environment.sky, ro.y, rd, tGeo, u1, u2);
+            float3 airIn;
+            if (s.aerialMode >= 2 && s.airMapOn != 0)
+            {
+                airIn = max(seg.airIn - airShadowLoss(s.environment.sky, s.airMapIce,
+                                                      s.airMapCu, ro, rd, tGeo, u2),
+                            float3(0.0f, 0.0f, 0.0f));
+            }
+            else
+            {
+                airIn = seg.airIn * airShadow(s, bounds, drift, airRng, seg, ro, rd,
+                                              st.psSteps);
+            }
+            st.psRadiance += st.psThroughput * (airIn - st.psSee * seg.airIn);
+        }
+        return st;
     }
 
     if (!collided)
@@ -1175,6 +1291,15 @@ public PathState pathBegin(Scene s, PhaseInput ph, StructuredBuffer<float> bound
                                           st.psSteps);
         }
         st.psRadiance += st.psThroughput * airIn;
+
+        // IN FRONT OF THE GEOMETRY, the clear air to it comes off, scaled by T, as on the
+        // escape above. The same u1 and u2: the airlight itself is a deterministic quadrature,
+        // and they only place a shadow point this does not use.
+        if (geo)
+        {
+            AirSegment segGeo = airSegment(s.environment.sky, ro.y, rd, tGeo, u1, u2);
+            st.psRadiance -= st.psThroughput * (st.psSee * segGeo.airIn);
+        }
         st.psThroughput *= seg.airT;
     }
 
@@ -1220,13 +1345,15 @@ public void pathBounce(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
         st.psAlive = 0;
 }
 
-public TraceResult trace(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
-                         StructuredBuffer<float2> drift,
-                         inout Rng rng, float3 ro, float3 rd)
+// THE WHOLE PATH WITH THE CAMERA RAY STOPPED AT tGeo (build 30); trace() below is the same
+// with no geometry, and is what the test suites call.
+public TraceResult traceTo(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
+                           StructuredBuffer<float2> drift,
+                           inout Rng rng, float3 ro, float3 rd, float tGeo)
 {
     // THE WHOLE PATH, as the GPU runs it in pieces: see PathState. kBounceCeiling bounds the
     // loop for the compiler; pathBounce ends the path at the budget long before.
-    PathState st = pathBegin(s, ph, bounds, drift, rng, ro, rd);
+    PathState st = pathBegin(s, ph, bounds, drift, rng, ro, rd, tGeo);
     for (int i = 1; i < kBounceCeiling && st.psAlive != 0; ++i)
         pathBounce(s, ph, bounds, drift, st);
 
@@ -1240,5 +1367,13 @@ public TraceResult trace(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
     r.scatterEvents = st.psEvents;
     r.capped        = st.psCapped;
     r.trackingSteps = st.psSteps;
+    r.sceneSee      = st.psSee;
     return r;
+}
+
+public TraceResult trace(Scene s, PhaseInput ph, StructuredBuffer<float> bounds,
+                         StructuredBuffer<float2> drift,
+                         inout Rng rng, float3 ro, float3 rd)
+{
+    return traceTo(s, ph, bounds, drift, rng, ro, rd, kNoGeometry);
 }

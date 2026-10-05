@@ -84,6 +84,7 @@ void Fingerprint::add(const AtmosphereParams& a) {
     add(a.mieAnisotropy);
     add(a.groundAlbedo);
     add(a.cloudShadowsInMedium);
+    add(a.showSunDisc);
 }
 
 void Fingerprint::add(const ShearProfile& s) {

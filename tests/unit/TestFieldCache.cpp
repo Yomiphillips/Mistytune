@@ -183,6 +183,17 @@ PL_TEST(APureCameraRotationRestartsAccumulation) {
     PL_CHECK(samplingHash(a, q) != samplingHash(b, q));
 }
 
+PL_TEST(ATransparentBackgroundRestartsAccumulation) {
+    // Build 31: every camera ray stops at infinity, so the sky's samples are not its own.
+    // ViewParams' sizeof did not move when the member was added -- it fits in padding -- so
+    // nothing but this test says it is hashed.
+    const QualityParams q;
+    ViewParams a;
+    ViewParams b = a;
+    b.transparentSky = true;
+    PL_CHECK(samplingHash(a, q) != samplingHash(b, q));
+}
+
 // ===========================================================================
 // EXPOSURE IS NOT A SAMPLING INPUT, AND THIS TEST USED TO ASSERT THAT IT WAS.
 //

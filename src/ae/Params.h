@@ -48,8 +48,10 @@
 #include "Classifier.h"
 #include "CloudParams.h"
 #include "OrbitCamera.h"
+#include "SceneDepth.h"
 #include "SunPlacement.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace plugin {
@@ -104,6 +106,15 @@ namespace ae {
      * What Draft buys is draftQuality in CloudParams.h. INSERTED, with the minor bump  \
      * that makes that safe; ID 308 is the Quality block's next. */                     \
     POPUP   (RenderQuality,     308, "Render Quality", 2, 2, "Draft|Best")              \
+    /* THE CLOUDS ALONE, FOR OTHER LAYERS (build 31). Asked for from the host: "a hero  \
+     * cloud alone without the sky etc, so I can use with other layers". TRANSPARENT    \
+     * stops every camera ray at geometry at infinity and lets build 30's holdout take  \
+     * the sky away: premultiplied clouds, alpha from their own transmittance, the air  \
+     * in front of them kept. The sun and sky still light them. Beside Render Quality   \
+     * because it is a mode a session switches, not a setting. SKY BY DEFAULT; ID 309   \
+     * is the Quality block's next. See ViewParams::transparentSky. */                 \
+    POPUP   (Background,        309, "Background", 2, 1,                                \
+             "Sky|Transparent (Clouds Only)")                                           \
                                                                                         \
     /* ---------------- Sun and Sky ---------------- */                                 \
     TOPIC   (SkyGroup,          100, "Sun and Sky")                                     \
@@ -129,6 +140,11 @@ namespace ae {
              0.001, 30.0,   0.05, 2.0,      0.266,   3)                                 \
     FLOAT   (SunIntensity,      104, "Sun Intensity",                                   \
              0.0, 10000.0,  0.0, 4.0,       1.0,     3)                                 \
+    /* THE DISC ONLY (build 31): off, the camera does not see the sun, and the sun      \
+     * lights the clouds exactly as before -- "still have it affect the cloud, just not \
+     * show". The sky's glow round it stays: that is the sky. ON BY DEFAULT. Inserted    \
+     * beside the sun's other controls; ID 115 is the block's next. */                   \
+    CHECK   (ShowSun,           115, "Show Sun", true)                                  \
     /* Linke turbidity. 1 is pristine; 64 is a dust storm. */                           \
     FLOAT   (Turbidity,         105, "Turbidity",                                       \
              1.0, 64.0,     1.0, 10.0,      2.2,     2)                                 \
@@ -241,6 +257,45 @@ namespace ae {
     SPARE   (LightsSpare2,      807)                                                    \
     SPARE   (LightsSpare3,      808)                                                    \
     ENDTOPIC(LightsGroupEnd,    809)                                                    \
+                                                                                        \
+    /* ---------------- Scene Integration ---------------- */                           \
+    /* BUILD 30. The spec: "Depth is not a look-driver, it is an integration tool...    \
+     * Composite interleaves cloud with geometry per-pixel." A DEPTH PASS of the        \
+     * footage -- an AI depth map, or a 3D app's Z pass -- stops every camera ray at    \
+     * the building it shows, so a cloud nearer than the building passes in front of it \
+     * and one behind it is hidden. See src/engine/SceneDepth.h. INSERTED after Lights, \
+     * still minor 15 (Build.h). */                                                     \
+    TOPIC   (SceneGroup,        900, "Scene Integration")                               \
+    /* COMPOSITE lays the clouds over THE LAYER THIS EFFECT IS ON: apply Mistytune to   \
+     * the footage itself. HOLDOUT leaves the geometry transparent, for the effect on a \
+     * solid above the footage. Nothing happens until a Depth Pass is picked. */        \
+    POPUP   (SceneMode,         901, "Depth Integration", 3, 3,                         \
+             "Off|Holdout (Transparent)|Composite Over This Layer")                     \
+    /* Read in its own frame, transforms off, matched to this layer's frame by          \
+     * fraction: a pass at another resolution lines up. Alpha is coverage. */           \
+    LAYER   (SceneDepth,        902, "Depth Pass")                                      \
+    /* AI depth tools write brighter-is-nearer as a disparity: equal steps of           \
+     * brightness are equal steps of 1/distance. A Z or mist pass is linear, and which  \
+     * end is bright depends on the app. */                                             \
+    POPUP   (DepthEncoding,     903, "Depth Pass Is", 3, 1,                             \
+             "Brighter Is Nearer (AI Depth)|Brighter Is Nearer (Linear)|"               \
+             "Brighter Is Farther (Linear)")                                            \
+    /* Metres from the lens, along its axis, at the pass's near and far ends. */        \
+    FLOAT   (DepthNearest,      904, "Nearest (m)",                                     \
+             0.01, 1000000.0,  0.1, 1000.0,     10.0,    1)                             \
+    FLOAT   (DepthFarthest,     905, "Farthest (m)",                                    \
+             0.01, 10000000.0, 10.0, 50000.0,   2000.0,  0)                             \
+    /* The far end of the pass that is open sky, not geometry: an AI depth map's sky is \
+     * near black but rarely exactly black. 0 makes the far end geometry at Farthest. */\
+    FLOAT   (SkyCutoff,         906, "Open Sky Cutoff (%)",                             \
+             0.0, 99.0,        0.0, 20.0,       2.0,     1)                             \
+    SPARE   (SceneSpare1,       907)                                                    \
+    SPARE   (SceneSpare2,       908)                                                    \
+    SPARE   (SceneSpare3,       909)                                                    \
+    SPARE   (SceneSpare4,       910)                                                    \
+    SPARE   (SceneSpare5,       911)                                                    \
+    SPARE   (SceneSpare6,       912)                                                    \
+    ENDTOPIC(SceneGroupEnd,     913)                                                    \
                                                                                         \
     /* ---------------- Ice and fallstreaks ---------------- */                         \
     /* THE FIRST GENERATOR, AND UNTIL NOW NOT ONE OF ITS PARAMETERS REACHED THE PANEL.  \
@@ -1057,6 +1112,7 @@ inline cloud::AtmosphereParams toAtmosphere(const ParamValues& p) {
     out.mieAnisotropy    = static_cast<float>(p.v[kMistytuneMieAnisotropy]);
     out.groundAlbedo     = static_cast<float>(p.v[kMistytuneGroundAlbedo]);
     out.cloudShadowsInMedium = p.v[kMistytuneCloudShadowsInMedium] > 0.5;
+    out.showSunDisc          = p.v[kMistytuneShowSun] > 0.5;
     return out;
 }
 
@@ -1313,10 +1369,37 @@ inline float lightLayerDepthOf(const ParamValues& p) {
     return std::isfinite(v) ? static_cast<float>(v) : 0.0f;
 }
 
+// SCENE INTEGRATION (build 30): the panel's half; the depth pass itself is checked out at
+// pre-render. The popups are 0-based here and line up with the enums. NaN-proof, and an
+// out-of-range popup is Off, so a broken expression can only lose the integration.
+inline cloud::SceneDepthParams sceneDepthParamsOf(const ParamValues& p) {
+    cloud::SceneDepthParams s;
+    const long mode = std::lround(p.v[kMistytuneSceneMode]);
+    s.mode = mode == 1 ? cloud::SceneMode::Holdout
+           : mode == 2 ? cloud::SceneMode::Composite : cloud::SceneMode::Off;
+    const long enc = std::lround(p.v[kMistytuneDepthEncoding]);
+    s.encoding = enc == 1 ? cloud::DepthEncoding::LinearNearBright
+               : enc == 2 ? cloud::DepthEncoding::LinearFarBright
+                          : cloud::DepthEncoding::DisparityNearBright;
+    const double nearM = p.v[kMistytuneDepthNearest];
+    const double farM  = p.v[kMistytuneDepthFarthest];
+    s.nearestM  = nearM > 0.01 ? static_cast<float>(nearM) : 0.01f;
+    s.farthestM = farM > static_cast<double>(s.nearestM) ? static_cast<float>(farM) : s.nearestM;
+    const double cut = p.v[kMistytuneSkyCutoff];
+    s.skyCutoff = cut > 0.0 ? static_cast<float>(std::min(cut, 99.0) / 100.0) : 0.0f;
+    return s;
+}
+
 // RENDER QUALITY: Draft is item 0 once the popup is 0-based, Best is 1. Anything else an
 // expression delivers is Best, so a broken expression can only cost time, never quality.
 inline bool draftRequested(const ParamValues& p) {
     return std::lround(p.v[kMistytuneRenderQuality]) == 0;
+}
+
+// BACKGROUND: Sky is item 0, Transparent 1. Anything else an expression delivers is the sky,
+// so a broken expression can only bring the sky back, never lose the clouds.
+inline bool transparentBackground(const ParamValues& p) {
+    return std::lround(p.v[kMistytuneBackground]) == 1;
 }
 
 } // namespace ae

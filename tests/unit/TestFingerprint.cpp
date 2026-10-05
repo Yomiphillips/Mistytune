@@ -63,6 +63,7 @@ std::vector<Mutation> allMutations() {
         { "atmosphere.groundAlbedo",     [](FieldParams& f) { f.atmosphere.groundAlbedo += 0.05f; } },
         { "atmosphere.cloudShadowsInMedium",
                                          [](FieldParams& f) { f.atmosphere.cloudShadowsInMedium = false; } },
+        { "atmosphere.showSunDisc",      [](FieldParams& f) { f.atmosphere.showSunDisc = false; } },
 
         // IceParams
         { "ice.enabled",         [](FieldParams& f) { f.ice.enabled = false; } },

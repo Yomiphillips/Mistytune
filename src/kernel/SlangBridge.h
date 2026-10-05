@@ -372,6 +372,10 @@ MT_DEVICE void fillSlangScene(const RenderRequest& req, SceneT& s, PhaseT& ph) {
                                   : nullptr;
     s.ltBuffer_0.count = lightsOn ? static_cast<size_t>(req.lightFloats) : 0;
     s.ltAmbient_0 = V::v3(req.ambientLight[0], req.ambientLight[1], req.ambientLight[2]);
+
+    // THE CLOUDS ALONE (build 31): Show Sun, and Background: Transparent. See Scene.clearSky.
+    s.hideSunDisc_0 = atm.showSunDisc ? 0 : 1;
+    s.clearSky_0    = req.view.transparentSky ? 1 : 0;
     // -----------------------------------------------------------------------
     // The second layer: cellular convection
     // -----------------------------------------------------------------------

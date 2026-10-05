@@ -55,6 +55,10 @@ uint64_t samplingHash(const ViewParams& v, const QualityParams& q) {
     // AND DRAFT'S PIXEL STRIDE (build 26), for the same reason.
     fp.add(q.pixelStride);
 
+    // BACKGROUND: TRANSPARENT (build 31) stops every camera ray at infinity, so its samples
+    // are not the sky's.
+    fp.add(v.transparentSky);
+
     // DENOISE AND DENOISE AMOUNT USED TO BE HERE AND ARE NOW IN resolveHash.
     //
     // The old reason was sound when written: OIDN would need auxiliary albedo and

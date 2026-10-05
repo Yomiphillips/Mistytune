@@ -912,8 +912,22 @@ MT_DEVICE float unitFloat(unsigned int h) {
 // tests/unit/TestCamera.cpp and tests/slang/SkyParityMain.cu still include this
 // header and link: an inline function that is not called is not odr-used.
 // ===========================================================================
+//
+// `tGeo` STOPS THE CAMERA RAY AT THE SCENE'S GEOMETRY (build 30), or is kNoSceneGeometry;
+// `see` comes back as how much of that geometry shows through, 0 when there is none. See
+// pathBegin in BounceLib.slang.
 MT_RENDER Vec3 mistytuneTrace(const RenderRequest& req, Vec3 ro, Vec3 rd,
-                              unsigned int seed);
+                              unsigned int seed, float tGeo, float& see);
+
+// NO GEOMETRY ON A CAMERA RAY: BounceLib.slang's kNoGeometry, which the kernel compares
+// every distance on the ray against. The same number on both sides of the seam.
+constexpr float kNoSceneGeometry = 1e30f;
+
+// THE OPEN SKY AS GEOMETRY AT INFINITY (build 31), for Background: Transparent. Past the top of
+// the air and past every cloud -- airSegment stops at the atmosphere and slabRange at 120 km --
+// so the ray gathers everything it would have and is then stopped short of the sky itself.
+// Below kNoSceneGeometry, because the kernel tells the two apart by comparing with it.
+constexpr float kSkyGeometry = 1e29f;
 
 // Where a camera ray starts, in world space.
 //
@@ -947,14 +961,58 @@ MT_DEVICE int pixelStrideOf(const RenderRequest& req) {
     return s < 1 ? 1 : (s > 8 ? 8 : s);
 }
 
+// ===========================================================================
+// THE SCENE'S GEOMETRY UNDER ONE SAMPLE (build 30): the distance ALONG THE RAY to the building
+// in the footage's depth pass at the sample's own jittered spot in the frame, or
+// kNoSceneGeometry.
+//
+// THE DEPTH PASS IS MATCHED TO THE FRAME BY FRACTION, so a pass at another resolution, or the
+// frame at AE's half resolution, lines up. NEAREST TEXEL, not bilinear: a mean of a building's
+// depth and the open sky's is a depth that is neither, and the jitter already spreads each
+// pixel's samples over its area, which is what antialiases the edge.
+//
+// A HALF-COVERED TEXEL -- a soft key edge -- is geometry for that fraction of the samples, by a
+// number of its own drawn from the sample's hash, so the path's stream is untouched.
+//
+// THE PASS IS PLANAR, as a depth pass is: a wall square to the lens is one depth across the
+// frame. Along a ray off the axis the same wall is farther, by 1 / cos.
+// ===========================================================================
+MT_DEVICE float sceneGeometryAlong(const RenderRequest& req, float fx, float fy, Vec3 dir,
+                                   unsigned int h) {
+    const float* map = static_cast<const float*>(req.sceneBuffer);
+    if (map == nullptr || req.sceneWidth <= 0 || req.sceneHeight <= 0) return kNoSceneGeometry;
+    const float w  = static_cast<float>(req.view.widthPx);
+    const float hh = static_cast<float>(req.view.heightPx);
+    if (w <= 0.0f || hh <= 0.0f) return kNoSceneGeometry;
+
+    int tx = static_cast<int>(fx / w * static_cast<float>(req.sceneWidth));
+    int ty = static_cast<int>(fy / hh * static_cast<float>(req.sceneHeight));
+    tx = tx < 0 ? 0 : (tx >= req.sceneWidth ? req.sceneWidth - 1 : tx);
+    ty = ty < 0 ? 0 : (ty >= req.sceneHeight ? req.sceneHeight - 1 : ty);
+
+    const float* t = map + (static_cast<long long>(ty) * req.sceneWidth + tx) * 2;
+    const float metres   = t[0];
+    const float coverage = t[1];
+    if (!(metres > 0.0f) || !(coverage > 0.0f)) return kNoSceneGeometry;
+    if (coverage < 1.0f && unitFloat(h * 0x2c1b3c6du + 0x297a2d39u) >= coverage)
+        return kNoSceneGeometry;
+
+    const float* m = req.view.cameraToWorld;
+    const float along = -(dir.x * m[2] + dir.y * m[6] + dir.z * m[10]);
+    if (!(along > 1e-4f)) return kNoSceneGeometry;
+    return metres / along;
+}
+
 // One sample's camera ray: its direction and its seed. The origin is the same for every
 // sample of every pixel -- primaryRayOrigin -- so the callers lift it out of their loops.
+//
+// AND, SINCE BUILD 30, WHERE THE SCENE'S GEOMETRY STOPS IT: see sceneGeometryAlong.
 //
 // A FUNCTION OF ITS OWN SINCE BUILD 25, when the staged GPU render began tracing a launch's
 // samples one stage at a time instead of one pixel at a time. renderPixel calls it exactly
 // as it ran inline, so the CPU reference and both GPU paths trace the same rays.
 MT_DEVICE void pixelSampleRay(const RenderRequest& req, int px, int py, int s,
-                              Vec3& dir, unsigned int& seed) {
+                              Vec3& dir, unsigned int& seed, float& tGeo) {
     // THE SEED IS KEYED TO THE FRAME PIXEL, NOT THE BUFFER PIXEL, and the difference
     // is the whole determinism claim rather than a detail.
     //
@@ -991,32 +1049,79 @@ MT_DEVICE void pixelSampleRay(const RenderRequest& req, int px, int py, int s,
 
     dir  = primaryRayDirection(req.view, px, py, jx, jy, stride);
     seed = h;
+
+    // THE SAME JITTERED SPOT primaryRayDirection aimed at, in frame pixels -- which spreads a
+    // pixel's samples over its area and so antialiases the geometry's edge.
+    //
+    // AT A PIXEL STRIDE, THE BLOCK'S CENTRE INSTEAD. Draft has one sample per block, so a
+    // jittered spot made every block on an edge building or sky at random: MEASURED, a
+    // ragged line of notches along every tower. The centre makes the edge a clean staircase
+    // one block wide, which the scale-up then softens.
+    tGeo = kNoSceneGeometry;
+    if (req.sceneBuffer != nullptr) {
+        const float sf = static_cast<float>(stride);
+        const float fx = stride > 1
+            ? static_cast<float>(req.view.originX) + (static_cast<float>(px) + 0.5f) * sf
+            : static_cast<float>(px + req.view.originX) + 0.5f + jx;
+        const float fy = stride > 1
+            ? static_cast<float>(req.view.originY) + (static_cast<float>(py) + 0.5f) * sf
+            : static_cast<float>(py + req.view.originY) + 0.5f + jy;
+        tGeo = sceneGeometryAlong(req, fx, fy, dir, h);
+    }
+
+    // BACKGROUND: TRANSPARENT (build 31): what the depth pass leaves open is stopped at
+    // infinity, so the holdout takes the sky away and keeps the clouds. A depth pass's own
+    // geometry still stops the ray where it stands.
+    if (req.view.transparentSky && !(tGeo < kNoSceneGeometry)) tGeo = kSkyGeometry;
 }
 
 // The pixel's finish: this launch's samples, summed in sample order by the caller, into the
 // accumulator, and the linear mean into the destination. Shared with the staged GPU render
 // for the reason pixelSampleRay is.
-MT_DEVICE void finishPixel(const RenderRequest& req, int px, int py, Vec3 sum) {
+//
+// `seeSum` IS THE SAMPLES' SUMMED SCENE VISIBILITY (build 30), kept in the accumulator's fourth
+// float beside the radiance -- which was always there and always zero, so a frame without a
+// depth pass stores and writes exactly what it did. The pixel's alpha is one minus its mean.
+MT_DEVICE void finishPixel(const RenderRequest& req, int px, int py, Vec3 sum, float seeSum) {
     // PROGRESSIVE ACCUMULATION, weighted by the counts rather than by a running
     // lerp factor. A lerp with 1/n loses precision as n grows; a running sum
     // divided once does not, and the sum is what the denoiser wants anyway.
     Vec3 mean;
+    float meanSee = 0.0f;
     if (req.accumulator != nullptr) {
         const int idx = py * req.accumulatorPitchPx * 4 + px * 4;
         float* acc = req.accumulator + idx;
 
         if (req.samplesAlreadyDone <= 0) {
-            acc[0] = sum.x; acc[1] = sum.y; acc[2] = sum.z; acc[3] = 0.0f;
+            acc[0] = sum.x; acc[1] = sum.y; acc[2] = sum.z; acc[3] = seeSum;
         } else {
-            acc[0] += sum.x; acc[1] += sum.y; acc[2] += sum.z;
+            acc[0] += sum.x; acc[1] += sum.y; acc[2] += sum.z; acc[3] += seeSum;
         }
 
         const int total = req.samplesAlreadyDone + req.sampleCount;
         const float inv = total > 0 ? 1.0f / static_cast<float>(total) : 0.0f;
         mean = vec3(acc[0] * inv, acc[1] * inv, acc[2] * inv);
+        meanSee = acc[3] * inv;
     } else {
         const float inv = req.sampleCount > 0 ? 1.0f / static_cast<float>(req.sampleCount) : 0.0f;
         mean = sum * inv;
+        meanSee = seeSum * inv;
+    }
+
+    // THE ALPHA: opaque where the sky is, transparent where the geometry shows. Exactly 1
+    // without a depth pass, because every sample's see is exactly 0.
+    float alpha = 1.0f - meanSee;
+    alpha = alpha < 0.0f ? 0.0f : (alpha > 1.0f ? 1.0f : alpha);
+
+    // NEVER BELOW ZERO WITH A DEPTH PASS. A geometry pixel's colour is the air in front of it
+    // less the clear air the footage already has, and a cloud's shadow lying in that air makes
+    // it slightly negative -- light taken OFF the footage, which an "over" cannot express. Only
+    // the mean is clamped; the accumulator keeps the unbiased sum. THE SAME WITH A TRANSPARENT
+    // BACKGROUND (build 31), whose open sky is geometry at infinity.
+    if (req.sceneBuffer != nullptr || req.view.transparentSky) {
+        mean.x = mean.x > 0.0f ? mean.x : 0.0f;
+        mean.y = mean.y > 0.0f ? mean.y : 0.0f;
+        mean.z = mean.z > 0.0f ? mean.z : 0.0f;
     }
 
     // ===================================================================
@@ -1044,14 +1149,15 @@ MT_DEVICE void finishPixel(const RenderRequest& req, int px, int py, Vec3 sum) {
     // THE CHANNEL ORDER, ASKED AND NOT ASSUMED. See ChannelOrder in
     // RenderRequest.h for why this is a parameter.
     //
-    // ALPHA IS 1 AND THE COLOUR IS NOT PREMULTIPLIED BY ANYTHING, because a sky is
-    // opaque. AE's buffers are premultiplied, and at alpha 1 premultiplied and
-    // straight are the same numbers -- so this is correct rather than merely
-    // convenient. A generator with genuine transparency would have to multiply.
+    // ALPHA IS 1 WHERE THE SKY IS, because a sky is opaque, and at alpha 1 premultiplied and
+    // straight are the same numbers. WHERE A DEPTH PASS'S GEOMETRY SHOWS THROUGH (build 30) the
+    // colour is ALREADY PREMULTIPLIED: it is what the ray gathered in front of the geometry,
+    // which is light added over the footage, and that is what premultiplied colour is. So is
+    // every pixel of a TRANSPARENT BACKGROUND (build 31): the clouds, over nothing.
     if (req.dest.order == ChannelOrder::BGRA) {
-        pix[0] = mean.z; pix[1] = mean.y; pix[2] = mean.x; pix[3] = 1.0f;
+        pix[0] = mean.z; pix[1] = mean.y; pix[2] = mean.x; pix[3] = alpha;
     } else {
-        pix[0] = 1.0f; pix[1] = mean.x; pix[2] = mean.y; pix[3] = mean.z;
+        pix[0] = alpha; pix[1] = mean.x; pix[2] = mean.y; pix[3] = mean.z;
     }
 }
 
@@ -1066,7 +1172,8 @@ MT_DEVICE void finishPixel(const RenderRequest& req, int px, int py, Vec3 sum) {
 MT_RENDER void renderPixel(const RenderRequest& req, int px, int py) {
     if (px < 0 || py < 0 || px >= req.dest.widthPx || py >= req.dest.heightPx) return;
 
-    Vec3 sum = vec3(0.0f, 0.0f, 0.0f);
+    Vec3  sum    = vec3(0.0f, 0.0f, 0.0f);
+    float seeSum = 0.0f;
 
     // Loop-invariant, so it is lifted out by hand rather than left to the optimiser
     // to notice across a call boundary.
@@ -1075,17 +1182,20 @@ MT_RENDER void renderPixel(const RenderRequest& req, int px, int py) {
     for (int s = 0; s < req.sampleCount; ++s) {
         Vec3         dir;
         unsigned int h;
-        pixelSampleRay(req, px, py, s, dir, h);
+        float        tGeo;
+        pixelSampleRay(req, px, py, s, dir, h, tGeo);
 
         // THE ONE LINE. It used to be `skyRadiance(req.field, dir)` -- an analytic
         // sky and nothing in front of it, which is what Phase 1 was for. Everything
         // around it is unchanged: the frame-pixel seeding, the accumulator, the
         // output transform and the channel order are all still here, and all still
         // shared between the two backends.
-        sum = sum + mistytuneTrace(req, origin, dir, h);
+        float see = 0.0f;
+        sum = sum + mistytuneTrace(req, origin, dir, h, tGeo, see);
+        seeSum += see;
     }
 
-    finishPixel(req, px, py, sum);
+    finishPixel(req, px, py, sum, seeSum);
 }
 
 // ---------------------------------------------------------------------------
@@ -1127,8 +1237,21 @@ MT_DEVICE void transformPixel(const RenderRequest& req, int px, int py) {
 
     const Vec3 linear = bgra ? vec3(pix[2], pix[1], pix[0])
                              : vec3(pix[1], pix[2], pix[3]);
+    const float alpha = bgra ? pix[3] : pix[0];
 
-    const Vec3 out = applyOutputTransform(linear, req.view);
+    // A PARTLY TRANSPARENT PIXEL (build 30, a depth pass's geometry showing through) IS
+    // PREMULTIPLIED, and the transform is not linear: the colour is divided by alpha,
+    // transformed, and multiplied back, as OutputConvert.h says a generator with genuine
+    // coverage must. At alpha 1 -- every pixel without a depth pass -- this is the line it
+    // always was.
+    Vec3 out;
+    if (alpha >= 1.0f) {
+        out = applyOutputTransform(linear, req.view);
+    } else if (alpha > 1e-6f) {
+        out = applyOutputTransform(linear * (1.0f / alpha), req.view) * alpha;
+    } else {
+        out = vec3(0.0f, 0.0f, 0.0f);
+    }
 
     if (bgra) {
         pix[0] = out.z; pix[1] = out.y; pix[2] = out.x;

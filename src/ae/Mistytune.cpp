@@ -131,6 +131,15 @@ struct PreRenderData {
     float              lightLayerStrength = 1.0f;
     float              lightLayerDepth    = 0.0f;
     bool               lightLayerCheckedOut = false;
+
+    // SCENE INTEGRATION (build 30): the depth pass is checked out under kSceneCheckout and
+    // resolved to metres at smart render, where its pixels are. inputLeft/Top is where the
+    // input layer's buffer sits in the layer -- Composite lays the clouds over that layer, and
+    // its buffer need not start where ours does.
+    cloud::SceneDepthParams scene;
+    bool   sceneCheckedOut = false;
+    A_long inputLeft = 0;
+    A_long inputTop  = 0;
 };
 
 // ===========================================================================
@@ -152,6 +161,10 @@ constexpr A_long kReliefCheckout      = 7004;
 // checkoutLayerBounds.
 constexpr A_long kLightLayerProbeCheckout = 7005;
 constexpr A_long kLightLayerCheckout      = 7006;
+
+// THE DEPTH PASS (build 30), as the light layer is: a probe for its size, then its own bounds.
+constexpr A_long kSceneProbeCheckout = 7007;
+constexpr A_long kSceneCheckout      = 7008;
 
 // A SOURCE LARGER THAN THIS ON A SIDE IS CROPPED TO IT. The map is 256 texels across
 // whatever the source is, so a bigger checkout only costs AE a render nobody reads.
@@ -473,6 +486,13 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
     data->view.renderDistance = static_cast<float>(values.v[kMistytuneRenderDistance]);
     data->view.agxTonemap = values.v[kMistytuneAgxTonemap] > 0.5;
 
+    // THE CLOUDS ALONE (build 31): Background, and Show Sun, which toAtmosphere has already
+    // read into the field. Before the sampling hash, which carries the background.
+    data->view.transparentSky = transparentBackground(values);
+    diagLog("  background %s, sun disc %s",
+            data->view.transparentSky ? "transparent (clouds only)" : "sky",
+            data->field.atmosphere.showSunDisc ? "shown" : "hidden");
+
     // ---------------------------------------------------------------------
     // ASKED OF THE PROJECT, NOT ASSUMED OF IT -- AND IT USED TO BE A HARDCODED `true`.
     //
@@ -581,6 +601,9 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
     data->lightAnchor        = cloud::lightAnchor(data->field, data->view);
     data->lightLayerStrength = lightLayerStrengthOf(values);
     data->lightLayerDepth    = lightLayerDepthOf(values);
+
+    // SCENE INTEGRATION (build 30): how the depth pass reads, and what the clouds do with it.
+    data->scene = sceneDepthParamsOf(values);
     if (usesCompLights(values)) {
         readCompLights(in_data, data->view, compCamera, values.v[kMistytuneCameraTravel],
                        data->lightAnchor, compLightStrengthOf(values), data->view.encodeSrgb,
@@ -631,6 +654,9 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
                                     in_data->time_step, in_data->time_scale, &inResult);
     if (err) return err;
 
+    data->inputLeft = inResult.result_rect.left;
+    data->inputTop  = inResult.result_rect.top;
+
     UnionLRect(&inResult.result_rect,     &extra->output->result_rect);
     UnionLRect(&inResult.max_result_rect, &extra->output->max_result_rect);
 
@@ -674,6 +700,14 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
                                                          kLightLayerCheckout, "light layer");
     }
 
+    // THE DEPTH PASS (build 30), as it covers the frame -- and not at all when Depth Integration
+    // is Off, which would only cost AE a render nobody reads.
+    if (data->scene.mode != cloud::SceneMode::Off) {
+        data->sceneCheckedOut = checkoutLayerBounds(in_data, extra, kMistytuneSceneDepth,
+                                                    kSceneProbeCheckout, kSceneCheckout,
+                                                    "depth pass");
+    }
+
     // THE GPU OFFER, and a picture withdraws it. PF_Cmd_SMART_RENDER_GPU would hand the
     // source over as a GPU world, which the map builder cannot read; the host path reads it
     // and still renders on the card through renderCudaToHost. AE has never taken the offer
@@ -685,6 +719,12 @@ PF_Err preRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderExtra* ex
         diagLog("  pareidolia source present -- not offering GPU_RENDER_POSSIBLE.");
     } else if (data->lightLayerCheckedOut) {
         diagLog("  light layer present -- not offering GPU_RENDER_POSSIBLE.");
+    } else if (data->sceneCheckedOut) {
+        diagLog("  depth pass present -- not offering GPU_RENDER_POSSIBLE.");
+    } else if (data->view.transparentSky) {
+        // BUILD 31: the clouds alone want the alpha-guided denoise and its crop, which run on
+        // the host buffer. The host path still traces on the card.
+        diagLog("  transparent background -- not offering GPU_RENDER_POSSIBLE.");
     } else {
         extra->output->flags |= PF_RenderOutputFlag_GPU_RENDER_POSSIBLE;
     }
@@ -907,7 +947,8 @@ PF_Err smartRenderGpu(PF_InData* in_data, PF_OutData* out_data,
 PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
                        PF_PixelFormat format, PF_EffectWorld* output,
                        const PreRenderData& data, const cloud::ShapeMap* shape,
-                       const cloud::LightSet* lights) {
+                       const cloud::LightSet* lights, const cloud::SceneDepthMap* scene,
+                       const ConstImageView* plate) {
     (void)out_data;
 
     diagLog("SMART_RENDER_HOST: format=%d output=%dx%d rowbytes=%d samples=%d",
@@ -953,6 +994,17 @@ PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
         sim::Fingerprint fp;
         fp.add(key.field);
         fp.add(lights->hash);
+        key.field = fp.value();
+    }
+
+    // AND THE DEPTH PASS (build 30): it decides where every camera ray stops, and it is a
+    // picture rather than a parameter. Holdout or Composite is NOT in it -- the two trace the
+    // same samples, and the over happens below, after the transform, on every path.
+    req.sceneDepth = scene;
+    if (scene) {
+        sim::Fingerprint fp;
+        fp.add(key.field);
+        fp.add(scene->hash);
         key.field = fp.value();
     }
 
@@ -1351,6 +1403,24 @@ PF_Err smartRenderHost(PF_InData* in_data, PF_OutData* out_data,
             static_cast<double>(data.view.exposureEV),
             static_cast<int>(data.view.agxTonemap));
 
+    // =======================================================================
+    // COMPOSITE (build 30): the clouds, premultiplied and transformed, laid over the layer this
+    // effect is applied to -- AE's own normal blend, in the space AE would blend in, and after
+    // the transform, so the footage keeps its own pixels wherever nothing is in front of it.
+    // Holdout stops a line short of this and leaves the over to AE.
+    // =======================================================================
+    if (scene && plate && data.scene.mode == cloud::SceneMode::Composite) {
+        const double tComposite = diagSeconds();
+        const int dx = static_cast<int>(data.renderOriginX - data.inputLeft);
+        const int dy = static_cast<int>(data.renderOriginY - data.inputTop);
+        cloud::compositeOverPlate(static_cast<float*>(req.dest.data),
+                                  static_cast<int>(req.dest.widthPx),
+                                  static_cast<int>(req.dest.heightPx),
+                                  static_cast<int>(req.dest.pitchPx), *plate, dx, dy);
+        diagLog("  composite over this layer (%dx%d, offset %d,%d) in %.3f s",
+                plate->width, plate->height, dx, dy, diagSeconds() - tComposite);
+    }
+
     if (direct) return PF_Err_NONE;
 
     // ONE CALL, AND THE MATHS IS IN src/engine/OutputConvert.h.
@@ -1554,6 +1624,44 @@ PF_Err smartRender(PF_InData* in_data, PF_OutData* out_data,
     }
     const cloud::LightSet* lights = lightSet.empty() ? nullptr : &lightSet;
 
+    // ---------------------------------------------------------------------
+    // THE DEPTH PASS (build 30), resolved to metres and checked straight back in. UNREADABLE
+    // OR ALL SKY IS NO SCENE, never a failed frame: the clouds render whole.
+    // ---------------------------------------------------------------------
+    cloud::SceneDepthMap sceneMap;
+    bool haveScene = false;
+    if (data->sceneCheckedOut && !isGpu) {
+        PF_EffectWorld* depthPass = nullptr;
+        const double tScene = diagSeconds();
+        const PF_Err depthErr = extra->cb->checkout_layer_pixels(in_data->effect_ref,
+                                                                 kSceneCheckout, &depthPass);
+        PF_PixelFormat depthFormat = PF_PixelFormat_INVALID;
+        ConstImageView depthView;
+        if (!depthErr && depthPass && !pixelFormatOf(in_data, out_data, depthPass, depthFormat) &&
+            toSourceView(depthPass, depthFormat, depthView)) {
+            haveScene = cloud::buildSceneDepthMap(depthView, data->scene, sceneMap);
+            diagLog("  depth pass: %dx%d -> %dx%d map, %d texels of geometry, %.0f to %.0f m, "
+                    "%s, %s in %.3f s",
+                    static_cast<int>(depthPass->width), static_cast<int>(depthPass->height),
+                    sceneMap.width, sceneMap.height, sceneMap.geometryTexels,
+                    static_cast<double>(data->scene.nearestM),
+                    static_cast<double>(data->scene.farthestM),
+                    data->scene.encoding == cloud::DepthEncoding::DisparityNearBright
+                        ? "AI depth" : data->scene.encoding == cloud::DepthEncoding::LinearNearBright
+                        ? "linear, bright near" : "linear, bright far",
+                    data->scene.mode == cloud::SceneMode::Holdout ? "holdout" : "composite",
+                    diagSeconds() - tScene);
+            if (!haveScene) diagLog("  depth pass: all open sky -- no scene");
+        } else {
+            diagLog("  depth pass: pixels unreadable (err %d, format %d) -- no scene",
+                    static_cast<int>(depthErr), static_cast<int>(depthFormat));
+        }
+        extra->cb->checkin_layer_pixels(in_data->effect_ref, kSceneCheckout);
+    } else if (data->sceneCheckedOut) {
+        diagLog("  depth pass: on the GPU path -- not read, no scene");
+        extra->cb->checkin_layer_pixels(in_data->effect_ref, kSceneCheckout);
+    }
+
     err = extra->cb->checkout_output(in_data->effect_ref, &output);
     if (err || !output) diagLog("  checkout_output failed: err=%d", static_cast<int>(err));
 
@@ -1565,8 +1673,14 @@ PF_Err smartRender(PF_InData* in_data, PF_OutData* out_data,
             if (isGpu) {
                 err = smartRenderGpu(in_data, out_data, format, output, extra, *data, lights);
             } else {
+                // THE PLATE FOR COMPOSITE: this layer's own pixels, in the output's format.
+                ConstImageView plateView;
+                const bool havePlate = haveScene && input &&
+                                       toSourceView(input, format, plateView);
                 err = smartRenderHost(in_data, out_data, format, output, *data,
-                                      haveShape ? &shapeMap : nullptr, lights);
+                                      haveShape ? &shapeMap : nullptr, lights,
+                                      haveScene ? &sceneMap : nullptr,
+                                      havePlate ? &plateView : nullptr);
             }
         }
     }

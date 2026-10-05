@@ -108,6 +108,12 @@ struct AtmosphereParams {
     // is what produces crepuscular rays and what makes a cloud deck sit IN the
     // air rather than in front of it.
     bool cloudShadowsInMedium = true;
+
+    // WHETHER THE CAMERA SEES THE SUN'S DISC (build 31). Off hides the disc and nothing else:
+    // the sun still lights every cloud, and the sky's glow round it stays, because only a
+    // camera ray that reaches the sky without scattering was ever shown the disc -- see
+    // pathEnvironment in BounceLib.slang. The light on the cloud comes by next events.
+    bool showSunDisc = true;
 };
 
 // ---------------------------------------------------------------------------
@@ -584,6 +590,17 @@ struct ViewParams {
     // the preview and the exported file disagree. See ColorManagement.h.
     // ---------------------------------------------------------------------
     bool encodeSrgb = true;
+
+    // ---------------------------------------------------------------------
+    // BACKGROUND: TRANSPARENT (build 31) -- the clouds alone, for compositing over other
+    // layers. Every camera ray that no depth pass stops is stopped by geometry AT INFINITY,
+    // past the last of the air, and build 30's holdout does the rest: the clouds come out
+    // premultiplied with alpha 1 - T, the air in front of them kept and the sky behind them
+    // gone. The sun and the sky still light the clouds; they are only not drawn.
+    //
+    // A SAMPLING INPUT, so it is in samplingHash: it changes what every camera ray returns.
+    // ---------------------------------------------------------------------
+    bool transparentSky = false;
 };
 
 // ---------------------------------------------------------------------------
